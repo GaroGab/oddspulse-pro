@@ -325,8 +325,18 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
     }));
   };
 
+  const hasAnyWatchFilter = Boolean(
+    form.eventName.trim() ||
+      form.sport ||
+      form.marketType !== 'ALL' ||
+      form.selectionKey !== 'ALL' ||
+      form.bookmakerIds.length > 0 ||
+      form.exchangeIds.length > 0
+  );
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!hasAnyWatchFilter) return;
 
     const payload: RatingWatchInput = {
       enabled: form.enabled,
@@ -890,9 +900,24 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
             )}
           </div>
 
+          {!hasAnyWatchFilter && (
+            <p
+              data-testid="watch-no-filter-hint"
+              className="text-[11px] text-amber-300/90"
+            >
+              Seleziona almeno un filtro (evento, sport, bookmaker, exchange, mercato o esito) per attivare il tracking.
+            </p>
+          )}
+
           <button
             type="submit"
             data-testid="watch-submit-btn"
+            disabled={!hasAnyWatchFilter}
+            title={
+              !hasAnyWatchFilter
+                ? 'Seleziona almeno un filtro (evento, sport, bookmaker, exchange, mercato o esito)'
+                : undefined
+            }
             className="mt-auto flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-300 to-accent-400 px-4 py-2.5 text-xs font-extrabold text-slate-950 shadow-glow transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <BellPlus className="h-4 w-4" />
