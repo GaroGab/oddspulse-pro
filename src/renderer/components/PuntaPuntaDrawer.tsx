@@ -70,6 +70,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
     useState<NonNullable<PuntaPuntaCalcInput['anchorMode']>>(initialAnchorMode);
   const [refundAmount, setRefundAmount] = useState<number>(initialRefundAmount);
   const [refundRetention, setRefundRetention] = useState<number>(initialRefundRetention);
+  const [balanceBias, setBalanceBias] = useState<number>(0);
   const [legs, setLegs] = useState<EditableLeg[]>([]);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [savedBanner, setSavedBanner] = useState(false);
@@ -81,6 +82,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
     setAnchorMode(initialAnchorMode);
     setRefundAmount(initialRefundAmount);
     setRefundRetention(initialRefundRetention);
+    setBalanceBias(0);
     setLegs(
       row.legs.map((l) => ({
         selectionKey: l.selectionKey,
@@ -113,8 +115,9 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
       anchorMode,
       refundAmount: Math.max(0, refundAmount || 0),
       refundRetention: Math.max(0, Math.min(100, refundRetention || 0)),
+      balanceBias,
     });
-  }, [legs, mode, stake, anchorMode, refundAmount, refundRetention]);
+  }, [legs, mode, stake, anchorMode, refundAmount, refundRetention, balanceBias]);
 
   const isModifiedFromLive = useMemo(() => {
     if (!row || legs.length !== row.legs.length) return false;
@@ -614,6 +617,57 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
                   >
                     <AnimatedNumber value={calc.rating} formatter={(v) => formatPct(v)} />
                   </div>
+                </div>
+              </div>
+
+              {/* Underlay / Balanced / Overlay Interactive Slider */}
+              <div className="rounded-xl border border-slate-800/90 bg-slate-900/65 p-3">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-200">
+                    Bilanciamento (Underlay / Overlay)
+                  </span>
+                  <div className="flex gap-1">
+                    {[
+                      { label: 'Underlay', val: -1 },
+                      { label: 'Bilanciato', val: 0 },
+                      { label: 'Overlay', val: 1 },
+                    ].map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        data-testid={`pp-drawer-balance-${preset.label.toLowerCase()}`}
+                        onClick={() => setBalanceBias(preset.val)}
+                        className={`rounded-md px-2 py-0.5 text-[10px] font-semibold transition ${
+                          Math.abs(balanceBias - preset.val) < 0.05
+                            ? 'border border-brand-400/40 bg-brand-400/25 text-brand-200'
+                            : 'border border-slate-800 bg-slate-900 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <input
+                  type="range"
+                  min={-1}
+                  max={1}
+                  step={0.05}
+                  value={balanceBias}
+                  data-testid="pp-drawer-balance-slider"
+                  onChange={(e) => setBalanceBias(parseFloat(e.target.value))}
+                  className="pulse-slider w-full"
+                />
+                <div className="mt-1 flex justify-between text-[10px] text-slate-500">
+                  <span>Più profitto su Punta 1</span>
+                  <span className="font-mono text-brand-300">
+                    {balanceBias === 0
+                      ? 'Equilibrato'
+                      : balanceBias < 0
+                      ? `Underlay ${Math.round(Math.abs(balanceBias) * 100)}%`
+                      : `Overlay ${Math.round(balanceBias * 100)}%`}
+                  </span>
+                  <span>Più profitto su Coperture</span>
                 </div>
               </div>
 

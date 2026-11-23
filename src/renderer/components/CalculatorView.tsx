@@ -79,6 +79,80 @@ const RETENTION_PRESETS = [
   { label: '100% Cash', value: 100 },
 ];
 
+const BALANCE_PRESETS = [
+  { label: 'Underlay', val: -1 },
+  { label: 'Bilanciato', val: 0 },
+  { label: 'Overlay', val: 1 },
+] as const;
+
+interface BalanceBiasCardProps {
+  balanceBias: number;
+  onChange: (bias: number) => void;
+  subtitle: string;
+  underlayHint: string;
+  overlayHint: string;
+  testIdPrefix?: string;
+}
+
+const BalanceBiasCard: React.FC<BalanceBiasCardProps> = ({
+  balanceBias,
+  onChange,
+  subtitle,
+  underlayHint,
+  overlayHint,
+  testIdPrefix = 'balance',
+}) => (
+  <div className="glass-panel rounded-2xl p-3.5">
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <div>
+        <div className="text-xs font-bold text-white">
+          Bilanciamento (Underlay / Overlay)
+        </div>
+        <div className="text-[10px] text-slate-400">{subtitle}</div>
+      </div>
+      <div className="flex shrink-0 gap-1">
+        {BALANCE_PRESETS.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            data-testid={`${testIdPrefix}-preset-${preset.label.toLowerCase()}`}
+            onClick={() => onChange(preset.val)}
+            className={`rounded-lg border px-2.5 py-1 text-[10px] font-bold transition ${
+              Math.abs(balanceBias - preset.val) < 0.05
+                ? 'border-brand-400/50 bg-brand-400/20 text-brand-200'
+                : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-white'
+            }`}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+    </div>
+
+    <input
+      type="range"
+      min={-1}
+      max={1}
+      step={0.05}
+      value={balanceBias}
+      data-testid={`${testIdPrefix}-slider`}
+      onChange={(e) => onChange(parseFloat(e.target.value))}
+      className="pulse-slider mt-1 w-full"
+    />
+    <div className="mt-1.5 flex justify-between text-[10px] text-slate-500">
+      <span>{underlayHint}</span>
+      <span className="font-mono text-brand-300">
+        {balanceBias === 0
+          ? 'Bilanciato (0%)'
+          : balanceBias < 0
+          ? `Underlay ${Math.round(Math.abs(balanceBias) * 100)}%`
+          : `Overlay ${Math.round(balanceBias * 100)}%`}
+      </span>
+      <span>{overlayHint}</span>
+    </div>
+  </div>
+);
+
 export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
   ({ defaultStake, defaultCommission, soundEnabled, onSaveTrackedBet }) => {
     const initialCommPct = Math.round(defaultCommission * 1000) / 10;
@@ -135,8 +209,9 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           anchorMode: mode === 'normal' ? ppAnchorMode : 'leg0',
           refundAmount,
           refundRetention,
+          balanceBias,
         }),
-      [mode, stake, activePpOdds, ppAnchorMode, refundAmount, refundRetention]
+      [mode, stake, activePpOdds, ppAnchorMode, refundAmount, refundRetention, balanceBias]
     );
 
     const updatePpOdds = (idx: number, val: number) => {
@@ -168,6 +243,26 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
         }),
       }));
     }, [mode, stake, backOdds, layOdds, commissionPct, refundAmount, refundRetention]);
+
+    const ppStrategyRows = useMemo(() => {
+      const strategies = [
+        { id: 'underlay', label: 'Underlay', bias: -1 },
+        { id: 'balanced', label: 'Bilanciato', bias: 0 },
+        { id: 'overlay', label: 'Overlay', bias: 1 },
+      ];
+      return strategies.map((s) => ({
+        ...s,
+        res: calculatePuntaPunta({
+          mode,
+          stake,
+          odds: activePpOdds,
+          anchorMode: mode === 'normal' ? ppAnchorMode : 'leg0',
+          refundAmount,
+          refundRetention,
+          balanceBias: s.bias,
+        }),
+      }));
+    }, [mode, stake, activePpOdds, ppAnchorMode, refundAmount, refundRetention]);
 
     const effectiveRefundValue = useMemo(
       () => (mode === 'rf' ? (Math.max(0, refundAmount) * Math.max(0, refundRetention)) / 100 : 0),
@@ -727,59 +822,14 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
             </div>
 
             {/* Underlay / Balanced / Overlay Slider */}
-            <div className="glass-panel rounded-2xl p-3.5">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div>
-                  <div className="text-xs font-bold text-white">
-                    Bilanciamento (Underlay / Overlay)
-                  </div>
-                  <div className="text-[10px] text-slate-400">
-                    Sposta il profitto verso Bookmaker o Exchange modificando la bancata.
-                  </div>
-                </div>
-                <div className="flex shrink-0 gap-1">
-                  {[
-                    { label: 'Underlay', val: -1 },
-                    { label: 'Bilanciato', val: 0 },
-                    { label: 'Overlay', val: 1 },
-                  ].map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => setBalanceBias(preset.val)}
-                      className={`rounded-lg border px-2.5 py-1 text-[10px] font-bold transition ${
-                        Math.abs(balanceBias - preset.val) < 0.05
-                          ? 'border-brand-400/50 bg-brand-400/20 text-brand-200'
-                          : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <input
-                type="range"
-                min={-1}
-                max={1}
-                step={0.05}
-                value={balanceBias}
-                onChange={(e) => setBalanceBias(parseFloat(e.target.value))}
-                className="pulse-slider mt-1 w-full"
-              />
-              <div className="mt-1.5 flex justify-between text-[10px] text-slate-500">
-                <span>Underlay (Banca meno)</span>
-                <span className="font-mono text-brand-300">
-                  {balanceBias === 0
-                    ? 'Bilanciato (0%)'
-                    : balanceBias < 0
-                    ? `Underlay ${Math.round(Math.abs(balanceBias) * 100)}%`
-                    : `Overlay ${Math.round(balanceBias * 100)}%`}
-                </span>
-                <span>Overlay (Banca di più)</span>
-              </div>
-            </div>
+            <BalanceBiasCard
+              balanceBias={balanceBias}
+              onChange={setBalanceBias}
+              subtitle="Sposta il profitto verso Bookmaker o Exchange modificando la bancata."
+              underlayHint="Underlay (Banca meno)"
+              overlayHint="Overlay (Banca di più)"
+              testIdPrefix="pb-balance"
+            />
 
             {/* Optional Note for Tracker */}
             <div className="glass-panel rounded-2xl p-3">
@@ -1084,6 +1134,80 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                             }`}
                           >
                             {formatEuro(row.res.exchangeWinProfit, true)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Strategy Comparison Table (Click any row to apply!) */}
+            <div className="glass-panel overflow-hidden rounded-2xl p-3.5">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="flex items-center gap-1.5 text-xs font-bold text-white">
+                  <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
+                  Confronto Strategie (clicca per applicare)
+                </span>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800/80 text-[10px] uppercase tracking-wider text-slate-500">
+                      <th className="pb-2 pr-2">Strategia</th>
+                      <th className="pb-2 px-2 text-right">Punta 1</th>
+                      <th className="pb-2 px-2 text-right">Coperture</th>
+                      <th className="pb-2 px-2 text-right">Vince P1</th>
+                      <th className="pb-2 pl-2 text-right">Vince Cop.</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {ppStrategyRows.map((row) => {
+                      const isActive = Math.abs(balanceBias - row.bias) < 0.05;
+                      const p1Profit = row.res.profits[0] ?? 0;
+                      const hedgeProfit = row.res.profits[1] ?? 0;
+                      return (
+                        <tr
+                          key={row.id}
+                          data-testid={`pp-strategy-row-${row.id}`}
+                          onClick={() => setBalanceBias(row.bias)}
+                          className={`cursor-pointer transition-colors ${
+                            isActive
+                              ? 'bg-brand-500/15 text-white'
+                              : 'text-slate-300 hover:bg-slate-800/40'
+                          }`}
+                        >
+                          <td className="py-1.5 pr-2">
+                            <div className="flex items-center gap-1.5 font-semibold">
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                  isActive ? 'bg-brand-300' : 'bg-slate-600'
+                                }`}
+                              />
+                              {row.label}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-blue-200">
+                            {formatEuro(row.res.stakes[0] ?? 0)}
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-white">
+                            {formatEuro(row.res.hedgeTotal)}
+                          </td>
+                          <td
+                            className={`px-2 py-2 text-right font-mono font-bold ${
+                              p1Profit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {formatEuro(p1Profit, true)}
+                          </td>
+                          <td
+                            className={`pl-2 py-2 text-right font-mono font-bold ${
+                              hedgeProfit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {formatEuro(hedgeProfit, true)}
                           </td>
                         </tr>
                       );
@@ -1461,6 +1585,16 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
               </AnimatePresence>
             </div>
 
+            {/* Underlay / Balanced / Overlay Slider */}
+            <BalanceBiasCard
+              balanceBias={balanceBias}
+              onChange={setBalanceBias}
+              subtitle="Sposta il profitto verso Punta 1 o Coperture modificando gli importi di copertura."
+              underlayHint="Underlay (Copri meno)"
+              overlayHint="Overlay (Copri di più)"
+              testIdPrefix="pp-balance"
+            />
+
             {/* Optional Note for Tracker */}
             <div className="glass-panel rounded-2xl p-3">
               <label
@@ -1702,6 +1836,80 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                     </div>
                   );
                 })}
+              </div>
+            </div>
+
+            {/* Strategy Comparison Table (Click any row to apply!) */}
+            <div className="glass-panel overflow-hidden rounded-2xl p-3.5">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="flex items-center gap-1.5 text-xs font-bold text-white">
+                  <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
+                  Confronto Strategie (clicca per applicare)
+                </span>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800/80 text-[10px] uppercase tracking-wider text-slate-500">
+                      <th className="pb-2 pr-2">Strategia</th>
+                      <th className="pb-2 px-2 text-right">Punta 1</th>
+                      <th className="pb-2 px-2 text-right">Coperture</th>
+                      <th className="pb-2 px-2 text-right">Vince P1</th>
+                      <th className="pb-2 pl-2 text-right">Vince Cop.</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {ppStrategyRows.map((row) => {
+                      const isActive = Math.abs(balanceBias - row.bias) < 0.05;
+                      const p1Profit = row.res.profits[0] ?? 0;
+                      const hedgeProfit = row.res.profits[1] ?? 0;
+                      return (
+                        <tr
+                          key={row.id}
+                          data-testid={`pp-strategy-row-${row.id}`}
+                          onClick={() => setBalanceBias(row.bias)}
+                          className={`cursor-pointer transition-colors ${
+                            isActive
+                              ? 'bg-brand-500/15 text-white'
+                              : 'text-slate-300 hover:bg-slate-800/40'
+                          }`}
+                        >
+                          <td className="py-1.5 pr-2">
+                            <div className="flex items-center gap-1.5 font-semibold">
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                  isActive ? 'bg-brand-300' : 'bg-slate-600'
+                                }`}
+                              />
+                              {row.label}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-blue-200">
+                            {formatEuro(row.res.stakes[0] ?? 0)}
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-white">
+                            {formatEuro(row.res.hedgeTotal)}
+                          </td>
+                          <td
+                            className={`px-2 py-2 text-right font-mono font-bold ${
+                              p1Profit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {formatEuro(p1Profit, true)}
+                          </td>
+                          <td
+                            className={`pl-2 py-2 text-right font-mono font-bold ${
+                              hedgeProfit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {formatEuro(hedgeProfit, true)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
 

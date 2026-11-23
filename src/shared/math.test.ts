@@ -366,6 +366,122 @@ describe('Punta-Punta Standalone Calculator', () => {
     expect(res.profits[2]).toBeCloseTo(19.83, 1);
     expect(Math.abs(Math.max(...res.profits) - Math.min(...res.profits))).toBeLessThan(0.05);
   });
+
+  it('supports Underlay and Overlay balancing across Normal (qualifying & surebet, leg0 & total), SNR/SR, and RF', () => {
+    // 1. Normal qualifying bet (leg0)
+    const qualUnder = calculatePuntaPunta({
+      mode: 'normal',
+      stake: 100,
+      odds: [2.0, 1.9],
+      anchorMode: 'leg0',
+      balanceBias: -1,
+    });
+    expect(qualUnder.hedgeTotal).toBeCloseTo(100, 2);
+    expect(qualUnder.profits[0]).toBeCloseTo(0, 1);
+    expect(qualUnder.profits[1]).toBeLessThan(0);
+
+    const qualOver = calculatePuntaPunta({
+      mode: 'normal',
+      stake: 100,
+      odds: [2.0, 1.9],
+      anchorMode: 'leg0',
+      balanceBias: 1,
+    });
+    expect(qualOver.profits[1]).toBeCloseTo(0, 1);
+    expect(qualOver.profits[0]).toBeLessThan(0);
+    expect(qualUnder.underlayHedgeTotal).toBeLessThan(qualUnder.balancedHedgeTotal);
+    expect(qualOver.overlayHedgeTotal).toBeGreaterThan(qualOver.balancedHedgeTotal);
+
+    // 2. Normal surebet (leg0)
+    const sureUnder = calculatePuntaPunta({
+      mode: 'normal',
+      stake: 100,
+      odds: [2.2, 2.0],
+      anchorMode: 'leg0',
+      balanceBias: -1,
+    });
+    expect(sureUnder.profits[0]).toBeCloseTo(20, 1);
+    expect(sureUnder.profits[1]).toBeCloseTo(0, 1);
+
+    const sureOver = calculatePuntaPunta({
+      mode: 'normal',
+      stake: 100,
+      odds: [2.2, 2.0],
+      anchorMode: 'leg0',
+      balanceBias: 1,
+    });
+    expect(sureOver.profits[0]).toBeCloseTo(0, 1);
+    expect(sureOver.profits[1]).toBeCloseTo(20, 1);
+
+    // 3. Normal 3-way with total budget anchor keeps totalCashOutlay === 100
+    const totUnder = calculatePuntaPunta({
+      mode: 'normal',
+      stake: 100,
+      odds: [2.4, 2.8, 3.8],
+      anchorMode: 'total',
+      balanceBias: -1,
+    });
+    expect(totUnder.totalCashOutlay).toBeCloseTo(100, 1);
+    expect(totUnder.profits[0]).toBeCloseTo(0, 1);
+    expect(totUnder.profits[1]).toBeCloseTo(totUnder.profits[2], 1);
+    expect(totUnder.profits[1]).toBeLessThan(0);
+
+    const totOver = calculatePuntaPunta({
+      mode: 'normal',
+      stake: 100,
+      odds: [2.4, 2.8, 3.8],
+      anchorMode: 'total',
+      balanceBias: 1,
+    });
+    expect(totOver.totalCashOutlay).toBeCloseTo(100, 1);
+    expect(totOver.profits[0]).toBeLessThan(0);
+    expect(totOver.profits[1]).toBeCloseTo(0, 1);
+    expect(totOver.profits[2]).toBeCloseTo(0, 1);
+
+    // 4. SNR uses ±15% hedge adjustment
+    const snrUnder = calculatePuntaPunta({
+      mode: 'snr',
+      stake: 100,
+      odds: [5.0, 1.25],
+      balanceBias: -1,
+    });
+    expect(snrUnder.hedgeTotal).toBeCloseTo(320 * 0.85, 2);
+    expect(snrUnder.profits[0]).toBeGreaterThan(snrUnder.profits[1]);
+
+    const snrOver = calculatePuntaPunta({
+      mode: 'snr',
+      stake: 100,
+      odds: [5.0, 1.25],
+      balanceBias: 1,
+    });
+    expect(snrOver.hedgeTotal).toBeCloseTo(320 * 1.15, 2);
+    expect(snrOver.profits[1]).toBeGreaterThan(snrOver.profits[0]);
+
+    // 5. RF 3-way Underlay & Overlay
+    const rfUnder = calculatePuntaPunta({
+      mode: 'rf',
+      stake: 50,
+      odds: [3.0, 3.2, 2.6],
+      refundAmount: 50,
+      refundRetention: 70,
+      balanceBias: -1,
+    });
+    expect(rfUnder.profits[0]).toBeGreaterThan(20);
+    expect(rfUnder.profits[1]).toBeCloseTo(0, 1);
+    expect(rfUnder.profits[2]).toBeCloseTo(0, 1);
+
+    const rfOver = calculatePuntaPunta({
+      mode: 'rf',
+      stake: 50,
+      odds: [3.0, 3.2, 2.6],
+      refundAmount: 50,
+      refundRetention: 70,
+      balanceBias: 1,
+    });
+    expect(rfOver.profits[0]).toBeCloseTo(0, 1);
+    expect(rfOver.profits[1]).toBeGreaterThan(20);
+    expect(rfOver.profits[2]).toBeGreaterThan(20);
+  });
 });
 
 describe('Fuzzy Match Linker', () => {

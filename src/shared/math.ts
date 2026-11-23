@@ -578,6 +578,8 @@ export interface PuntaPuntaCalcInput {
   anchorMode?: 'leg0' | 'total'; // 'total' only applies when mode === 'normal'
   refundAmount?: number; // RF mode: bonus refunded if leg 0 loses (any leg i>=1 wins)
   refundRetention?: number; // RF mode: 0..100%
+  /** -1 = full underlay (favor leg 0), 0 = balanced, +1 = full overlay (favor hedge legs) */
+  balanceBias?: number;
 }
 
 export interface PuntaPuntaCalcResult {
@@ -585,6 +587,9 @@ export interface PuntaPuntaCalcResult {
   returns: number[]; // gross payout on each outcome (excludes refund)
   profits: number[]; // net real-cash profit on each outcome (includes effectiveRefund on i>=1 for RF)
   hedgeTotal: number; // sum(stakes[1..])
+  balancedHedgeTotal: number; // sum(stakes[1..]) at balanceBias = 0
+  underlayHedgeTotal: number; // sum(stakes[1..]) at balanceBias = -1
+  overlayHedgeTotal: number; // sum(stakes[1..]) at balanceBias = +1
   totalCashOutlay: number; // stakes[0] + hedgeTotal for normal/rf; hedgeTotal for snr/sr
   effectiveRefund: number; // refundAmount * (refundRetention/100) for rf, else 0
   guaranteedProfit: number; // average net profit across outcomes
@@ -594,7 +599,8 @@ export interface PuntaPuntaCalcResult {
 
 /**
  * Standalone Punta-Punta (Bookmaker vs Bookmaker / Dutching) calculator across
- * Normale, Freebet SNR, Bonus SR, and Rimborso RF for 2..4 outcomes.
+ * Normale, Freebet SNR, Bonus SR, and Rimborso RF for 2..4 outcomes,
+ * with optional Underlay (-1) / Balanced (0) / Overlay (+1) shift.
  */
 export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcResult {
   const {
@@ -604,6 +610,7 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
     anchorMode = 'leg0',
     refundAmount = 0,
     refundRetention = 70,
+    balanceBias = 0,
   } = input;
 
   const k = odds.length;
@@ -613,6 +620,9 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
       returns: odds.map(() => 0),
       profits: odds.map(() => 0),
       hedgeTotal: 0,
+      balancedHedgeTotal: 0,
+      underlayHedgeTotal: 0,
+      overlayHedgeTotal: 0,
       totalCashOutlay: 0,
       effectiveRefund: 0,
       guaranteedProfit: 0,
@@ -622,13 +632,68 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
   }
 
   const invSum = odds.reduce((acc, o) => acc + 1 / o, 0);
+  const hedgeInvSum = odds.slice(1).reduce((acc, o) => acc + 1 / o, 0);
+  const clampedBias = Math.max(-1, Math.min(1, balanceBias));
+
+  const interpolateHedge = (balanced: number, underlay: number, overlay: number): number => {
+    if (clampedBias < 0) {
+      return Math.max(0, balanced + (balanced - underlay) * clampedBias);
+    }
+    if (clampedBias > 0) {
+      return Math.max(0, balanced + (overlay - balanced) * clampedBias);
+    }
+    return Math.max(0, balanced);
+  };
 
   if (mode === 'normal') {
     const useTotalAnchor = anchorMode === 'total';
-    const targetReturn = useTotalAnchor ? stake / invSum : stake * odds[0];
-    const stakes = odds.map((o, i) =>
-      i === 0 && !useTotalAnchor ? round2(stake) : round2(targetReturn / o)
-    );
+    const targetReturnBal = useTotalAnchor ? stake / invSum : stake * odds[0];
+    const balancedHedge = targetReturnBal * hedgeInvSum;
+
+    let underlayHedge = balancedHedge;
+    let overlayHedge = balancedHedge;
+
+    if (useTotalAnchor) {
+      const zeroP0Hedge = stake * (1 - 1 / odds[0]);
+      if (hedgeInvSum < 1) {
+        const zeroHedge = stake * hedgeInvSum;
+        underlayHedge = Math.max(0, Math.min(balancedHedge, zeroP0Hedge, zeroHedge));
+        overlayHedge = Math.min(stake, Math.max(balancedHedge, zeroP0Hedge, zeroHedge));
+      } else {
+        underlayHedge = Math.max(0, Math.min(balancedHedge, zeroP0Hedge));
+        overlayHedge = Math.min(stake, balancedHedge * 1.15);
+      }
+    } else {
+      const zeroP0Hedge = stake * (odds[0] - 1);
+      if (hedgeInvSum < 1) {
+        const zeroHedge = stake / (1 / hedgeInvSum - 1);
+        underlayHedge = Math.max(0, Math.min(balancedHedge, zeroP0Hedge, zeroHedge));
+        overlayHedge = Math.max(balancedHedge, zeroP0Hedge, zeroHedge);
+      } else {
+        underlayHedge = Math.max(0, Math.min(balancedHedge, zeroP0Hedge));
+        overlayHedge = balancedHedge * 1.15;
+      }
+    }
+
+    const hedgeTargetRaw = interpolateHedge(balancedHedge, underlayHedge, overlayHedge);
+    const hedgeTarget = useTotalAnchor ? Math.min(stake, hedgeTargetRaw) : hedgeTargetRaw;
+
+    let stakes: number[];
+    if (Math.abs(clampedBias) < 1e-9) {
+      stakes = odds.map((o, i) =>
+        i === 0 && !useTotalAnchor ? round2(stake) : round2(targetReturnBal / o)
+      );
+    } else if (useTotalAnchor) {
+      const targetHedgeReturn = hedgeTarget / hedgeInvSum;
+      const hedgeStakes = odds.slice(1).map((o) => round2(targetHedgeReturn / o));
+      const actualHedgeSum = round2(hedgeStakes.reduce((a, b) => a + b, 0));
+      const leg0Stake = round2(Math.max(0, stake - actualHedgeSum));
+      stakes = [leg0Stake, ...hedgeStakes];
+    } else {
+      const targetHedgeReturn = hedgeTarget / hedgeInvSum;
+      stakes = odds.map((o, i) => (i === 0 ? round2(stake) : round2(targetHedgeReturn / o)));
+    }
+
     const hedgeTotal = round2(stakes.slice(1).reduce((a, b) => a + b, 0));
     const totalCashOutlay = round2(stakes.reduce((a, b) => a + b, 0));
     const returns = odds.map((o, i) => round2(stakes[i] * o));
@@ -639,6 +704,9 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
       returns,
       profits,
       hedgeTotal,
+      balancedHedgeTotal: round2(balancedHedge),
+      underlayHedgeTotal: round2(underlayHedge),
+      overlayHedgeTotal: round2(overlayHedge),
       totalCashOutlay,
       effectiveRefund: 0,
       guaranteedProfit,
@@ -648,8 +716,16 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
   }
 
   if (mode === 'snr' || mode === 'sr') {
-    const targetReturn = mode === 'snr' ? stake * (odds[0] - 1) : stake * odds[0];
-    const stakes = odds.map((o, i) => (i === 0 ? round2(stake) : round2(targetReturn / o)));
+    const targetReturnBal = mode === 'snr' ? stake * (odds[0] - 1) : stake * odds[0];
+    const balancedHedge = targetReturnBal * hedgeInvSum;
+    const underlayHedge = balancedHedge * 0.85;
+    const overlayHedge = balancedHedge * 1.15;
+    const hedgeTarget = interpolateHedge(balancedHedge, underlayHedge, overlayHedge);
+    const targetHedgeReturn = hedgeTarget / hedgeInvSum;
+
+    const stakes = odds.map((o, i) =>
+      i === 0 ? round2(stake) : round2(targetHedgeReturn / o)
+    );
     const hedgeTotal = round2(stakes.slice(1).reduce((a, b) => a + b, 0));
     const returns = odds.map((o, i) =>
       i === 0 && mode === 'snr' ? round2(stakes[0] * (o - 1)) : round2(stakes[i] * o)
@@ -661,6 +737,9 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
       returns,
       profits,
       hedgeTotal,
+      balancedHedgeTotal: round2(balancedHedge),
+      underlayHedgeTotal: round2(underlayHedge),
+      overlayHedgeTotal: round2(overlayHedge),
       totalCashOutlay: hedgeTotal,
       effectiveRefund: 0,
       guaranteedProfit,
@@ -671,8 +750,27 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
 
   // Rimborso RF: Leg 0 backed with real cash; if any hedge leg wins (leg 0 loses), refund triggers
   const effectiveRefund = Math.max(0, refundAmount) * (Math.max(0, refundRetention) / 100);
-  const targetHedgeReturn = Math.max(0, stake * odds[0] - effectiveRefund);
-  const stakes = odds.map((o, i) => (i === 0 ? round2(stake) : round2(targetHedgeReturn / o)));
+  const targetHedgeReturnBal = Math.max(0, stake * odds[0] - effectiveRefund);
+  const balancedHedge = targetHedgeReturnBal * hedgeInvSum;
+  const zeroP0Hedge = stake * (odds[0] - 1);
+
+  let underlayHedge = balancedHedge;
+  let overlayHedge = balancedHedge;
+  if (hedgeInvSum < 1) {
+    const zeroHedge = Math.max(0, (stake - effectiveRefund) / (1 / hedgeInvSum - 1));
+    underlayHedge = Math.max(0, Math.min(balancedHedge, zeroP0Hedge, zeroHedge));
+    overlayHedge = Math.max(balancedHedge, zeroP0Hedge, zeroHedge);
+  } else {
+    underlayHedge = Math.max(0, Math.min(balancedHedge, zeroP0Hedge));
+    overlayHedge = balancedHedge * 1.15;
+  }
+
+  const hedgeTarget = interpolateHedge(balancedHedge, underlayHedge, overlayHedge);
+  const targetHedgeReturn = hedgeTarget / hedgeInvSum;
+
+  const stakes = odds.map((o, i) =>
+    i === 0 ? round2(stake) : round2(targetHedgeReturn / o)
+  );
   const hedgeTotal = round2(stakes.slice(1).reduce((a, b) => a + b, 0));
   const totalCashOutlay = round2(stakes[0] + hedgeTotal);
   const returns = odds.map((o, i) => round2(stakes[i] * o));
@@ -687,6 +785,9 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
     returns,
     profits,
     hedgeTotal,
+    balancedHedgeTotal: round2(balancedHedge),
+    underlayHedgeTotal: round2(underlayHedge),
+    overlayHedgeTotal: round2(overlayHedge),
     totalCashOutlay,
     effectiveRefund: round2(effectiveRefund),
     guaranteedProfit,
