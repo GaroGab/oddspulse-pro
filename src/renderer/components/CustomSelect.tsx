@@ -275,9 +275,53 @@ interface CustomMultiSelectProps<T extends string = string> {
   'data-testid'?: string;
 }
 
+let sharedMeasureCtx: CanvasRenderingContext2D | null = null;
+
+function measureTextWidthPx(text: string, font: string): number {
+  if (typeof document === 'undefined') return text.length * 7;
+  if (!sharedMeasureCtx) {
+    sharedMeasureCtx = document.createElement('canvas').getContext('2d');
+  }
+  if (!sharedMeasureCtx) return text.length * 7;
+  sharedMeasureCtx.font = font;
+  return sharedMeasureCtx.measureText(text).width;
+}
+
+function computeFittingLabelsCount(labels: string[], containerEl: HTMLElement | null): number {
+  const total = labels.length;
+  if (total <= 1) return total;
+  const availW = containerEl?.clientWidth ?? 0;
+  if (availW <= 0) return 1;
+
+  const cs = window.getComputedStyle(containerEl!);
+  const fontSize = cs.fontSize || '12px';
+  const fontFamily = cs.fontFamily || 'sans-serif';
+  const labelFont = `600 ${fontSize} ${fontFamily}`;
+  const badgeFont = `700 ${fontSize} ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+
+  const fullText = labels.join(', ');
+  if (measureTextWidthPx(fullText, labelFont) <= availW - 4) {
+    return total;
+  }
+
+  for (let k = total - 1; k >= 1; k--) {
+    const prefix = labels.slice(0, k).join(', ');
+    const suffix = `+${total - k}`;
+    const needed =
+      measureTextWidthPx(prefix, labelFont) + 6 + measureTextWidthPx(suffix, badgeFont);
+    if (needed <= availW - 4) {
+      return k;
+    }
+  }
+
+  return 1;
+}
+
 /**
  * Multi-select portal dropdown with checkboxes, hints, quick "Tutte" / "Azzera" / "Fatto"
  * actions, matching SourceMultiSelect's exact layout and keyboard/outside-click behavior.
+ * Dynamically fits as many selected item labels as possible in the trigger before the clear ('x')
+ * button, truncating only overflowing ones with an incremental '+N' counter.
  */
 export function CustomMultiSelect<T extends string = string>({
   values,
@@ -290,6 +334,8 @@ export function CustomMultiSelect<T extends string = string>({
   'data-testid': dataTestId,
 }: CustomMultiSelectProps<T>) {
   const { open, setOpen, coords, triggerRef, menuRef } = useDropdownPortal(minMenuWidth, 320);
+  const textWrapRef = useRef<HTMLSpanElement>(null);
+  const [containerWidth, setContainerWidth] = useState<number>(0);
 
   const selectedSet = useMemo(() => new Set<T>(values), [values]);
   const selectedOptions = useMemo(
@@ -301,6 +347,37 @@ export function CustomMultiSelect<T extends string = string>({
     if (selectedOptions.length > 0 || values.length === 0) return selectedOptions;
     return values.map((v) => ({ value: v, label: String(v) }));
   }, [selectedOptions, values]);
+
+  const selectedLabels = useMemo(
+    () => effectiveSelected.map((o) => o.label),
+    [effectiveSelected]
+  );
+
+  useLayoutEffect(() => {
+    const el = textWrapRef.current;
+    if (!el) return;
+    const updateWidth = () => {
+      const w = el.clientWidth;
+      setContainerWidth((prev) => (prev === w ? prev : w));
+    };
+    updateWidth();
+
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(updateWidth);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [selectedLabels.length]);
+
+  const visibleCount = useMemo(() => {
+    void containerWidth;
+    return computeFittingLabelsCount(selectedLabels, textWrapRef.current);
+  }, [selectedLabels, containerWidth]);
+
+  const visibleText = useMemo(
+    () => selectedLabels.slice(0, Math.max(1, visibleCount)).join(', '),
+    [selectedLabels, visibleCount]
+  );
+  const hiddenCount = Math.max(0, selectedLabels.length - Math.max(1, visibleCount));
 
   const valuesRef = useRef<T[]>(values);
   valuesRef.current = values;
@@ -330,6 +407,7 @@ export function CustomMultiSelect<T extends string = string>({
           disabled={disabled}
           data-testid={dataTestId}
           aria-expanded={open}
+          title={selectedLabels.length > 0 ? selectedLabels.join(', ') : allLabel}
           onClick={() => setOpen((v) => !v)}
           className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left focus:outline-none disabled:cursor-not-allowed"
         >
@@ -338,18 +416,26 @@ export function CustomMultiSelect<T extends string = string>({
               effectiveSelected.length > 0 ? 'text-brand-300' : 'text-slate-400'
             }`}
           />
-          {effectiveSelected.length === 0 ? (
-            <span className="truncate text-slate-200">{allLabel}</span>
-          ) : effectiveSelected.length === 1 ? (
-            <span className="truncate font-semibold text-white">
-              {effectiveSelected[0].label}
-            </span>
-          ) : (
-            <span className="truncate font-semibold text-white">
-              {effectiveSelected[0].label}{' '}
-              <span className="font-mono text-brand-300">+{effectiveSelected.length - 1}</span>
-            </span>
-          )}
+          <span
+            ref={textWrapRef}
+            className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden"
+          >
+            {effectiveSelected.length === 0 ? (
+              <span className="truncate text-slate-200">{allLabel}</span>
+            ) : (
+              <>
+                <span className="truncate font-semibold text-white">{visibleText}</span>
+                {hiddenCount > 0 && (
+                  <span
+                    data-testid={dataTestId ? `${dataTestId}-overflow-count` : undefined}
+                    className="shrink-0 font-mono font-bold text-brand-300"
+                  >
+                    +{hiddenCount}
+                  </span>
+                )}
+              </>
+            )}
+          </span>
         </button>
 
         <div className="flex shrink-0 items-center gap-1 pr-2">

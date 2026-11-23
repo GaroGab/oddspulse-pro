@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowDown,
   ArrowUp,
@@ -12,13 +12,16 @@ import {
   Layers,
   Lock,
   Radar,
+  RotateCcw,
   Search,
   Sparkles,
   TrendingUp,
+  X,
 } from 'lucide-react';
 import { calculateSingleMatch } from '../../shared/math';
 import {
   buildCompetitionOptions,
+  formatFittingListSummary,
   inferSportFromLeague,
   matchesWatchLeagues,
 } from '../../shared/ratingWatch';
@@ -310,6 +313,124 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     setSearch('');
   };
 
+  const activeFilterChips = useMemo(() => {
+    const chips: Array<{ id: string; label: string; onClear: () => void }> = [];
+
+    if (leagues.length > 0) {
+      chips.push({
+        id: 'leagues',
+        label: formatFittingListSummary(leagues, 26),
+        onClear: () => setLeagues([]),
+      });
+    }
+
+    if (market !== 'ALL') {
+      const marketShort: Record<MarketType, string> = {
+        '1X2': '1X2',
+        OVER_UNDER_25: 'U/O 2.5',
+        BTTS: 'Goal/NoGoal',
+        H2H: 'Testa a Testa',
+      };
+      chips.push({
+        id: 'market',
+        label: marketShort[market] ?? market,
+        onClear: () => setMarket('ALL'),
+      });
+    }
+
+    if (bookmakers.length > 0) {
+      const firstName =
+        bookmakerOptions.find((b) => b.id === bookmakers[0])?.name ?? bookmakers[0];
+      chips.push({
+        id: 'bookmakers',
+        label:
+          bookmakers.length === 1
+            ? firstName
+            : `${firstName} +${bookmakers.length - 1}`,
+        onClear: () => setBookmakers([]),
+      });
+    }
+
+    if (exchanges.length > 0) {
+      const firstName =
+        exchangeOptions.find((e) => e.id === exchanges[0])?.name ?? exchanges[0];
+      chips.push({
+        id: 'exchanges',
+        label:
+          exchanges.length === 1
+            ? firstName
+            : `${firstName} +${exchanges.length - 1}`,
+        onClear: () => setExchanges([]),
+      });
+    }
+
+    if (Math.abs(minBack - 1.15) > 0.005 || Math.abs(maxBack - 15) > 0.005) {
+      chips.push({
+        id: 'odds',
+        label: `Q ${minBack}–${maxBack}`,
+        onClear: () => {
+          setMinBack(1.15);
+          setMaxBack(15);
+        },
+      });
+    }
+
+    if (minRating > 0) {
+      chips.push({
+        id: 'rating',
+        label: `Rating ≥${minRating}%`,
+        onClear: () => setMinRating(0),
+      });
+    }
+
+    if (Math.abs(minLiquidity - 5) > 0.005) {
+      chips.push({
+        id: 'liquidity',
+        label: `Liq ≥€${minLiquidity}`,
+        onClear: () => setMinLiquidity(5),
+      });
+    }
+
+    if (dateRange.mode !== 'all') {
+      const fmtDay = (iso: string | null) =>
+        iso ? iso.slice(5).split('-').reverse().join('/') : '';
+      const dateLabel =
+        dateRange.mode === 'hours'
+          ? `Entro ${dateRange.hours}h`
+          : dateRange.startDate && dateRange.endDate && dateRange.startDate === dateRange.endDate
+          ? fmtDay(dateRange.startDate)
+          : `${fmtDay(dateRange.startDate)}–${fmtDay(dateRange.endDate)}`;
+      chips.push({
+        id: 'date',
+        label: dateLabel,
+        onClear: () => setDateRange(EMPTY_DATE_RANGE),
+      });
+    }
+
+    if (onlySurebets) {
+      chips.push({
+        id: 'surebet',
+        label: 'Solo Surebet',
+        onClear: () => setOnlySurebets(false),
+      });
+    }
+
+    return chips;
+  }, [
+    leagues,
+    market,
+    bookmakers,
+    bookmakerOptions,
+    exchanges,
+    exchangeOptions,
+    minBack,
+    maxBack,
+    minRating,
+    minLiquidity,
+    dateRange,
+    onlySurebets,
+  ]);
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Collapsible KPI Hero Row */}
@@ -525,26 +646,97 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
             </button>
             <button
               type="button"
+              data-testid="om-toggle-filters"
               onClick={() => setShowFilters((v) => !v)}
               className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
                 showFilters
                   ? 'border-brand-400/40 bg-brand-500/10 text-brand-200'
+                  : activeFilterChips.length > 0
+                  ? 'border-brand-400/50 bg-brand-500/15 text-brand-100 shadow-[0_0_14px_-4px_rgb(var(--brand-400)/0.45)] hover:border-brand-400/70 hover:bg-brand-500/20'
                   : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-white'
               }`}
             >
-              <Filter className="h-3.5 w-3.5" />
-              Filtri
+              <Filter
+                className={`h-3.5 w-3.5 ${
+                  !showFilters && activeFilterChips.length > 0 ? 'text-brand-300' : ''
+                }`}
+              />
+              <span>Filtri</span>
+              {activeFilterChips.length > 0 && (
+                <span
+                  data-testid="om-filters-active-count"
+                  className="ml-0.5 rounded-full bg-brand-400/25 px-1.5 py-0.2 font-mono text-[10px] font-extrabold text-brand-200"
+                >
+                  {activeFilterChips.length}
+                </span>
+              )}
             </button>
           </div>
         </div>
 
-        {/* Advanced Filter Row */}
-        {showFilters && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            className="mt-3 space-y-2.5 border-t border-slate-800/80 pt-3"
-          >
+        {/* Compact Active Filters Strip when banner is closed */}
+        <AnimatePresence initial={false}>
+          {!showFilters && activeFilterChips.length > 0 && (
+            <motion.div
+              key="om-collapsed-filters-bar"
+              data-testid="om-collapsed-filters-bar"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/70 pt-2">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                    Filtri attivi:
+                  </span>
+                  {activeFilterChips.map((chip) => (
+                    <span
+                      key={chip.id}
+                      data-testid={`om-filter-chip-${chip.id}`}
+                      className="inline-flex items-center gap-1 rounded-md border border-brand-400/30 bg-brand-500/10 px-2 py-0.5 text-[10px] font-semibold text-brand-200"
+                    >
+                      <span className="max-w-[220px] truncate">{chip.label}</span>
+                      <button
+                        type="button"
+                        onClick={chip.onClear}
+                        aria-label={`Rimuovi filtro ${chip.label}`}
+                        className="rounded-full p-0.5 text-brand-300/75 transition hover:bg-brand-400/20 hover:text-white"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="om-collapsed-reset-filters"
+                  onClick={resetAllFilters}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900/90 px-2.5 py-0.5 text-[10px] font-semibold text-slate-300 transition hover:border-rose-500/40 hover:bg-rose-500/15 hover:text-rose-200"
+                >
+                  <RotateCcw className="h-2.5 w-2.5" />
+                  Reset Filtri
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Advanced Filter Row (smooth slide-down and slide-up) */}
+        <AnimatePresence initial={false}>
+          {showFilters && (
+            <motion.div
+              key="om-filters-drawer"
+              data-testid="om-filters-drawer"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="mt-3 space-y-2.5 border-t border-slate-800/80 pt-3">
             {/* Quick Matched Betting Presets */}
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
@@ -723,8 +915,10 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
               />
             </div>
             </div>
-          </motion.div>
-        )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Main Live Odds Table */}

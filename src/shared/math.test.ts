@@ -17,6 +17,7 @@ import { EMPTY_DATE_RANGE } from './dateRange';
 import {
   computeAdaptiveWatchPlan,
   evaluateRatingWatch,
+  formatFittingListSummary,
   isWatchExpired,
   matchesWatchLeague,
   matchesWatchLeagues,
@@ -1105,6 +1106,14 @@ describe('Rating Watch Engine & Adaptive Interval', () => {
 
     const multiPlan = computeAdaptiveWatchPlan([multiLeagueWatch], DEFAULT_SETTINGS, nowMs);
     expect(multiPlan.sports).toEqual(['football', 'tennis']);
+
+    expect(formatFittingListSummary(['Serie A', 'Serie B'], 26)).toBe('Serie A, Serie B');
+    expect(formatFittingListSummary(['Serie A', 'Serie B', 'Serie C'], 26)).toBe(
+      'Serie A, Serie B, Serie C'
+    );
+    expect(
+      formatFittingListSummary(['Serie A', 'Serie B', 'Serie C', 'Premier League'], 26)
+    ).toBe('Serie A, Serie B +2');
   });
 });
 

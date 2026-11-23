@@ -438,6 +438,27 @@ export function buildCompetitionOptions(
 }
 
 /**
+ * Formats a list of selected labels (e.g. competitions) fitting as many items
+ * as possible within `maxChars` before appending an incremental `+N` counter.
+ */
+export function formatFittingListSummary(items: string[], maxChars = 26): string {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  const full = items.join(', ');
+  if (full.length <= maxChars) return full;
+
+  let k = 1;
+  for (let i = items.length - 1; i >= 1; i--) {
+    const candidate = `${items.slice(0, i).join(', ')} +${items.length - i}`;
+    if (candidate.length <= maxChars) {
+      k = i;
+      break;
+    }
+  }
+  return `${items.slice(0, k).join(', ')} +${items.length - k}`;
+}
+
+/**
  * Returns true if the tracked event has already started beyond the 5-minute grace window
  * (unless live events are explicitly enabled by settings).
  */

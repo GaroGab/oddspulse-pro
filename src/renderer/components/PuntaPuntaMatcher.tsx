@@ -8,10 +8,12 @@ import {
   Filter,
   Flame,
   LayoutGrid,
+  RotateCcw,
   Scale,
   Search,
   Sparkles,
   TrendingUp,
+  X,
 } from 'lucide-react';
 import { EMPTY_DATE_RANGE, toLocalDateKey, type DateRangeValue } from '../../shared/dateRange';
 import type { PuntaPuntaCalcInput } from '../../shared/math';
@@ -24,6 +26,7 @@ import {
 } from '../../shared/puntaPuntaMatcher';
 import {
   buildCompetitionOptions,
+  formatFittingListSummary,
   inferSportFromLeague,
 } from '../../shared/ratingWatch';
 import type {
@@ -345,6 +348,128 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
     onlySurebets ||
     dateRange.mode !== 'all';
 
+  const activeFilterChips = useMemo(() => {
+    const chips: Array<{ id: string; label: string; onClear: () => void }> = [];
+
+    if (leagues.length > 0) {
+      chips.push({
+        id: 'leagues',
+        label: formatFittingListSummary(leagues, 26),
+        onClear: () => setLeagues([]),
+      });
+    }
+
+    if (market !== 'ALL') {
+      const marketShort: Record<MarketType, string> = {
+        '1X2': '1X2',
+        OVER_UNDER_25: 'U/O 2.5',
+        BTTS: 'Goal/NoGoal',
+        H2H: 'Testa a Testa',
+      };
+      chips.push({
+        id: 'market',
+        label: marketShort[market] ?? market,
+        onClear: () => setMarket('ALL'),
+      });
+    }
+
+    if (outcomesMode !== 'diverse_all') {
+      chips.push({
+        id: 'outcomesMode',
+        label:
+          outcomesMode === 'diverse_2way'
+            ? 'Solo 2 Esiti'
+            : outcomesMode === 'diverse_3way'
+            ? 'Solo 3 Esiti'
+            : 'Anche stesso book',
+        onClear: () => setOutcomesMode('diverse_all'),
+      });
+    }
+
+    if (primaryBookmakers.length > 0) {
+      const firstName =
+        bookmakerOptions.find((b) => b.id === primaryBookmakers[0])?.name ?? primaryBookmakers[0];
+      chips.push({
+        id: 'primaryBookmakers',
+        label:
+          primaryBookmakers.length === 1
+            ? `P1: ${firstName}`
+            : `P1: ${firstName} +${primaryBookmakers.length - 1}`,
+        onClear: () => setPrimaryBookmakers([]),
+      });
+    }
+
+    if (hedgeBookmakers.length > 0) {
+      const firstName =
+        bookmakerOptions.find((b) => b.id === hedgeBookmakers[0])?.name ?? hedgeBookmakers[0];
+      chips.push({
+        id: 'hedgeBookmakers',
+        label:
+          hedgeBookmakers.length === 1
+            ? `Cop: ${firstName}`
+            : `Cop: ${firstName} +${hedgeBookmakers.length - 1}`,
+        onClear: () => setHedgeBookmakers([]),
+      });
+    }
+
+    if (Math.abs(minBack - 1.15) > 0.005 || Math.abs(maxBack - 15) > 0.005) {
+      chips.push({
+        id: 'odds',
+        label: `Q ${minBack}–${maxBack}`,
+        onClear: () => {
+          setMinBack(1.15);
+          setMaxBack(15);
+        },
+      });
+    }
+
+    if (minRating > 0) {
+      chips.push({
+        id: 'rating',
+        label: `Rating ≥${minRating}%`,
+        onClear: () => setMinRating(0),
+      });
+    }
+
+    if (dateRange.mode !== 'all') {
+      const fmtDay = (iso: string | null) =>
+        iso ? iso.slice(5).split('-').reverse().join('/') : '';
+      const dateLabel =
+        dateRange.mode === 'hours'
+          ? `Entro ${dateRange.hours}h`
+          : dateRange.startDate && dateRange.endDate && dateRange.startDate === dateRange.endDate
+          ? fmtDay(dateRange.startDate)
+          : `${fmtDay(dateRange.startDate)}–${fmtDay(dateRange.endDate)}`;
+      chips.push({
+        id: 'date',
+        label: dateLabel,
+        onClear: () => setDateRange(EMPTY_DATE_RANGE),
+      });
+    }
+
+    if (onlySurebets) {
+      chips.push({
+        id: 'surebet',
+        label: 'Solo Surebet',
+        onClear: () => setOnlySurebets(false),
+      });
+    }
+
+    return chips;
+  }, [
+    leagues,
+    market,
+    outcomesMode,
+    primaryBookmakers,
+    hedgeBookmakers,
+    bookmakerOptions,
+    minBack,
+    maxBack,
+    minRating,
+    dateRange,
+    onlySurebets,
+  ]);
+
   return (
     <div className="space-y-4">
       {/* Collapsible KPI Hero Cards */}
@@ -603,13 +728,77 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
             className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
               showFilters
                 ? 'border-brand-400/50 bg-brand-500/10 text-brand-200'
+                : activeFilterChips.length > 0
+                ? 'border-brand-400/50 bg-brand-500/15 text-brand-100 shadow-[0_0_14px_-4px_rgb(var(--brand-400)/0.45)] hover:border-brand-400/70 hover:bg-brand-500/20'
                 : 'border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900'
             }`}
           >
-            <Filter className="h-3.5 w-3.5" />
-            Filtri
+            <Filter
+              className={`h-3.5 w-3.5 ${
+                !showFilters && activeFilterChips.length > 0 ? 'text-brand-300' : ''
+              }`}
+            />
+            <span>Filtri</span>
+            {activeFilterChips.length > 0 && (
+              <span
+                data-testid="pp-filters-active-count"
+                className="ml-0.5 rounded-full bg-brand-400/25 px-1.5 py-0.2 font-mono text-[10px] font-extrabold text-brand-200"
+              >
+                {activeFilterChips.length}
+              </span>
+            )}
           </button>
         </div>
+
+        {/* Compact Active Filters Strip when banner is closed */}
+        <AnimatePresence initial={false}>
+          {!showFilters && activeFilterChips.length > 0 && (
+            <motion.div
+              key="pp-collapsed-filters-bar"
+              data-testid="pp-collapsed-filters-bar"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/70 pt-2">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                    Filtri attivi:
+                  </span>
+                  {activeFilterChips.map((chip) => (
+                    <span
+                      key={chip.id}
+                      data-testid={`pp-filter-chip-${chip.id}`}
+                      className="inline-flex items-center gap-1 rounded-md border border-brand-400/30 bg-brand-500/10 px-2 py-0.5 text-[10px] font-semibold text-brand-200"
+                    >
+                      <span className="max-w-[220px] truncate">{chip.label}</span>
+                      <button
+                        type="button"
+                        onClick={chip.onClear}
+                        aria-label={`Rimuovi filtro ${chip.label}`}
+                        className="rounded-full p-0.5 text-brand-300/75 transition hover:bg-brand-400/20 hover:text-white"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="pp-collapsed-reset-filters"
+                  onClick={() => applyPreset('reset')}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900/90 px-2.5 py-0.5 text-[10px] font-semibold text-slate-300 transition hover:border-rose-500/40 hover:bg-rose-500/15 hover:text-rose-200"
+                >
+                  <RotateCcw className="h-2.5 w-2.5" />
+                  Reset Filtri
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Collapsible 7-filter drawer + quick presets */}
         <AnimatePresence initial={false}>
