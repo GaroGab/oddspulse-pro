@@ -1,5 +1,6 @@
 import { matchesDateRange, type DateRangeValue } from './dateRange';
 import { calculatePuntaPunta, round2, type PuntaPuntaCalcInput } from './math';
+import { matchesWatchLeagues } from './ratingWatch';
 import type {
   BackMarketGroup,
   BackOutcomeQuote,
@@ -30,6 +31,7 @@ export interface PuntaPuntaFilterConfig {
   refundAmount?: number;
   refundRetention?: number;
   sport: SportKey | 'ALL';
+  leagues?: string[];
   market: MarketType | 'ALL';
   outcomesMode: OutcomesFilterMode;
   primaryBookmakers: string[];
@@ -294,6 +296,13 @@ export function findPuntaPuntaMatches(
 
   for (const group of groups) {
     if (config.sport !== 'ALL' && group.sport !== config.sport) continue;
+    if (
+      config.leagues &&
+      config.leagues.length > 0 &&
+      !matchesWatchLeagues(config.leagues, group.league, group.sport)
+    ) {
+      continue;
+    }
     if (config.market !== 'ALL' && group.marketType !== config.market) continue;
     const outcomeCount = group.outcomes.length;
     if (outcomeCount < 2 || outcomeCount > 4) continue;

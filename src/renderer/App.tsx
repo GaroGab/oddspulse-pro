@@ -466,9 +466,13 @@ export const App: React.FC = () => {
         };
         setRatingWatches((prev) => [created, ...prev]);
       }
+      const leaguesLabel =
+        Array.isArray(input.leagues) && input.leagues.length > 0
+          ? input.leagues.join(', ')
+          : input.league?.trim();
       const label =
         input.eventName.trim() ||
-        input.league?.trim() ||
+        leaguesLabel ||
         (input.sport ? `Sport: ${input.sport}` : 'Tutti gli eventi');
       pushToast('Radar Rating Attivato', `${label} (${input.targetRating.toFixed(1)}%)`);
     },

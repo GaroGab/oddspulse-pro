@@ -19,13 +19,14 @@ import {
 } from 'lucide-react';
 import {
   betModeLabelIt,
-  COMPETITION_PRESETS,
+  buildCompetitionOptions,
   estimateSingleWatchInterval,
   evaluateRatingWatch,
   getSelectionOptionsForMarket,
+  getWatchLeagues,
   inferSportFromLeague,
   isWatchExpired,
-  matchesWatchLeague,
+  matchesWatchLeagues,
   normalizeWatchQuery,
   resolveCanonicalCompetition,
 } from '../../shared/ratingWatch';
@@ -45,7 +46,7 @@ import {
 import { formatEuro, formatEventTime, formatOdds, ratingTone, sportLabel } from '../utils/format';
 import { playRatingAlertBurst, stopPersistentRatingAlarm } from '../utils/sound';
 import { BookmakerIcon } from './BookmakerIcon';
-import { CustomSelect } from './CustomSelect';
+import { CustomMultiSelect, CustomSelect } from './CustomSelect';
 import { NumericInput } from './NumericInput';
 import { SlidingPillTrack } from './SlidingPillTrack';
 import { SourceMultiSelect } from './SourceSelect';
@@ -76,6 +77,7 @@ interface WatchFormState {
   eventName: string;
   sport?: SportKey;
   league?: string;
+  leagues: string[];
   startTime?: string;
   marketType: MarketType | 'ALL';
   selectionKey: string;
@@ -98,6 +100,7 @@ function createEmptyForm(defaultMode: BetMode = 'normal'): WatchFormState {
     eventName: '',
     sport: undefined,
     league: undefined,
+    leagues: [],
     startTime: undefined,
     marketType: 'ALL',
     selectionKey: 'ALL',
@@ -171,13 +174,15 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
   useEffect(() => {
     if (!draftSeed) return;
     const { row, mode = 'normal' } = draftSeed;
+    const canonLeague = resolveCanonicalCompetition(row.league, row.sport) ?? row.league;
     setEditingId(null);
     setForm({
       enabled: true,
       eventKey: row.eventKey,
       eventName: row.eventName,
       sport: row.sport,
-      league: resolveCanonicalCompetition(row.league, row.sport) ?? row.league,
+      league: canonLeague,
+      leagues: canonLeague ? [canonLeague] : [],
       startTime: row.startTime,
       marketType: row.marketType,
       selectionKey: row.selectionKey,
@@ -249,74 +254,21 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
     return catalogEvents
       .filter((ev) => {
         if (form.sport && ev.sport !== form.sport) return false;
-        if (form.league && !matchesWatchLeague(form.league, ev.league, ev.sport)) return false;
+        if (form.leagues.length > 0 && !matchesWatchLeagues(form.leagues, ev.league, ev.sport)) {
+          return false;
+        }
         if (tokens.length === 0) return true;
         const hay = normalizeWatchQuery(`${ev.eventName} ${ev.league}`);
         return tokens.every((t) => hay.includes(t));
       })
       .slice(0, 35);
-  }, [catalogEvents, form.eventName, form.sport, form.league]);
+  }, [catalogEvents, form.eventName, form.sport, form.leagues]);
 
   // Preset + dynamic live competition options filtered by current sport
-  const competitionOptions = useMemo(() => {
-    const opts: Array<{ value: string; label: string; hint?: string }> = [
-      { value: 'ALL', label: 'Tutte le competizioni' },
-    ];
-    const seenValues = new Set<string>(['ALL']);
-
-    const liveEventCounts = new Map<string, number>();
-    const extraDynamicLeagues = new Map<string, { label: string; sport: SportKey; count: number }>();
-
-    for (const ev of catalogEvents) {
-      if (form.sport && ev.sport !== form.sport) continue;
-      const canonical = resolveCanonicalCompetition(ev.league, ev.sport);
-      if (!canonical) continue;
-      const isPreset = COMPETITION_PRESETS.some((p) => p.value === canonical);
-      if (isPreset) {
-        liveEventCounts.set(canonical, (liveEventCounts.get(canonical) ?? 0) + 1);
-      } else {
-        const cur = extraDynamicLeagues.get(canonical);
-        if (cur) {
-          cur.count += 1;
-        } else {
-          extraDynamicLeagues.set(canonical, { label: canonical, sport: ev.sport, count: 1 });
-        }
-      }
-    }
-
-    for (const preset of COMPETITION_PRESETS) {
-      if (form.sport && preset.sport !== form.sport) continue;
-      const liveCnt = liveEventCounts.get(preset.value) ?? 0;
-      opts.push({
-        value: preset.value,
-        label: preset.label,
-        hint: liveCnt > 0 ? `${preset.hint} · ${liveCnt}` : preset.hint,
-      });
-      seenValues.add(preset.value);
-    }
-
-    const sortedExtras = Array.from(extraDynamicLeagues.values()).sort(
-      (a, b) => b.count - a.count || a.label.localeCompare(b.label)
-    );
-    for (const ex of sortedExtras) {
-      if (seenValues.has(ex.label)) continue;
-      opts.push({
-        value: ex.label,
-        label: ex.label,
-        hint: `${sportLabel(ex.sport)} · ${ex.count}`,
-      });
-      seenValues.add(ex.label);
-    }
-
-    if (form.league && !seenValues.has(form.league)) {
-      opts.push({
-        value: form.league,
-        label: form.league,
-      });
-    }
-
-    return opts;
-  }, [catalogEvents, form.sport, form.league]);
+  const competitionOptions = useMemo(
+    () => buildCompetitionOptions(catalogEvents, form.sport, form.leagues),
+    [catalogEvents, form.sport, form.leagues]
+  );
 
   const selectionOptions = useMemo(
     () => getSelectionOptionsForMarket(form.marketType),
@@ -371,12 +323,14 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
       : null;
 
   const handleSelectEventSuggestion = (ev: (typeof catalogEvents)[number]) => {
+    const canonLeague = resolveCanonicalCompetition(ev.league, ev.sport) ?? ev.league;
     setForm((prev) => ({
       ...prev,
       eventKey: ev.eventKey,
       eventName: ev.eventName,
       sport: ev.sport,
-      league: resolveCanonicalCompetition(ev.league, ev.sport) ?? ev.league,
+      league: canonLeague,
+      leagues: canonLeague ? [canonLeague] : prev.leagues,
       startTime: ev.startTime,
     }));
     setPickerOpen(false);
@@ -395,6 +349,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
   const hasAnyWatchFilter = Boolean(
     form.eventName.trim() ||
       form.sport ||
+      form.leagues.length > 0 ||
       form.league?.trim() ||
       form.marketType !== 'ALL' ||
       form.selectionKey !== 'ALL' ||
@@ -406,12 +361,14 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
     e.preventDefault();
     if (!hasAnyWatchFilter) return;
 
+    const cleanLeagues = form.leagues.map((l) => l.trim()).filter(Boolean);
     const payload: RatingWatchInput = {
       enabled: form.enabled,
       eventKey: form.eventName.trim() ? form.eventKey : undefined,
       eventName: form.eventName.trim(),
       sport: form.sport,
-      league: form.league?.trim() || undefined,
+      league: cleanLeagues[0] || form.league?.trim() || undefined,
+      leagues: cleanLeagues,
       startTime: form.eventName.trim() ? form.startTime : undefined,
       marketType: form.marketType,
       selectionKey: form.selectionKey,
@@ -437,13 +394,17 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
   };
 
   const startEdit = (w: RatingWatch) => {
+    const resolvedLeagues = getWatchLeagues(w).map(
+      (lg) => resolveCanonicalCompetition(lg, w.sport) ?? lg
+    );
     setEditingId(w.id);
     setForm({
       enabled: w.enabled,
       eventKey: w.eventKey,
       eventName: w.eventName,
       sport: w.sport,
-      league: resolveCanonicalCompetition(w.league, w.sport) ?? w.league,
+      league: resolvedLeagues[0],
+      leagues: resolvedLeagues,
       startTime: w.startTime,
       marketType: w.marketType,
       selectionKey: w.selectionKey,
@@ -698,7 +659,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
             )}
           </div>
 
-          {/* Sport & Competition Filters */}
+          {/* Sport & Competition Multi-Select Filters */}
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             <div>
               <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
@@ -712,13 +673,17 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                 onChange={(val) =>
                   setForm((prev) => {
                     const nextSport = val === 'ALL' ? undefined : val;
-                    const inferredLeagueSport = inferSportFromLeague(prev.league);
-                    const keepLeague =
-                      !nextSport || !inferredLeagueSport || inferredLeagueSport === nextSport;
+                    const nextLeagues = nextSport
+                      ? prev.leagues.filter((lg) => {
+                          const inferred = inferSportFromLeague(lg);
+                          return !inferred || inferred === nextSport;
+                        })
+                      : prev.leagues;
                     return {
                       ...prev,
                       sport: nextSport,
-                      league: keepLeague ? prev.league : undefined,
+                      leagues: nextLeagues,
+                      league: nextLeagues[0],
                     };
                   })
                 }
@@ -733,23 +698,19 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
 
             <div>
               <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                Competizione
+                Competizioni ({form.leagues.length === 0 ? 'Tutte' : form.leagues.length})
               </label>
-              <CustomSelect<string>
+              <CustomMultiSelect<string>
                 data-testid="watch-league-select"
-                className="mt-1"
-                value={form.league ?? 'ALL'}
-                minMenuWidth={220}
-                onChange={(val) =>
-                  setForm((prev) => {
-                    const nextLeague = val === 'ALL' ? undefined : val;
-                    const inferredSport = inferSportFromLeague(nextLeague);
-                    return {
-                      ...prev,
-                      league: nextLeague,
-                      sport: prev.sport ?? inferredSport,
-                    };
-                  })
+                values={form.leagues}
+                allLabel="Tutte le competizioni"
+                minMenuWidth={240}
+                onChange={(vals) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    leagues: vals,
+                    league: vals[0],
+                  }))
                 }
                 options={competitionOptions}
               />
@@ -1100,6 +1061,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                   ? Math.max(5, Math.min(100, (liveBest.rating / Math.max(1, w.targetRating)) * 100))
                   : 0;
                 const hitNow = Boolean(liveBest && liveBest.rating >= w.targetRating);
+                const watchLeagues = getWatchLeagues(w);
 
                 return (
                   <div
@@ -1145,11 +1107,14 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                               (o) => o.value === w.selectionKey
                             )?.label ?? w.selectionKey}
                           </span>
-                          {w.league && (
-                            <span className="rounded-md border border-brand-400/35 bg-brand-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand-200">
-                              {w.league}
+                          {watchLeagues.map((lg) => (
+                            <span
+                              key={lg}
+                              className="rounded-md border border-brand-400/35 bg-brand-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand-200"
+                            >
+                              {lg}
                             </span>
-                          )}
+                          ))}
                           {w.triggerCount > 0 && (
                             <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300">
                               Avvisi: {w.triggerCount}
@@ -1160,13 +1125,18 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                         <div className="mt-1.5 truncate text-sm font-bold text-white">
                           {w.eventName.trim()
                             ? w.eventName
-                            : w.league
-                            ? `Tutti gli eventi — ${w.league}`
+                            : watchLeagues.length > 0
+                            ? `Tutti gli eventi — ${watchLeagues.join(', ')}`
                             : `Tutti gli eventi${w.sport ? ` (${sportLabel(w.sport)})` : ''}`}
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                           {w.sport && <span>{sportLabel(w.sport)}</span>}
-                          {w.league && <span>&middot; {w.league}</span>}
+                          {watchLeagues.length > 0 && (
+                            <span>
+                              {w.sport ? '· ' : ''}
+                              {watchLeagues.join(', ')}
+                            </span>
+                          )}
                           {w.startTime && (
                             <span>
                               &middot; {formatEventTime(w.startTime).date}{' '}

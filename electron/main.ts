@@ -236,10 +236,14 @@ function evaluateWatchesAgainstRows(rows: OddsmatcherRow[], isFullCycle: boolean
         nextWatch.updatedAt = nowMs;
         disabledByStateChange = true;
       }
+      const watchLeaguesLabel =
+        Array.isArray(w.leagues) && w.leagues.length > 0
+          ? w.leagues.join(', ')
+          : w.league;
       triggered.push({
         id: `trig_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
         watchId: w.id,
-        watchEventName: w.eventName || w.league || evalRes.bestMatch.eventName,
+        watchEventName: w.eventName || watchLeaguesLabel || evalRes.bestMatch.eventName,
         targetRating: w.targetRating,
         mode: w.mode,
         match: evalRes.bestMatch,
@@ -711,12 +715,19 @@ app.whenReady().then(() => {
       ? Math.max(minBack, input.maxBackOdds)
       : 50;
 
+    const normalizedLeagues = Array.isArray(input.leagues)
+      ? Array.from(new Set(input.leagues.map((l) => String(l).trim()).filter(Boolean)))
+      : input.league?.trim()
+      ? [input.league.trim()]
+      : [];
+
     const created: RatingWatch = {
       enabled: Boolean(input.enabled),
       eventKey: input.eventKey?.trim() || undefined,
       eventName: String(input.eventName || '').trim(),
       sport: input.sport,
-      league: input.league?.trim() || undefined,
+      league: normalizedLeagues[0] || undefined,
+      leagues: normalizedLeagues,
       startTime: input.startTime || undefined,
       marketType: input.marketType || 'ALL',
       selectionKey: input.selectionKey || 'ALL',
@@ -764,6 +775,7 @@ app.whenReady().then(() => {
           patch.eventName !== undefined ||
           patch.sport !== undefined ||
           patch.league !== undefined ||
+          patch.leagues !== undefined ||
           patch.marketType !== undefined ||
           patch.selectionKey !== undefined ||
           patch.bookmakerIds !== undefined ||

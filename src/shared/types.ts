@@ -398,6 +398,7 @@ export interface RatingWatch {
   eventName: string;
   sport?: SportKey;
   league?: string;
+  leagues?: string[];
   startTime?: string;
   marketType: MarketType | 'ALL';
   selectionKey: string | 'ALL';

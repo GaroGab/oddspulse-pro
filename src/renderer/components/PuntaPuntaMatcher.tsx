@@ -22,6 +22,10 @@ import {
   type PuntaPuntaCandidateRow,
   type PuntaPuntaSortKey,
 } from '../../shared/puntaPuntaMatcher';
+import {
+  buildCompetitionOptions,
+  inferSportFromLeague,
+} from '../../shared/ratingWatch';
 import type {
   BetMode,
   MarketType,
@@ -40,7 +44,7 @@ import {
 import { AnimatedNumber } from './AnimatedNumber';
 import { BookmakerIcon } from './BookmakerIcon';
 import { ConnectionAlert } from './ConnectionAlert';
-import { CustomSelect } from './CustomSelect';
+import { CustomMultiSelect, CustomSelect } from './CustomSelect';
 import { DateRangeCalendar } from './DateRangeCalendar';
 import { NumericInput } from './NumericInput';
 import { SlidingPillTrack } from './SlidingPillTrack';
@@ -110,6 +114,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
 
   const [search, setSearch] = useState('');
   const [sport, setSport] = useState<SportKey | 'ALL'>('ALL');
+  const [leagues, setLeagues] = useState<string[]>([]);
   const [market, setMarket] = useState<MarketType | 'ALL'>('ALL');
   const [outcomesMode, setOutcomesMode] = useState<OutcomesFilterMode>('diverse_all');
   const [primaryBookmakers, setPrimaryBookmakers] = useState<string[]>([]);
@@ -149,6 +154,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
   }, [
     search,
     sport,
+    leagues,
     market,
     outcomesMode,
     primaryBookmakers,
@@ -161,7 +167,23 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
     mode,
   ]);
 
+  useEffect(() => {
+    if (sport === 'ALL') return;
+    setLeagues((prev) => {
+      const next = prev.filter((lg) => {
+        const inferred = inferSportFromLeague(lg);
+        return !inferred || inferred === sport;
+      });
+      return next.length === prev.length ? prev : next;
+    });
+  }, [sport]);
+
   const rawGroups = useMemo(() => extractBackMarketGroupsFromSnapshot(snapshot), [snapshot]);
+
+  const competitionOptions = useMemo(
+    () => buildCompetitionOptions(rawGroups, sport === 'ALL' ? undefined : sport, leagues),
+    [rawGroups, sport, leagues]
+  );
 
   const eventDateCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -183,6 +205,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
         refundAmount,
         refundRetention,
         sport,
+        leagues,
         market,
         outcomesMode,
         primaryBookmakers,
@@ -204,6 +227,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
       refundAmount,
       refundRetention,
       sport,
+      leagues,
       market,
       outcomesMode,
       primaryBookmakers,
@@ -260,6 +284,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
     if (preset === 'reset') {
       onChangeMode('normal');
       setSport('ALL');
+      setLeagues([]);
       setMarket('ALL');
       setOutcomesMode('diverse_all');
       setPrimaryBookmakers([]);
@@ -309,6 +334,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
   const hasActiveFilters =
     search.trim().length > 0 ||
     sport !== 'ALL' ||
+    leagues.length > 0 ||
     market !== 'ALL' ||
     outcomesMode !== 'diverse_all' ||
     primaryBookmakers.length > 0 ||
@@ -646,7 +672,21 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8">
+                  <div>
+                    <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                      Competizioni ({leagues.length === 0 ? 'Tutte' : leagues.length})
+                    </label>
+                    <CustomMultiSelect<string>
+                      values={leagues}
+                      options={competitionOptions}
+                      allLabel="Tutte le competizioni"
+                      minMenuWidth={230}
+                      onChange={setLeagues}
+                      data-testid="pp-filter-leagues"
+                    />
+                  </div>
+
                   <div>
                     <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                       Mercato

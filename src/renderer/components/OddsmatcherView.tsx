@@ -18,6 +18,11 @@ import {
 } from 'lucide-react';
 import { calculateSingleMatch } from '../../shared/math';
 import {
+  buildCompetitionOptions,
+  inferSportFromLeague,
+  matchesWatchLeagues,
+} from '../../shared/ratingWatch';
+import {
   type BetMode,
   type MarketType,
   type OddsmatcherRow,
@@ -37,7 +42,7 @@ import { AnimatedNumber } from './AnimatedNumber';
 import { NumericInput } from './NumericInput';
 import { BookmakerIcon } from './BookmakerIcon';
 import { ConnectionAlert } from './ConnectionAlert';
-import { CustomSelect } from './CustomSelect';
+import { CustomMultiSelect, CustomSelect } from './CustomSelect';
 import {
   DateRangeCalendar,
   EMPTY_DATE_RANGE,
@@ -96,6 +101,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     tableDensity === 'compact' ? 22 : tableDensity === 'spacious' ? 30 : 26;
   const [search, setSearch] = useState('');
   const [sport, setSport] = useState<SportKey | 'ALL'>('ALL');
+  const [leagues, setLeagues] = useState<string[]>([]);
   const [market, setMarket] = useState<MarketType | 'ALL'>('ALL');
   const [bookmakers, setBookmakers] = useState<string[]>([]);
   const [exchanges, setExchanges] = useState<string[]>([]);
@@ -111,6 +117,23 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   const [pageSize, setPageSize] = useState(60);
 
   const lockedSet = useMemo(() => new Set(lockedRowIds), [lockedRowIds]);
+
+  const competitionOptions = useMemo(
+    () => buildCompetitionOptions(snapshot.rows, sport === 'ALL' ? undefined : sport, leagues),
+    [snapshot.rows, sport, leagues]
+  );
+
+  // Prune selected competitions that belong to another sport when switching sport tab
+  useEffect(() => {
+    if (sport === 'ALL') return;
+    setLeagues((prev) => {
+      const next = prev.filter((lg) => {
+        const inferred = inferSportFromLeague(lg);
+        return !inferred || inferred === sport;
+      });
+      return next.length === prev.length ? prev : next;
+    });
+  }, [sport]);
 
   const bookmakerOptions = useMemo<SourceOption[]>(
     () => buildBookmakerSourceOptions(snapshot),
@@ -166,6 +189,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
 
     for (const row of snapshot.rows) {
       if (sport !== 'ALL' && row.sport !== sport) continue;
+      if (leagues.length > 0 && !matchesWatchLeagues(leagues, row.league, row.sport)) continue;
       if (market !== 'ALL' && row.marketType !== market) continue;
       if (bookmakers.length > 0 && !bookmakers.includes(row.bookmakerId)) continue;
       if (exchanges.length > 0 && !exchanges.includes(row.exchangeId)) continue;
@@ -226,6 +250,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     snapshot.rows,
     search,
     sport,
+    leagues,
     market,
     bookmakers,
     exchanges,
@@ -272,6 +297,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   const resetAllFilters = () => {
     onChangeMode('normal');
     setSport('ALL');
+    setLeagues([]);
     setMarket('ALL');
     setBookmakers([]);
     setExchanges([]);
@@ -580,7 +606,21 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-7">
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 2xl:grid-cols-8">
+            <div>
+              <label className="text-[10px] uppercase tracking-wider text-slate-500">
+                Competizioni ({leagues.length === 0 ? 'Tutte' : leagues.length})
+              </label>
+              <CustomMultiSelect<string>
+                data-testid="om-league-select"
+                values={leagues}
+                allLabel="Tutte le competizioni"
+                minMenuWidth={240}
+                options={competitionOptions}
+                onChange={setLeagues}
+              />
+            </div>
+
             <div>
               <label className="text-[10px] uppercase tracking-wider text-slate-500">Mercato</label>
               <CustomSelect<MarketType | 'ALL'>

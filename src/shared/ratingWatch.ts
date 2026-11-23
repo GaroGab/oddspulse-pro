@@ -315,6 +315,129 @@ export function matchesWatchLeague(
 }
 
 /**
+ * Normalizes a watch's competition filter(s) into a deduplicated string array,
+ * supporting both multi-select `leagues` and legacy single `league`.
+ */
+export function getWatchLeagues(
+  watch: Pick<RatingWatch, 'league' | 'leagues'>
+): string[] {
+  if (Array.isArray(watch.leagues) && watch.leagues.length > 0) {
+    return Array.from(
+      new Set(
+        watch.leagues
+          .map((l) => l.trim())
+          .filter((l) => Boolean(l) && l !== 'ALL')
+      )
+    );
+  }
+  const single = watch.league?.trim();
+  if (single && single !== 'ALL') return [single];
+  return [];
+}
+
+/**
+ * Checks whether a candidate row's league matches at least one of the selected competitions.
+ * When `watchLeagues` is empty or undefined, all competitions match.
+ */
+export function matchesWatchLeagues(
+  watchLeagues: string[] | string | undefined,
+  rowLeague: string,
+  rowSport?: SportKey
+): boolean {
+  if (!watchLeagues) return true;
+  const list = (Array.isArray(watchLeagues) ? watchLeagues : [watchLeagues])
+    .map((l) => l.trim())
+    .filter((l) => Boolean(l) && l !== 'ALL');
+  if (list.length === 0) return true;
+  return list.some((lg) => matchesWatchLeague(lg, rowLeague, rowSport));
+}
+
+function sportHintLabelIt(sport: SportKey): string {
+  switch (sport) {
+    case 'football':
+      return 'Calcio';
+    case 'tennis':
+      return 'Tennis';
+    case 'basketball':
+      return 'Basket';
+  }
+}
+
+/**
+ * Builds deduplicated competition options combining `COMPETITION_PRESETS` and
+ * any additional live competitions found in scraped rows/events, filtered by sport.
+ */
+export function buildCompetitionOptions(
+  items: Array<{ eventKey?: string; league: string; sport: SportKey }>,
+  sportFilter?: SportKey,
+  activeLeagues: string[] = []
+): Array<{ value: string; label: string; hint?: string }> {
+  const opts: Array<{ value: string; label: string; hint?: string }> = [];
+  const seenValues = new Set<string>();
+  const seenEventKeysPerLeague = new Map<string, Set<string>>();
+  const extraDynamicLeagues = new Map<string, { label: string; sport: SportKey; count: number }>();
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (sportFilter && it.sport !== sportFilter) continue;
+    const canonical = resolveCanonicalCompetition(it.league, it.sport);
+    if (!canonical) continue;
+
+    const evId = it.eventKey || `${it.sport}:${it.league}:${i}`;
+    let evSet = seenEventKeysPerLeague.get(canonical);
+    if (!evSet) {
+      evSet = new Set<string>();
+      seenEventKeysPerLeague.set(canonical, evSet);
+    }
+    const isNewEvent = !evSet.has(evId);
+    if (isNewEvent) evSet.add(evId);
+
+    const isPreset = COMPETITION_PRESETS.some((p) => p.value === canonical);
+    if (!isPreset && isNewEvent) {
+      const cur = extraDynamicLeagues.get(canonical);
+      if (cur) {
+        cur.count += 1;
+      } else {
+        extraDynamicLeagues.set(canonical, { label: canonical, sport: it.sport, count: 1 });
+      }
+    }
+  }
+
+  for (const preset of COMPETITION_PRESETS) {
+    if (sportFilter && preset.sport !== sportFilter) continue;
+    const liveCnt = seenEventKeysPerLeague.get(preset.value)?.size ?? 0;
+    opts.push({
+      value: preset.value,
+      label: preset.label,
+      hint: liveCnt > 0 ? `${preset.hint} · ${liveCnt}` : preset.hint,
+    });
+    seenValues.add(preset.value);
+  }
+
+  const sortedExtras = Array.from(extraDynamicLeagues.values()).sort(
+    (a, b) => b.count - a.count || a.label.localeCompare(b.label)
+  );
+  for (const ex of sortedExtras) {
+    if (seenValues.has(ex.label)) continue;
+    opts.push({
+      value: ex.label,
+      label: ex.label,
+      hint: `${sportHintLabelIt(ex.sport)} · ${ex.count}`,
+    });
+    seenValues.add(ex.label);
+  }
+
+  for (const lg of activeLeagues) {
+    const trimmed = lg.trim();
+    if (!trimmed || trimmed === 'ALL' || seenValues.has(trimmed)) continue;
+    opts.push({ value: trimmed, label: trimmed });
+    seenValues.add(trimmed);
+  }
+
+  return opts;
+}
+
+/**
  * Returns true if the tracked event has already started beyond the 5-minute grace window
  * (unless live events are explicitly enabled by settings).
  */
@@ -352,11 +475,14 @@ function splitEventTeamsText(raw: string): [string, string] | null {
  * then fuzzy token/team match, or wildcard match when no event filter is specified).
  */
 export function matchesWatchEvent(
-  watch: Pick<RatingWatch, 'eventKey' | 'eventName' | 'sport' | 'league'>,
+  watch: Pick<RatingWatch, 'eventKey' | 'eventName' | 'sport' | 'league' | 'leagues'>,
   row: OddsmatcherRow
 ): boolean {
   if (watch.sport && row.sport !== watch.sport) return false;
-  if (watch.league && !matchesWatchLeague(watch.league, row.league, row.sport)) return false;
+  const watchLeagues = getWatchLeagues(watch);
+  if (watchLeagues.length > 0 && !matchesWatchLeagues(watchLeagues, row.league, row.sport)) {
+    return false;
+  }
   if (watch.eventKey && row.eventKey === watch.eventKey) return true;
 
   const queryNorm = normalizeWatchQuery(watch.eventName);
@@ -593,9 +719,21 @@ export function computeAdaptiveWatchPlan(
       for (const ex of w.exchangeIds) exchangeSet.add(ex);
     }
 
-    const effectiveSport = w.sport ?? inferSportFromLeague(w.league);
-    if (effectiveSport) sportSet.add(effectiveSport);
-    else needsAllSports = true;
+    if (w.sport) {
+      sportSet.add(w.sport);
+    } else {
+      const wLeagues = getWatchLeagues(w);
+      if (wLeagues.length > 0) {
+        const inferred = wLeagues.map((lg) => inferSportFromLeague(lg));
+        if (inferred.every((sp): sp is SportKey => Boolean(sp))) {
+          for (const sp of inferred) sportSet.add(sp);
+        } else {
+          needsAllSports = true;
+        }
+      } else {
+        needsAllSports = true;
+      }
+    }
 
     const queryNorm = normalizeWatchQuery(w.eventName);
     if (!w.eventKey && !queryNorm) {

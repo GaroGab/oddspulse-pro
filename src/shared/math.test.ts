@@ -19,6 +19,7 @@ import {
   evaluateRatingWatch,
   isWatchExpired,
   matchesWatchLeague,
+  matchesWatchLeagues,
   resolveCanonicalCompetition,
 } from './ratingWatch';
 import {
@@ -1076,6 +1077,34 @@ describe('Rating Watch Engine & Adaptive Interval', () => {
     const plan = computeAdaptiveWatchPlan([serieBWatch], DEFAULT_SETTINGS, nowMs);
     expect(plan.sports).toEqual(['football']);
     expect(plan.eventHints).toEqual([]);
+
+    // Multi-select competitions: ['Serie B', 'Premier League'] matches either and excludes Serie A
+    expect(matchesWatchLeagues(['Serie B', 'Premier League'], 'ITALIA: Serie B', 'football')).toBe(
+      true
+    );
+    expect(
+      matchesWatchLeagues(['Serie B', 'Premier League'], 'England Premier League', 'football')
+    ).toBe(true);
+    expect(matchesWatchLeagues(['Serie B', 'Premier League'], 'ITALIA: Serie A', 'football')).toBe(
+      false
+    );
+
+    const multiLeagueWatch = makeWatch({
+      eventKey: undefined,
+      eventName: '',
+      sport: undefined,
+      league: 'Serie A',
+      leagues: ['Serie A', 'ATP'],
+      startTime: undefined,
+      bookmakerIds: [],
+      exchangeIds: [],
+      targetRating: 95,
+    });
+    const multiEval = evaluateRatingWatch(multiLeagueWatch, rows, { nowMs });
+    expect(multiEval.bestMatch?.rowId).toBe('serie-a-higher');
+
+    const multiPlan = computeAdaptiveWatchPlan([multiLeagueWatch], DEFAULT_SETTINGS, nowMs);
+    expect(multiPlan.sports).toEqual(['football', 'tennis']);
   });
 });
 
