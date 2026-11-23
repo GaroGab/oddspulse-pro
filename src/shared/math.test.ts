@@ -832,6 +832,74 @@ describe('Rating Watch Engine & Adaptive Interval', () => {
       )
     ).toBe(true);
   });
+
+  it('supports eventless filter-only RatingWatch (only bookmaker/exchange/sport/rating filters)', () => {
+    const nowMs = Date.now();
+    const futureIso = new Date(nowMs + 2 * 3600_000).toISOString();
+    const wildcardWatch: RatingWatch = {
+      id: 'w-wildcard',
+      createdAt: nowMs,
+      updatedAt: nowMs,
+      enabled: true,
+      eventName: '',
+      marketType: 'ALL',
+      selectionKey: 'ALL',
+      bookmakerIds: ['sisal_it'],
+      exchangeIds: ['betfair_exchange'],
+      mode: 'normal',
+      targetRating: 99,
+      refundRetention: 70,
+      minLiquidity: 10,
+      minBackOdds: 1.2,
+      maxBackOdds: 15,
+      autoPauseOnTrigger: true,
+      cooldownSec: 60,
+      lastCheckedAt: null,
+      lastBestMatch: null,
+      lastTriggeredAt: null,
+      triggerCount: 0,
+    };
+
+    const rows = [
+      makeRow({
+        id: 'other-bk',
+        eventName: 'Roma - Lazio',
+        startTime: futureIso,
+        bookmakerId: 'snai_it',
+        bookmakerName: 'SNAI.it',
+        exchangeId: 'betfair_exchange',
+        backOdds: 2.2,
+        layOdds: 2.1,
+        commission: 0.045,
+        liquidity: 100,
+      }),
+      makeRow({
+        id: 'target-bk',
+        eventName: 'Juventus - Torino',
+        startTime: futureIso,
+        bookmakerId: 'sisal_it',
+        bookmakerName: 'Sisal.it',
+        exchangeId: 'betfair_exchange',
+        backOdds: 2.1,
+        layOdds: 2.04,
+        commission: 0.045,
+        liquidity: 120,
+      }),
+    ];
+
+    const res = evaluateRatingWatch(wildcardWatch, rows, { nowMs });
+    expect(res.isExpired).toBe(false);
+    expect(res.bestMatch?.eventName).toBe('Juventus - Torino');
+    expect(res.bestMatch?.bookmakerId).toBe('sisal_it');
+    expect(res.shouldTrigger).toBe(true);
+
+    // When an eventless watch is active, adaptive plan keeps eventHints empty so targeted scrape does not drop events
+    const plan = computeAdaptiveWatchPlan([wildcardWatch], DEFAULT_SETTINGS, nowMs);
+    expect(plan.activeWatches).toHaveLength(1);
+    expect(plan.bookmakerIds).toEqual(['sisal_it']);
+    expect(plan.exchangeIds).toEqual(['betfair_exchange']);
+    expect(plan.eventHints).toEqual([]);
+  });
 });
 
 describe('Saved Multiple Progressive Engine', () => {

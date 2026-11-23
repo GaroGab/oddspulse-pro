@@ -78,7 +78,8 @@ function splitEventTeamsText(raw: string): [string, string] | null {
 }
 
 /**
- * Matches a candidate OddsmatcherRow against a watch's event identity (exact key first, then fuzzy token/team match).
+ * Matches a candidate OddsmatcherRow against a watch's event identity (exact key first,
+ * then fuzzy token/team match, or wildcard match when no event filter is specified).
  */
 export function matchesWatchEvent(
   watch: Pick<RatingWatch, 'eventKey' | 'eventName' | 'sport'>,
@@ -88,7 +89,7 @@ export function matchesWatchEvent(
   if (watch.eventKey && row.eventKey === watch.eventKey) return true;
 
   const queryNorm = normalizeWatchQuery(watch.eventName);
-  if (!queryNorm) return false;
+  if (!queryNorm) return true;
 
   const rowHay = normalizeWatchQuery(`${row.eventName} ${row.homeTeam} ${row.awayTeam}`);
   const rowHome = normalizeWatchQuery(row.homeTeam);
@@ -303,6 +304,7 @@ export function computeAdaptiveWatchPlan(
 
   const eventHints: NonNullable<TargetedScrapeFilter['eventHints']> = [];
   const seenHints = new Set<string>();
+  let hasWildcardEventWatch = false;
 
   for (const w of activeWatches) {
     if (w.bookmakerIds.length === 0) {
@@ -323,7 +325,13 @@ export function computeAdaptiveWatchPlan(
     if (w.sport) sportSet.add(w.sport);
     else needsAllSports = true;
 
-    const hintKey = `${normalizeWatchQuery(w.eventName)}|${w.sport ?? ''}`;
+    const queryNorm = normalizeWatchQuery(w.eventName);
+    if (!w.eventKey && !queryNorm) {
+      hasWildcardEventWatch = true;
+      continue;
+    }
+
+    const hintKey = `${queryNorm}|${w.sport ?? ''}`;
     if (!seenHints.has(hintKey)) {
       seenHints.add(hintKey);
       const pair = splitEventTeamsText(w.eventName);
@@ -352,7 +360,7 @@ export function computeAdaptiveWatchPlan(
     bookmakerIds: Array.from(bookmakerSet),
     exchangeIds: Array.from(exchangeSet),
     sports: needsAllSports || sportSet.size === 0 ? undefined : Array.from(sportSet),
-    eventHints,
+    eventHints: hasWildcardEventWatch ? [] : eventHints,
     intervalSec,
     rateLimitReasons,
   };

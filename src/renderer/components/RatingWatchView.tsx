@@ -268,7 +268,6 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
 
   // Live preview of best match currently present in snapshot.rows for the form
   const draftLiveEval = useMemo(() => {
-    if (!form.eventName.trim()) return null;
     const tempWatch: RatingWatch = {
       ...form,
       id: 'draft',
@@ -328,15 +327,14 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.eventName.trim()) return;
 
     const payload: RatingWatchInput = {
       enabled: form.enabled,
-      eventKey: form.eventKey,
+      eventKey: form.eventName.trim() ? form.eventKey : undefined,
       eventName: form.eventName.trim(),
       sport: form.sport,
-      league: form.league,
-      startTime: form.startTime,
+      league: form.eventName.trim() ? form.league : undefined,
+      startTime: form.eventName.trim() ? form.startTime : undefined,
       marketType: form.marketType,
       selectionKey: form.selectionKey,
       bookmakerIds: form.bookmakerIds,
@@ -538,93 +536,116 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
             )}
           </div>
 
-          {/* Searchable Event Picker */}
-          <div ref={pickerRef} className="relative">
-            <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-              Evento da Monitorare *
-            </label>
-            <div className="relative mt-1">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-              <input
-                type="text"
-                required
-                data-testid="watch-event-input"
-                value={form.eventName}
-                onFocus={() => setPickerOpen(true)}
-                onChange={(e) => {
-                  const nextName = e.target.value;
-                  setForm((prev) => ({
-                    ...prev,
-                    eventName: nextName,
-                    eventKey: undefined,
-                    sport: undefined,
-                    league: undefined,
-                    startTime: undefined,
-                  }));
-                  setPickerOpen(true);
-                }}
-                placeholder="Cerca partita live (es. Inter - Milan) o scrivi manualmente..."
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 py-1.5 pl-8 pr-8 text-xs text-white placeholder-slate-500 focus:border-brand-400 focus:outline-none"
-              />
-              {form.eventName && (
-                <button
-                  type="button"
-                  onClick={() =>
+          {/* Searchable Event Picker (optional) + Sport */}
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-12">
+            <div ref={pickerRef} className="relative sm:col-span-8">
+              <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Evento (opzionale)
+              </label>
+              <div className="relative mt-1">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                <input
+                  type="text"
+                  data-testid="watch-event-input"
+                  value={form.eventName}
+                  onFocus={() => setPickerOpen(true)}
+                  onChange={(e) => {
+                    const nextName = e.target.value;
                     setForm((prev) => ({
                       ...prev,
-                      eventName: '',
+                      eventName: nextName,
                       eventKey: undefined,
-                      sport: undefined,
                       league: undefined,
                       startTime: undefined,
-                    }))
-                  }
-                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-white"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                    }));
+                    setPickerOpen(true);
+                  }}
+                  placeholder="Tutti gli eventi (o cerca es. Inter - Milan)"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 py-1.5 pl-8 pr-8 text-xs text-white placeholder-slate-500 focus:border-brand-400 focus:outline-none"
+                />
+                {form.eventName && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setForm((prev) => ({
+                        ...prev,
+                        eventName: '',
+                        eventKey: undefined,
+                        league: undefined,
+                        startTime: undefined,
+                      }))
+                    }
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-white"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {form.startTime && (
+                <div className="mt-1 flex items-center gap-2 text-[10px] text-brand-300">
+                  <CheckCircle2 className="h-3 w-3 shrink-0" />
+                  <span>
+                    Collegato ({sportLabel(form.sport ?? 'football')}) &middot;{' '}
+                    {form.league} &middot; {formatEventTime(form.startTime).date}{' '}
+                    {formatEventTime(form.startTime).time}
+                  </span>
+                </div>
+              )}
+
+              {pickerOpen && filteredEventSuggestions.length > 0 && (
+                <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-50 max-h-60 overflow-y-auto rounded-xl border border-brand-400/40 bg-[var(--bg-modal-solid)] p-1 shadow-[0_18px_48px_rgba(0,0,0,0.92)]">
+                  <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                    Eventi live disponibili ({filteredEventSuggestions.length})
+                  </div>
+                  {filteredEventSuggestions.map((ev) => {
+                    const t = formatEventTime(ev.startTime);
+                    return (
+                      <button
+                        key={ev.eventKey}
+                        type="button"
+                        onClick={() => handleSelectEventSuggestion(ev)}
+                        className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition hover:bg-brand-500/15"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate font-semibold text-white">{ev.eventName}</div>
+                          <div className="truncate text-[10px] text-slate-400">
+                            {sportLabel(ev.sport)} &middot; {ev.league}
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right font-mono text-[10px] text-brand-300">
+                          {t.date} {t.time}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               )}
             </div>
 
-            {form.startTime && (
-              <div className="mt-1 flex items-center gap-2 text-[10px] text-brand-300">
-                <CheckCircle2 className="h-3 w-3 shrink-0" />
-                <span>
-                  Collegato ({sportLabel(form.sport ?? 'football')}) &middot;{' '}
-                  {form.league} &middot; {formatEventTime(form.startTime).date}{' '}
-                  {formatEventTime(form.startTime).time}
-                </span>
-              </div>
-            )}
-
-            {pickerOpen && filteredEventSuggestions.length > 0 && (
-              <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-50 max-h-60 overflow-y-auto rounded-xl border border-brand-400/40 bg-[var(--bg-modal-solid)] p-1 shadow-[0_18px_48px_rgba(0,0,0,0.92)]">
-                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                  Eventi live disponibili ({filteredEventSuggestions.length})
-                </div>
-                {filteredEventSuggestions.map((ev) => {
-                  const t = formatEventTime(ev.startTime);
-                  return (
-                    <button
-                      key={ev.eventKey}
-                      type="button"
-                      onClick={() => handleSelectEventSuggestion(ev)}
-                      className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition hover:bg-brand-500/15"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate font-semibold text-white">{ev.eventName}</div>
-                        <div className="truncate text-[10px] text-slate-400">
-                          {sportLabel(ev.sport)} &middot; {ev.league}
-                        </div>
-                      </div>
-                      <div className="shrink-0 text-right font-mono text-[10px] text-brand-300">
-                        {t.date} {t.time}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            <div className="sm:col-span-4">
+              <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Sport
+              </label>
+              <CustomSelect<SportKey | 'ALL'>
+                data-testid="watch-sport-select"
+                className="mt-1"
+                value={form.sport ?? 'ALL'}
+                minMenuWidth={160}
+                onChange={(val) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    sport: val === 'ALL' ? undefined : val,
+                  }))
+                }
+                options={[
+                  { value: 'ALL', label: 'Tutti gli sport' },
+                  { value: 'football', label: 'Calcio' },
+                  { value: 'tennis', label: 'Tennis' },
+                  { value: 'basketball', label: 'Basket' },
+                ]}
+              />
+            </div>
           </div>
 
           {/* Bookmakers & Exchanges Multi-Select */}
@@ -872,7 +893,6 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
           <button
             type="submit"
             data-testid="watch-submit-btn"
-            disabled={!form.eventName.trim()}
             className="mt-auto flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-300 to-accent-400 px-4 py-2.5 text-xs font-extrabold text-slate-950 shadow-glow transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <BellPlus className="h-4 w-4" />
@@ -941,11 +961,11 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                 </div>
                 <h3 className="mt-3 text-sm font-bold text-white">
                   {watches.length === 0
-                    ? 'Nessun evento in monitoraggio'
+                    ? 'Nessun tracking rating attivo'
                     : 'Nessun tracking in questa categoria'}
                 </h3>
                 <p className="mt-1 max-w-sm text-xs text-slate-400">
-                  Seleziona un evento a sinistra (oppure clicca la campanella su una riga dell&apos;Oddsmatcher) per ricevere un avviso sonoro persistente appena il rating raggiunge il tuo obiettivo.
+                  Imposta i filtri a sinistra (anche solo bookmaker, exchange e rating minimo, senza obbligo di evento) oppure clicca la campanella su una riga dell&apos;Oddsmatcher.
                 </p>
               </div>
             ) : (
@@ -1010,7 +1030,9 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                         </div>
 
                         <div className="mt-1.5 truncate text-sm font-bold text-white">
-                          {w.eventName}
+                          {w.eventName.trim()
+                            ? w.eventName
+                            : `Tutti gli eventi${w.sport ? ` (${sportLabel(w.sport)})` : ''}`}
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                           {w.sport && <span>{sportLabel(w.sport)}</span>}
