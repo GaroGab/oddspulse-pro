@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+out/
+release/
+build/
+
+# TypeScript & test caches
+*.tsbuildinfo
+coverage/
+.vitest/
+
+# Environment & local secrets
+.env
+.env.local
+.env.*.local
+
+# Logs & OS junk
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local IDE overrides
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,409 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =========================================================================
+   THEME TOKENS — Default: Ambra & Oro VIP ("gold")
+   ========================================================================= */
+:root,
+[data-theme='gold'] {
+  --bg-base: #070609;
+  --bg-header: rgba(11, 9, 14, 0.92);
+  --bg-sidebar: rgba(12, 10, 15, 0.88);
+  --bg-modal: rgba(15, 12, 19, 0.97);
+  --bg-modal-solid: #110e16;
+  --bg-thead: rgba(16, 13, 21, 0.96);
+  --bg-panel-top: rgba(27, 22, 31, 0.82);
+  --bg-panel-bot: rgba(13, 11, 16, 0.92);
+  --bg-card-top: rgba(31, 25, 36, 0.74);
+  --bg-card-bot: rgba(15, 13, 19, 0.88);
+  --border-subtle: rgba(245, 158, 11, 0.14);
+  --grid-line: rgba(245, 158, 11, 0.045);
+
+  --brand-100: 254 243 199;
+  --brand-200: 253 230 138;
+  --brand-300: 252 211 77;
+  --brand-400: 245 158 11;
+  --brand-500: 217 119 6;
+  --brand-600: 180 83 9;
+
+  --accent-100: 255 237 213;
+  --accent-200: 254 215 170;
+  --accent-300: 253 186 116;
+  --accent-400: 251 146 60;
+  --accent-500: 234 88 12;
+  --accent-600: 194 65 12;
+}
+
+[data-theme='sapphire'] {
+  --bg-base: #040712;
+  --bg-header: rgba(6, 11, 26, 0.92);
+  --bg-sidebar: rgba(7, 12, 28, 0.88);
+  --bg-modal: rgba(8, 14, 32, 0.97);
+  --bg-modal-solid: #0a1126;
+  --bg-thead: rgba(9, 16, 36, 0.96);
+  --bg-panel-top: rgba(15, 25, 52, 0.8);
+  --bg-panel-bot: rgba(8, 13, 29, 0.91);
+  --bg-card-top: rgba(18, 30, 60, 0.72);
+  --bg-card-bot: rgba(9, 15, 34, 0.87);
+  --border-subtle: rgba(56, 189, 248, 0.14);
+  --grid-line: rgba(56, 189, 248, 0.045);
+
+  --brand-100: 224 242 254;
+  --brand-200: 186 230 253;
+  --brand-300: 125 211 252;
+  --brand-400: 56 189 248;
+  --brand-500: 14 165 233;
+  --brand-600: 2 132 199;
+
+  --accent-100: 224 231 255;
+  --accent-200: 199 210 254;
+  --accent-300: 165 180 252;
+  --accent-400: 129 140 248;
+  --accent-500: 99 102 241;
+  --accent-600: 79 70 229;
+}
+
+[data-theme='crimson'] {
+  --bg-base: #0a0507;
+  --bg-header: rgba(16, 7, 11, 0.92);
+  --bg-sidebar: rgba(17, 8, 12, 0.88);
+  --bg-modal: rgba(20, 9, 14, 0.97);
+  --bg-modal-solid: #160a10;
+  --bg-thead: rgba(22, 10, 15, 0.96);
+  --bg-panel-top: rgba(36, 16, 24, 0.82);
+  --bg-panel-bot: rgba(17, 8, 12, 0.92);
+  --bg-card-top: rgba(42, 18, 28, 0.74);
+  --bg-card-bot: rgba(19, 9, 14, 0.88);
+  --border-subtle: rgba(244, 63, 94, 0.15);
+  --grid-line: rgba(244, 63, 94, 0.045);
+
+  --brand-100: 255 228 230;
+  --brand-200: 254 205 211;
+  --brand-300: 253 164 175;
+  --brand-400: 251 113 133;
+  --brand-500: 244 63 94;
+  --brand-600: 225 29 72;
+
+  --accent-100: 255 237 213;
+  --accent-200: 254 215 170;
+  --accent-300: 253 186 116;
+  --accent-400: 251 146 60;
+  --accent-500: 249 115 22;
+  --accent-600: 234 88 12;
+}
+
+[data-theme='emerald'] {
+  --bg-base: #040a07;
+  --bg-header: rgba(6, 15, 11, 0.92);
+  --bg-sidebar: rgba(7, 16, 12, 0.88);
+  --bg-modal: rgba(8, 20, 15, 0.97);
+  --bg-modal-solid: #0a1611;
+  --bg-thead: rgba(9, 22, 16, 0.96);
+  --bg-panel-top: rgba(14, 34, 25, 0.82);
+  --bg-panel-bot: rgba(7, 17, 13, 0.92);
+  --bg-card-top: rgba(17, 40, 29, 0.74);
+  --bg-card-bot: rgba(8, 19, 14, 0.88);
+  --border-subtle: rgba(16, 185, 129, 0.15);
+  --grid-line: rgba(16, 185, 129, 0.045);
+
+  --brand-100: 209 250 229;
+  --brand-200: 167 243 208;
+  --brand-300: 110 231 183;
+  --brand-400: 52 211 153;
+  --brand-500: 16 185 129;
+  --brand-600: 5 150 105;
+
+  --accent-100: 236 252 203;
+  --accent-200: 217 249 157;
+  --accent-300: 190 242 100;
+  --accent-400: 163 230 53;
+  --accent-500: 132 204 22;
+  --accent-600: 101 163 13;
+}
+
+[data-theme='amethyst'] {
+  --bg-base: #080510;
+  --bg-header: rgba(12, 7, 23, 0.92);
+  --bg-sidebar: rgba(13, 8, 25, 0.88);
+  --bg-modal: rgba(16, 10, 31, 0.97);
+  --bg-modal-solid: #120b22;
+  --bg-thead: rgba(18, 11, 34, 0.96);
+  --bg-panel-top: rgba(29, 18, 52, 0.82);
+  --bg-panel-bot: rgba(13, 8, 25, 0.92);
+  --bg-card-top: rgba(34, 21, 60, 0.74);
+  --bg-card-bot: rgba(16, 10, 29, 0.88);
+  --border-subtle: rgba(168, 85, 247, 0.16);
+  --grid-line: rgba(168, 85, 247, 0.045);
+
+  --brand-100: 243 232 255;
+  --brand-200: 233 213 255;
+  --brand-300: 216 180 254;
+  --brand-400: 192 132 252;
+  --brand-500: 168 85 247;
+  --brand-600: 147 51 234;
+
+  --accent-100: 252 231 243;
+  --accent-200: 251 207 232;
+  --accent-300: 249 168 212;
+  --accent-400: 244 114 182;
+  --accent-500: 236 72 153;
+  --accent-600: 219 39 119;
+}
+
+[data-theme='cyber'] {
+  --bg-base: #04060d;
+  --bg-header: rgba(5, 8, 20, 0.9);
+  --bg-sidebar: rgba(6, 10, 23, 0.85);
+  --bg-modal: rgba(7, 13, 29, 0.96);
+  --bg-modal-solid: #091022;
+  --bg-thead: rgba(8, 14, 31, 0.95);
+  --bg-panel-top: rgba(15, 23, 42, 0.78);
+  --bg-panel-bot: rgba(9, 13, 27, 0.88);
+  --bg-card-top: rgba(17, 26, 46, 0.72);
+  --bg-card-bot: rgba(10, 15, 30, 0.85);
+  --border-subtle: rgba(148, 163, 184, 0.13);
+  --grid-line: rgba(56, 189, 248, 0.035);
+
+  --brand-100: 207 250 254;
+  --brand-200: 165 243 252;
+  --brand-300: 103 232 249;
+  --brand-400: 34 211 238;
+  --brand-500: 6 182 212;
+  --brand-600: 8 145 178;
+
+  --accent-100: 237 233 254;
+  --accent-200: 221 214 254;
+  --accent-300: 196 181 253;
+  --accent-400: 167 139 250;
+  --accent-500: 139 92 246;
+  --accent-600: 124 58 237;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: rgba(148, 163, 184, 0.12);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg-base);
+    color: #f1f5f9;
+    font-family: 'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, sans-serif;
+    user-select: none;
+    transition: background-color 280ms ease;
+  }
+
+  input,
+  textarea,
+  select {
+    user-select: text;
+  }
+}
+
+/* Custom Electron Titlebar drag regions */
+.app-drag {
+  -webkit-app-region: drag;
+}
+
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Ambient architectural grid background */
+.bg-cyber-grid {
+  background-size: 44px 44px;
+  background-image: linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+}
+
+/* Glassmorphism surfaces (opaque-leaning gradient + specular border, zero expensive backdrop-blur storm) */
+.glass-panel {
+  background: linear-gradient(155deg, var(--bg-panel-top) 0%, var(--bg-panel-bot) 100%);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.glass-card {
+  background: linear-gradient(160deg, var(--bg-card-top) 0%, var(--bg-card-bot) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  box-shadow: 0 8px 28px -10px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Zero-cost radial gradient ambient glows (replaces heavy GPU blur(130px) filters) */
+.ambient-orb-brand {
+  background: radial-gradient(circle, rgb(var(--brand-400) / 0.16) 0%, rgb(var(--brand-400) / 0.04) 42%, transparent 72%);
+}
+
+.ambient-orb-accent {
+  background: radial-gradient(circle, rgb(var(--accent-500) / 0.16) 0%, rgb(var(--accent-500) / 0.04) 42%, transparent 72%);
+}
+
+.ambient-orb-center {
+  background: radial-gradient(circle, rgb(var(--brand-300) / 0.07) 0%, transparent 68%);
+}
+
+/* Virtualize offscreen table row layout during window/sidebar resizes */
+.oddsmatcher-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 54px;
+}
+
+/* Pure CSS silky sidebar transitions (zero JS rAF overhead) */
+.sidebar-rail {
+  transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  contain: layout style;
+}
+
+.sidebar-label {
+  transition: opacity 160ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sidebar-card-shell {
+  transition: height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  contain: layout style paint;
+}
+
+.sidebar-active-pill {
+  transition: transform 280ms cubic-bezier(0.34, 1.32, 0.64, 1);
+  will-change: transform;
+}
+
+/* Deadlock-free CSS view/section entrance (settles cleanly to native opacity:1 / transform:none) */
+@keyframes viewEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.view-enter {
+  animation: viewEnter 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* GPU-composited sliding pill indicator for segmented controls */
+.sliding-pill-indicator {
+  transition: transform 250ms cubic-bezier(0.32, 1.18, 0.54, 1),
+    width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, width;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-enter {
+    animation: none;
+  }
+  .sliding-pill-indicator {
+    transition: none;
+  }
+}
+
+.glass-card-hover {
+  transition: border-color 220ms ease, transform 220ms ease, box-shadow 220ms ease;
+}
+
+.glass-card-hover:hover {
+  border-color: rgb(var(--brand-400) / 0.42);
+  box-shadow: 0 12px 34px -8px rgb(var(--brand-400) / 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.09);
+}
+
+/* Animated neon top hairline */
+.aurora-bar {
+  background: linear-gradient(
+    90deg,
+    rgb(var(--brand-400) / 0) 0%,
+    rgb(var(--brand-300) / 0.85) 25%,
+    rgb(var(--accent-400) / 0.9) 55%,
+    rgb(var(--brand-400) / 0.8) 80%,
+    rgb(var(--brand-400) / 0) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 6s linear infinite;
+}
+
+/* Surebet holographic badge shimmer */
+.surebet-badge {
+  background: linear-gradient(
+    110deg,
+    rgb(var(--brand-500) / 0.24) 0%,
+    rgb(var(--brand-300) / 0.42) 45%,
+    rgb(var(--accent-500) / 0.26) 100%
+  );
+  background-size: 220% 100%;
+  animation: shimmer 2.8s linear infinite;
+  border: 1px solid rgb(var(--brand-300) / 0.65);
+  box-shadow: 0 0 18px -2px rgb(var(--brand-400) / 0.48);
+}
+
+/* Odds change directional flash */
+.odds-flash-up {
+  animation: flash-up 1.6s ease-out;
+}
+.odds-flash-down {
+  animation: flash-down 1.6s ease-out;
+}
+
+/* Futuristic slim scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(7, 11, 22, 0.45);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.34);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--brand-400) / 0.55);
+}
+
+/* Range slider styling */
+input[type='range'].pulse-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: linear-gradient(
+    90deg,
+    rgb(var(--accent-500) / 0.5),
+    rgb(var(--brand-400) / 0.78),
+    rgb(var(--brand-300) / 0.55)
+  );
+  height: 6px;
+  border-radius: 999px;
+  outline: none;
+}
+
+input[type='range'].pulse-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgb(var(--brand-300));
+  border: 2px solid var(--bg-base);
+  box-shadow: 0 0 12px rgb(var(--brand-400) / 0.9);
+  cursor: pointer;
+  transition: transform 150ms ease;
+}
+
+input[type='range'].pulse-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.18);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
