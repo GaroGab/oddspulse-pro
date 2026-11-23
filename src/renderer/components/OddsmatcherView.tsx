@@ -778,42 +778,42 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
               </button>
             </div>
           ) : (
-            <table className="w-full border-collapse text-left text-xs">
+            <table className="w-full min-w-[1040px] border-collapse text-left text-xs">
               <thead className="sticky top-0 z-20 border-b border-slate-800 bg-[var(--bg-modal-solid)]">
                 <tr className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                  <th className="cursor-pointer px-3.5 py-3 hover:text-brand-300" onClick={() => toggleSort('startTime')}>
+                  <th className="cursor-pointer whitespace-nowrap px-3.5 py-3 hover:text-brand-300" onClick={() => toggleSort('startTime')}>
                     <span className="inline-flex items-center gap-1">
                       Data/Ora <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="px-3.5 py-3">Evento & Campionato</th>
-                  <th className="px-3.5 py-3">Mercato / Esito</th>
-                  <th className="cursor-pointer px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('rating')}>
+                  <th className="whitespace-nowrap px-3.5 py-3">Evento & Campionato</th>
+                  <th className="whitespace-nowrap px-3.5 py-3">Mercato / Esito</th>
+                  <th className="cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('rating')}>
                     <span className="inline-flex items-center gap-1">
                       Rating <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="cursor-pointer px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('backOdds')}>
+                  <th className="min-w-[144px] cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('backOdds')}>
                     <span className="inline-flex items-center gap-1">
                       Punta (Book) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="cursor-pointer px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('layOdds')}>
+                  <th className="min-w-[176px] cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('layOdds')}>
                     <span className="inline-flex items-center gap-1">
                       Banca (Exch) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="cursor-pointer px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('liquidity')}>
+                  <th className="cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('liquidity')}>
                     <span className="inline-flex items-center gap-1">
                       Liquidità <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="cursor-pointer px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('profit')}>
+                  <th className="cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('profit')}>
                     <span className="inline-flex items-center gap-1">
                       Esito (€) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="px-3.5 py-3 text-right">Azioni</th>
+                  <th className="whitespace-nowrap px-3.5 py-3 text-right">Azioni</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/55">
@@ -876,21 +876,24 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                             : ''
                         }`}
                       >
-                        <div className="inline-flex items-center justify-end gap-2.5">
-                          <div className="flex flex-col items-end">
+                        <div className="flex w-full min-w-0 items-center justify-end gap-2.5">
+                          <div className="flex min-w-0 flex-1 flex-col items-end">
                             <span className="inline-flex items-center gap-1 rounded-md border border-blue-500/35 bg-blue-500/15 px-2 py-0.5 font-mono text-xs font-bold text-blue-200">
                               {row.backDelta === 'up' && <ArrowUp className="h-3 w-3 text-emerald-400" />}
                               {row.backDelta === 'down' && <ArrowDown className="h-3 w-3 text-rose-400" />}
                               {formatOdds(row.backOdds)}
                             </span>
-                            <span className="mt-1 text-[10px] font-medium text-slate-300">
+                            <span
+                              title={row.bookmakerName}
+                              className="mt-1 max-w-[145px] truncate text-[10px] font-medium text-slate-300"
+                            >
                               {row.bookmakerName}
                             </span>
                           </div>
                           <BookmakerIcon
                             sourceId={row.bookmakerId}
                             size={logoSize}
-                            className="rounded-md"
+                            className="shrink-0 rounded-md"
                           />
                         </div>
                       </td>
@@ -904,21 +907,24 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                             : ''
                         }`}
                       >
-                        <div className="inline-flex items-center justify-end gap-2.5">
-                          <div className="flex flex-col items-end">
+                        <div className="flex w-full min-w-0 items-center justify-end gap-2.5">
+                          <div className="flex min-w-0 flex-1 flex-col items-end">
                             <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/35 bg-rose-500/15 px-2 py-0.5 font-mono text-xs font-bold text-rose-200">
                               {row.layDelta === 'up' && <ArrowUp className="h-3 w-3 text-rose-400" />}
                               {row.layDelta === 'down' && <ArrowDown className="h-3 w-3 text-emerald-400" />}
                               {formatOdds(row.layOdds)}
                             </span>
-                            <span className="mt-1 text-[10px] font-medium text-slate-300">
+                            <span
+                              title={`${row.exchangeName} (${(row.commission * 100).toFixed(1)}%)`}
+                              className="mt-1 max-w-[160px] truncate text-[10px] font-medium text-slate-300"
+                            >
                               {row.exchangeName} ({(row.commission * 100).toFixed(1)}%)
                             </span>
                           </div>
                           <BookmakerIcon
                             sourceId={row.exchangeId}
                             size={logoSize}
-                            className="rounded-md"
+                            className="shrink-0 rounded-md"
                           />
                         </div>
                       </td>
