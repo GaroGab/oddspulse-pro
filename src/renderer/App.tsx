@@ -452,8 +452,25 @@ export const App: React.FC = () => {
       if (res) {
         setRatingWatches(res.watches);
         setWatchStatus(res.status);
+      } else {
+        const now = Date.now();
+        const created: RatingWatch = {
+          ...input,
+          id: `watch_${now}_${Math.random().toString(36).slice(2, 7)}`,
+          createdAt: now,
+          updatedAt: now,
+          lastCheckedAt: null,
+          lastBestMatch: null,
+          lastTriggeredAt: null,
+          triggerCount: 0,
+        };
+        setRatingWatches((prev) => [created, ...prev]);
       }
-      pushToast('Radar Rating Attivato', `${input.eventName} (${input.targetRating.toFixed(1)}%)`);
+      const label =
+        input.eventName.trim() ||
+        input.league?.trim() ||
+        (input.sport ? `Sport: ${input.sport}` : 'Tutti gli eventi');
+      pushToast('Radar Rating Attivato', `${label} (${input.targetRating.toFixed(1)}%)`);
     },
     [pushToast]
   );
@@ -463,6 +480,10 @@ export const App: React.FC = () => {
     if (res) {
       setRatingWatches(res.watches);
       setWatchStatus(res.status);
+    } else {
+      setRatingWatches((prev) =>
+        prev.map((w) => (w.id === id ? { ...w, ...patch, updatedAt: Date.now() } : w))
+      );
     }
   }, []);
 
@@ -471,6 +492,8 @@ export const App: React.FC = () => {
     if (res) {
       setRatingWatches(res.watches);
       setWatchStatus(res.status);
+    } else {
+      setRatingWatches((prev) => prev.filter((w) => w.id !== id));
     }
   }, []);
 

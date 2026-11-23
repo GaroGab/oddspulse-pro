@@ -18,6 +18,8 @@ import {
   computeAdaptiveWatchPlan,
   evaluateRatingWatch,
   isWatchExpired,
+  matchesWatchLeague,
+  resolveCanonicalCompetition,
 } from './ratingWatch';
 import {
   buildSavedMultipleInputFromPlan,
@@ -1014,6 +1016,65 @@ describe('Rating Watch Engine & Adaptive Interval', () => {
     expect(plan.activeWatches).toHaveLength(1);
     expect(plan.bookmakerIds).toEqual(['sisal_it']);
     expect(plan.exchangeIds).toEqual(['betfair_exchange']);
+    expect(plan.eventHints).toEqual([]);
+  });
+
+  it('filters watches by competition (Serie A, Serie B, LaLiga, Bundesliga, ATP, NBA) across multi-source league labels', () => {
+    expect(resolveCanonicalCompetition('ITALIA: Serie A', 'football')).toBe('Serie A');
+    expect(resolveCanonicalCompetition('Italy Serie B', 'football')).toBe('Serie B');
+    expect(resolveCanonicalCompetition('SPAGNA: LaLiga', 'football')).toBe('LaLiga');
+    expect(resolveCanonicalCompetition('Spain La Liga', 'football')).toBe('LaLiga');
+    expect(resolveCanonicalCompetition('ATP - SINGOLARE: Roma', 'tennis')).toBe('ATP');
+    expect(resolveCanonicalCompetition('USA: NBA', 'basketball')).toBe('NBA');
+
+    expect(matchesWatchLeague('Serie A', 'ITALIA: Serie A', 'football')).toBe(true);
+    expect(matchesWatchLeague('Serie A', 'Italy Serie A', 'football')).toBe(true);
+    expect(matchesWatchLeague('Serie A', 'ITALIA: Serie B', 'football')).toBe(false);
+    expect(matchesWatchLeague('Serie A', 'BRASILE: Serie A', 'football')).toBe(false);
+    expect(matchesWatchLeague('Serie A', 'Serie A', 'basketball')).toBe(false);
+    expect(matchesWatchLeague('Bundesliga', 'GERMANIA: Bundesliga', 'football')).toBe(true);
+    expect(matchesWatchLeague('Bundesliga', 'GERMANIA: 2. Bundesliga', 'football')).toBe(false);
+
+    const nowMs = Date.now();
+    const futureIso = new Date(nowMs + 3600_000).toISOString();
+
+    const serieBWatch = makeWatch({
+      eventKey: undefined,
+      eventName: '',
+      sport: undefined,
+      league: 'Serie B',
+      startTime: undefined,
+      bookmakerIds: [],
+      exchangeIds: [],
+      targetRating: 95,
+    });
+
+    const rows: OddsmatcherRow[] = [
+      makeRow({
+        id: 'serie-a-higher',
+        eventName: 'Inter - Napoli',
+        league: 'ITALIA: Serie A',
+        startTime: futureIso,
+        backOdds: 2.2,
+        layOdds: 2.04,
+      }),
+      makeRow({
+        id: 'serie-b-match',
+        eventName: 'Palermo - Bari',
+        league: 'ITALIA: Serie B',
+        startTime: futureIso,
+        backOdds: 2.05,
+        layOdds: 2.04,
+      }),
+    ];
+
+    const res = evaluateRatingWatch(serieBWatch, rows, { nowMs });
+    expect(res.bestMatch?.rowId).toBe('serie-b-match');
+    expect(res.bestMatch?.eventName).toBe('Palermo - Bari');
+    expect(res.shouldTrigger).toBe(true);
+
+    const plan = computeAdaptiveWatchPlan([serieBWatch], DEFAULT_SETTINGS, nowMs);
+    expect(plan.sports).toEqual(['football']);
     expect(plan.eventHints).toEqual([]);
   });
 });

@@ -475,6 +475,15 @@ export function linkScrapedMarkets(rawMarkets: RawScrapedMarket[]): LinkedEventG
       }
     }
 
+    if (
+      m.league &&
+      (!bestGroup.league ||
+        /^(calcio|football|soccer|tennis|basket|basketball)$/i.test(bestGroup.league.trim())) &&
+      !/^(calcio|football|soccer|tennis|basket|basketball)$/i.test(m.league.trim())
+    ) {
+      bestGroup.league = m.league;
+    }
+
     const alignedSelections = bestSwapped ? swapHomeAway(m.selections) : m.selections;
     const list = bestGroup.marketsByType.get(m.marketType) ?? [];
     if (!list.some((x) => x.market.sourceId === m.sourceId && x.market.sourceName === m.sourceName)) {

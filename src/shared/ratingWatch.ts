@@ -30,6 +30,50 @@ export const KAMBI_SOURCES = new Set<SourceId>([
 
 const QUERY_STOP_TOKENS = new Set(['vs', 'v', 'fc', 'ac', 'as', 'sc', 'ss']);
 
+export interface CompetitionPreset {
+  value: string;
+  label: string;
+  sport: SportKey;
+  hint: string;
+}
+
+export const COMPETITION_PRESETS: CompetitionPreset[] = [
+  // Calcio
+  { value: 'Serie A', label: 'Serie A', sport: 'football', hint: 'Italia' },
+  { value: 'Serie B', label: 'Serie B', sport: 'football', hint: 'Italia' },
+  { value: 'Serie C', label: 'Serie C', sport: 'football', hint: 'Italia' },
+  { value: 'Coppa Italia', label: 'Coppa Italia', sport: 'football', hint: 'Italia' },
+  { value: 'Premier League', label: 'Premier League', sport: 'football', hint: 'Inghilterra' },
+  { value: 'Championship', label: 'Championship', sport: 'football', hint: 'Inghilterra' },
+  { value: 'FA Cup', label: 'FA Cup', sport: 'football', hint: 'Inghilterra' },
+  { value: 'LaLiga', label: 'LaLiga', sport: 'football', hint: 'Spagna' },
+  { value: 'Bundesliga', label: 'Bundesliga', sport: 'football', hint: 'Germania' },
+  { value: 'Ligue 1', label: 'Ligue 1', sport: 'football', hint: 'Francia' },
+  { value: 'Champions League', label: 'Champions League', sport: 'football', hint: 'UEFA' },
+  { value: 'Europa League', label: 'Europa League', sport: 'football', hint: 'UEFA' },
+  { value: 'Conference League', label: 'Conference League', sport: 'football', hint: 'UEFA' },
+  { value: 'Eredivisie', label: 'Eredivisie', sport: 'football', hint: 'Olanda' },
+  { value: 'Liga Portugal', label: 'Liga Portugal', sport: 'football', hint: 'Portogallo' },
+  // Tennis
+  { value: 'ATP', label: 'ATP Tour', sport: 'tennis', hint: 'Tennis Maschile' },
+  { value: 'WTA', label: 'WTA Tour', sport: 'tennis', hint: 'Tennis Femminile' },
+  { value: 'Challenger', label: 'ATP Challenger', sport: 'tennis', hint: 'Tennis' },
+  { value: 'Grand Slam', label: 'Grand Slam', sport: 'tennis', hint: 'Slam' },
+  // Basket
+  { value: 'NBA', label: 'NBA', sport: 'basketball', hint: 'Basket USA' },
+  { value: 'Eurolega', label: 'Eurolega', sport: 'basketball', hint: 'Basket Europa' },
+  { value: 'Serie A Basket', label: 'Serie A Basket (LBA)', sport: 'basketball', hint: 'Basket Italia' },
+];
+
+const GENERIC_SPORT_LEAGUES = new Set([
+  'calcio',
+  'football',
+  'soccer',
+  'tennis',
+  'basket',
+  'basketball',
+]);
+
 /**
  * Normalizes team/event text for accent-insensitive, case-insensitive matching.
  */
@@ -42,6 +86,232 @@ export function normalizeWatchQuery(raw: string): string {
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function hasPhrase(hayNorm: string, phraseNorm: string): boolean {
+  if (!hayNorm || !phraseNorm) return false;
+  const paddedHay = ` ${hayNorm} `;
+  return paddedHay.includes(` ${phraseNorm} `);
+}
+
+function matchesCanonicalPreset(
+  presetValue: string,
+  rowLeague: string,
+  rowSport?: SportKey
+): boolean {
+  const norm = normalizeWatchQuery(rowLeague);
+  if (!norm) return false;
+
+  const isBasket =
+    rowSport === 'basketball' ||
+    hasPhrase(norm, 'basket') ||
+    hasPhrase(norm, 'basketball') ||
+    hasPhrase(norm, 'lba') ||
+    hasPhrase(norm, 'lega a');
+
+  switch (presetValue) {
+    case 'Serie A':
+      if (isBasket) return false;
+      if (
+        hasPhrase(norm, 'brasile') ||
+        hasPhrase(norm, 'brazil') ||
+        hasPhrase(norm, 'ecuador') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
+        return false;
+      }
+      return hasPhrase(norm, 'serie a');
+
+    case 'Serie B':
+      if (isBasket) return false;
+      if (hasPhrase(norm, 'brasile') || hasPhrase(norm, 'brazil') || hasPhrase(norm, 'ecuador')) {
+        return false;
+      }
+      return hasPhrase(norm, 'serie b');
+
+    case 'Serie C':
+      if (isBasket) return false;
+      return hasPhrase(norm, 'serie c');
+
+    case 'Coppa Italia':
+      if (isBasket) return false;
+      return hasPhrase(norm, 'coppa italia');
+
+    case 'Premier League':
+      if (
+        hasPhrase(norm, 'russia') ||
+        hasPhrase(norm, 'ucraina') ||
+        hasPhrase(norm, 'ukraine') ||
+        hasPhrase(norm, 'egitto') ||
+        hasPhrase(norm, 'egypt') ||
+        hasPhrase(norm, 'scozia') ||
+        hasPhrase(norm, 'scotland') ||
+        hasPhrase(norm, 'israele') ||
+        hasPhrase(norm, 'kazakistan') ||
+        hasPhrase(norm, 'armenia') ||
+        hasPhrase(norm, 'canada')
+      ) {
+        return false;
+      }
+      return hasPhrase(norm, 'premier league');
+
+    case 'Championship':
+      if (hasPhrase(norm, 'scozia') || hasPhrase(norm, 'scotland')) return false;
+      return hasPhrase(norm, 'championship');
+
+    case 'FA Cup':
+      return hasPhrase(norm, 'fa cup');
+
+    case 'LaLiga':
+      if (hasPhrase(norm, 'laliga 2') || hasPhrase(norm, 'la liga 2') || hasPhrase(norm, 'hypermotion')) {
+        return false;
+      }
+      return (
+        hasPhrase(norm, 'laliga') ||
+        hasPhrase(norm, 'la liga') ||
+        (hasPhrase(norm, 'primera division') &&
+          (hasPhrase(norm, 'spagna') || hasPhrase(norm, 'spain')))
+      );
+
+    case 'Bundesliga':
+      if (
+        hasPhrase(norm, '2 bundesliga') ||
+        hasPhrase(norm, 'bundesliga 2') ||
+        hasPhrase(norm, 'austria')
+      ) {
+        return false;
+      }
+      return hasPhrase(norm, 'bundesliga');
+
+    case 'Ligue 1':
+      return hasPhrase(norm, 'ligue 1');
+
+    case 'Champions League':
+      if (
+        isBasket ||
+        hasPhrase(norm, 'afc') ||
+        hasPhrase(norm, 'caf') ||
+        hasPhrase(norm, 'concacaf') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
+        return false;
+      }
+      return hasPhrase(norm, 'champions league');
+
+    case 'Europa League':
+      return hasPhrase(norm, 'europa league');
+
+    case 'Conference League':
+      return hasPhrase(norm, 'conference league');
+
+    case 'Eredivisie':
+      return hasPhrase(norm, 'eredivisie');
+
+    case 'Liga Portugal':
+      return hasPhrase(norm, 'liga portugal') || hasPhrase(norm, 'primeira liga');
+
+    case 'ATP':
+      if (hasPhrase(norm, 'challenger')) return false;
+      return hasPhrase(norm, 'atp');
+
+    case 'WTA':
+      return hasPhrase(norm, 'wta');
+
+    case 'Challenger':
+      return hasPhrase(norm, 'challenger');
+
+    case 'Grand Slam':
+      return (
+        hasPhrase(norm, 'grand slam') ||
+        hasPhrase(norm, 'australian open') ||
+        hasPhrase(norm, 'roland garros') ||
+        hasPhrase(norm, 'french open') ||
+        hasPhrase(norm, 'wimbledon') ||
+        hasPhrase(norm, 'us open')
+      );
+
+    case 'NBA':
+      if (hasPhrase(norm, 'wnba')) return false;
+      return hasPhrase(norm, 'nba');
+
+    case 'Eurolega':
+      return hasPhrase(norm, 'eurolega') || hasPhrase(norm, 'euroleague');
+
+    case 'Serie A Basket':
+      return (
+        isBasket &&
+        (hasPhrase(norm, 'serie a') || hasPhrase(norm, 'lba') || hasPhrase(norm, 'lega a'))
+      );
+
+    default:
+      return false;
+  }
+}
+
+/**
+ * Resolves a raw league string (e.g. "ITALIA: Serie A", "Italy Serie A") to a canonical
+ * preset value if one matches, or returns the trimmed original league name.
+ */
+export function resolveCanonicalCompetition(
+  rawLeague: string | undefined,
+  sport?: SportKey
+): string | undefined {
+  const trimmed = rawLeague?.trim();
+  if (!trimmed || trimmed === 'ALL') return undefined;
+  const norm = normalizeWatchQuery(trimmed);
+  if (!norm || GENERIC_SPORT_LEAGUES.has(norm)) return undefined;
+
+  const exactPreset = COMPETITION_PRESETS.find(
+    (p) => p.value.toLowerCase() === trimmed.toLowerCase() && (!sport || p.sport === sport)
+  );
+  if (exactPreset) return exactPreset.value;
+
+  for (const preset of COMPETITION_PRESETS) {
+    if (sport && preset.sport !== sport) continue;
+    if (matchesCanonicalPreset(preset.value, trimmed, sport)) {
+      return preset.value;
+    }
+  }
+  return trimmed;
+}
+
+export function inferSportFromLeague(watchLeague: string | undefined): SportKey | undefined {
+  if (!watchLeague) return undefined;
+  const canonical = resolveCanonicalCompetition(watchLeague);
+  const preset = COMPETITION_PRESETS.find((p) => p.value === canonical);
+  return preset?.sport;
+}
+
+/**
+ * Checks whether a candidate row's league matches the watch's competition filter.
+ */
+export function matchesWatchLeague(
+  watchLeague: string | undefined,
+  rowLeague: string,
+  rowSport?: SportKey
+): boolean {
+  const trimmed = watchLeague?.trim();
+  if (!trimmed || trimmed === 'ALL') return true;
+
+  const canonicalWatch = resolveCanonicalCompetition(trimmed);
+  if (!canonicalWatch) return true;
+
+  const isKnownPreset = COMPETITION_PRESETS.some((p) => p.value === canonicalWatch);
+  if (isKnownPreset) {
+    return matchesCanonicalPreset(canonicalWatch, rowLeague, rowSport);
+  }
+
+  const normWatch = normalizeWatchQuery(trimmed);
+  const normRow = normalizeWatchQuery(rowLeague);
+  if (!normWatch) return true;
+  if (!normRow) return false;
+  if (normRow === normWatch || hasPhrase(normRow, normWatch)) return true;
+
+  const tokens = tokenizeWatchPart(trimmed);
+  if (tokens.length === 0) return normRow.includes(normWatch);
+  return tokens.every((tok) => hasPhrase(normRow, tok) || normRow.includes(tok));
 }
 
 /**
@@ -82,10 +352,11 @@ function splitEventTeamsText(raw: string): [string, string] | null {
  * then fuzzy token/team match, or wildcard match when no event filter is specified).
  */
 export function matchesWatchEvent(
-  watch: Pick<RatingWatch, 'eventKey' | 'eventName' | 'sport'>,
+  watch: Pick<RatingWatch, 'eventKey' | 'eventName' | 'sport' | 'league'>,
   row: OddsmatcherRow
 ): boolean {
   if (watch.sport && row.sport !== watch.sport) return false;
+  if (watch.league && !matchesWatchLeague(watch.league, row.league, row.sport)) return false;
   if (watch.eventKey && row.eventKey === watch.eventKey) return true;
 
   const queryNorm = normalizeWatchQuery(watch.eventName);
@@ -322,7 +593,8 @@ export function computeAdaptiveWatchPlan(
       for (const ex of w.exchangeIds) exchangeSet.add(ex);
     }
 
-    if (w.sport) sportSet.add(w.sport);
+    const effectiveSport = w.sport ?? inferSportFromLeague(w.league);
+    if (effectiveSport) sportSet.add(effectiveSport);
     else needsAllSports = true;
 
     const queryNorm = normalizeWatchQuery(w.eventName);

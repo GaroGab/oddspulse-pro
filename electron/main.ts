@@ -239,7 +239,7 @@ function evaluateWatchesAgainstRows(rows: OddsmatcherRow[], isFullCycle: boolean
       triggered.push({
         id: `trig_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
         watchId: w.id,
-        watchEventName: w.eventName,
+        watchEventName: w.eventName || w.league || evalRes.bestMatch.eventName,
         targetRating: w.targetRating,
         mode: w.mode,
         match: evalRes.bestMatch,
@@ -762,6 +762,8 @@ app.whenReady().then(() => {
         const filtersEdited =
           patch.targetRating !== undefined ||
           patch.eventName !== undefined ||
+          patch.sport !== undefined ||
+          patch.league !== undefined ||
           patch.marketType !== undefined ||
           patch.selectionKey !== undefined ||
           patch.bookmakerIds !== undefined ||
