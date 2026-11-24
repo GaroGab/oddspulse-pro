@@ -6,6 +6,10 @@ import {
   Calculator,
   CalendarRange,
   CheckCircle2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
   Clock,
   Edit3,
   EyeOff,
@@ -15,6 +19,7 @@ import {
   RotateCcw,
   Search,
   ShieldAlert,
+  SlidersHorizontal,
   Trash2,
   Volume2,
   VolumeX,
@@ -167,6 +172,297 @@ const MARKET_LABEL_MAP: Record<MarketType | 'ALL', string> = {
   H2H: 'Testa a Testa',
 };
 
+function countWatchFilterItems(w: RatingWatch): number {
+  const leagues = getWatchLeagues(w);
+  const dateLabel = formatWatchDateRangeLabel(w.dateRange);
+  return (
+    (w.sport ? 1 : 0) +
+    (dateLabel ? 1 : 0) +
+    leagues.length +
+    1 + // mercato/esito
+    2 + // liquidita + range quote
+    (w.bookmakerIds.length > 0 ? w.bookmakerIds.length : 1) +
+    (w.exchangeIds.length > 0 ? w.exchangeIds.length : 1)
+  );
+}
+
+interface WatchFiltersBannerProps {
+  watch: RatingWatch;
+}
+
+const WatchFiltersBanner: React.FC<WatchFiltersBannerProps> = ({ watch }) => {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const track1Ref = useRef<HTMLDivElement>(null);
+  const track2Ref = useRef<HTMLDivElement>(null);
+  const posRef = useRef(0);
+  const dragRef = useRef<{ active: boolean; startX: number; startScroll: number }>({
+    active: false,
+    startX: 0,
+    startScroll: 0,
+  });
+
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const watchLeagues = useMemo(() => getWatchLeagues(watch), [watch]);
+  const watchDateLabel = useMemo(
+    () => formatWatchDateRangeLabel(watch.dateRange),
+    [watch.dateRange]
+  );
+  const selectionLabel = useMemo(
+    () =>
+      getSelectionOptionsForMarket(watch.marketType).find(
+        (o) => o.value === watch.selectionKey
+      )?.label ?? watch.selectionKey,
+    [watch.marketType, watch.selectionKey]
+  );
+
+  // Measure whether the filter chips overflow the available banner width
+  useEffect(() => {
+    const scrollEl = scrollRef.current;
+    const t1 = track1Ref.current;
+    if (!scrollEl || !t1) return;
+
+    const measure = () => {
+      const overflow = t1.scrollWidth > scrollEl.clientWidth + 2;
+      setIsOverflowing(overflow);
+      if (!overflow) {
+        posRef.current = 0;
+        scrollEl.scrollLeft = 0;
+      }
+    };
+
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(scrollEl);
+    ro.observe(t1);
+    return () => ro.disconnect();
+  }, [watch, watchLeagues.length, watchDateLabel]);
+
+  // Smooth infinite ticker auto-scroll via scrollLeft (pauses on hover/drag)
+  useEffect(() => {
+    if (!isOverflowing || isPaused || isDragging) return;
+    if (
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ) {
+      return;
+    }
+
+    let rafId = 0;
+    let lastTs = performance.now();
+    const SPEED_PX_PER_SEC = 42;
+
+    const step = (now: number) => {
+      const scrollEl = scrollRef.current;
+      const t1 = track1Ref.current;
+      const t2 = track2Ref.current;
+      if (scrollEl && t1 && t2) {
+        const loopWidth = t2.offsetLeft - t1.offsetLeft;
+        if (loopWidth > 0) {
+          const dt = Math.min(80, Math.max(0, now - lastTs));
+          posRef.current = (posRef.current + (dt * SPEED_PX_PER_SEC) / 1000) % loopWidth;
+          scrollEl.scrollLeft = posRef.current;
+        }
+      }
+      lastTs = now;
+      rafId = requestAnimationFrame(step);
+    };
+
+    rafId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(rafId);
+  }, [isOverflowing, isPaused, isDragging]);
+
+  const nudgeScroll = (delta: number) => {
+    const scrollEl = scrollRef.current;
+    const t1 = track1Ref.current;
+    const t2 = track2Ref.current;
+    if (!scrollEl) return;
+
+    if (t1 && t2 && t2.offsetLeft > t1.offsetLeft) {
+      const loopWidth = t2.offsetLeft - t1.offsetLeft;
+      let next = scrollEl.scrollLeft + delta;
+      next = ((next % loopWidth) + loopWidth) % loopWidth;
+      scrollEl.scrollLeft = next;
+      posRef.current = next;
+    } else {
+      scrollEl.scrollLeft += delta;
+      posRef.current = scrollEl.scrollLeft;
+    }
+  };
+
+  const renderFilterTrack = (isDuplicate: boolean) => (
+    <div
+      ref={isDuplicate ? track2Ref : track1Ref}
+      aria-hidden={isDuplicate ? true : undefined}
+      className="flex w-max shrink-0 items-center gap-1.5 text-[10px]"
+    >
+      {watch.sport && (
+        <span className="shrink-0 rounded-md border border-slate-700/80 bg-slate-950/90 px-1.5 py-0.5 font-semibold text-slate-200">
+          {sportLabel(watch.sport)}
+        </span>
+      )}
+      {watchDateLabel && (
+        <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent-400/35 bg-accent-500/10 px-1.5 py-0.5 font-mono font-semibold text-accent-200">
+          <CalendarRange className="h-2.5 w-2.5 shrink-0" />
+          {watchDateLabel}
+        </span>
+      )}
+      {watchLeagues.map((lg) => (
+        <span
+          key={`${isDuplicate ? 'dup-' : ''}lg-${lg}`}
+          className="shrink-0 rounded-md border border-brand-400/35 bg-brand-500/10 px-1.5 py-0.5 font-semibold text-brand-200"
+        >
+          {lg}
+        </span>
+      ))}
+      <span className="shrink-0 rounded-md border border-slate-800 bg-slate-950/90 px-1.5 py-0.5 text-slate-300">
+        {MARKET_LABEL_MAP[watch.marketType]} &middot; {selectionLabel}
+      </span>
+      <span className="shrink-0 rounded-md border border-slate-800 bg-slate-950/90 px-1.5 py-0.5 font-mono text-slate-300">
+        Liq &ge; {formatEuro(watch.minLiquidity)}
+      </span>
+      <span className="shrink-0 rounded-md border border-slate-800 bg-slate-950/90 px-1.5 py-0.5 font-mono text-slate-300">
+        Q {watch.minBackOdds.toFixed(2)}–{watch.maxBackOdds.toFixed(2)}
+      </span>
+      <span className="shrink-0 pl-0.5 font-semibold text-slate-500">Book:</span>
+      {watch.bookmakerIds.length === 0 ? (
+        <span className="shrink-0 rounded bg-slate-950/90 px-1.5 py-0.5 text-slate-300 border border-slate-800">
+          Tutti
+        </span>
+      ) : (
+        watch.bookmakerIds.map((id) => (
+          <span
+            key={`${isDuplicate ? 'dup-' : ''}bk-${id}`}
+            className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-800 bg-slate-950/90 px-1.5 py-0.5 text-slate-200"
+          >
+            <BookmakerIcon sourceId={id} size={14} />
+            {SOURCE_NAME_MAP.get(id) ?? id}
+          </span>
+        ))
+      )}
+      <span className="shrink-0 pl-0.5 font-semibold text-slate-500">Exch:</span>
+      {watch.exchangeIds.length === 0 ? (
+        <span className="shrink-0 rounded bg-slate-950/90 px-1.5 py-0.5 text-slate-300 border border-slate-800">
+          Tutti
+        </span>
+      ) : (
+        watch.exchangeIds.map((id) => (
+          <span
+            key={`${isDuplicate ? 'dup-' : ''}ex-${id}`}
+            className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-800 bg-slate-950/90 px-1.5 py-0.5 text-slate-200"
+          >
+            <BookmakerIcon sourceId={id} size={14} />
+            {SOURCE_NAME_MAP.get(id) ?? id}
+          </span>
+        ))
+      )}
+    </div>
+  );
+
+  return (
+    <div
+      data-testid={`watch-filters-banner-${watch.id}`}
+      onMouseEnter={() => setIsPaused(true)}
+      onMouseLeave={() => {
+        setIsPaused(false);
+        dragRef.current.active = false;
+        setIsDragging(false);
+      }}
+      className="view-enter mt-2 flex items-center gap-1 rounded-lg border border-brand-400/25 bg-slate-900/80 px-2 py-1.5"
+      title={isOverflowing ? 'Passa il mouse per fermare o trascina per scorrere i filtri' : undefined}
+    >
+      <SlidersHorizontal className="h-3 w-3 shrink-0 text-brand-300" />
+      {isOverflowing && (
+        <button
+          type="button"
+          onClick={() => nudgeScroll(-160)}
+          className="shrink-0 rounded p-0.5 text-slate-400 transition hover:bg-slate-800 hover:text-brand-200"
+          title="Scorri filtri a sinistra"
+          aria-label="Scorri filtri a sinistra"
+        >
+          <ChevronLeft className="h-3 w-3" />
+        </button>
+      )}
+      <div
+        ref={scrollRef}
+        onPointerDown={(e) => {
+          if (!isOverflowing || !scrollRef.current) return;
+          dragRef.current = {
+            active: true,
+            startX: e.clientX,
+            startScroll: scrollRef.current.scrollLeft,
+          };
+          setIsDragging(true);
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (!dragRef.current.active || !scrollRef.current) return;
+          const dx = e.clientX - dragRef.current.startX;
+          const t1 = track1Ref.current;
+          const t2 = track2Ref.current;
+          let next = dragRef.current.startScroll - dx;
+          if (t1 && t2 && t2.offsetLeft > t1.offsetLeft) {
+            const loopWidth = t2.offsetLeft - t1.offsetLeft;
+            next = ((next % loopWidth) + loopWidth) % loopWidth;
+          }
+          scrollRef.current.scrollLeft = next;
+          posRef.current = next;
+        }}
+        onPointerUp={(e) => {
+          if (!dragRef.current.active) return;
+          dragRef.current.active = false;
+          setIsDragging(false);
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+        }}
+        onPointerCancel={() => {
+          dragRef.current.active = false;
+          setIsDragging(false);
+        }}
+        style={
+          isOverflowing
+            ? {
+                maskImage:
+                  'linear-gradient(to right, transparent 0%, black 12px, black calc(100% - 12px), transparent 100%)',
+                WebkitMaskImage:
+                  'linear-gradient(to right, transparent 0%, black 12px, black calc(100% - 12px), transparent 100%)',
+              }
+            : undefined
+        }
+        className={`no-scrollbar flex min-w-0 flex-1 items-center overflow-x-auto select-none ${
+          isOverflowing ? (isDragging ? 'cursor-grabbing' : 'cursor-grab') : ''
+        }`}
+      >
+        <div className="flex w-max items-center">
+          {renderFilterTrack(false)}
+          {isOverflowing && (
+            <>
+              <span aria-hidden="true" className="px-2.5 text-[10px] text-brand-400/60">
+                &bull;
+              </span>
+              {renderFilterTrack(true)}
+            </>
+          )}
+        </div>
+      </div>
+      {isOverflowing && (
+        <button
+          type="button"
+          onClick={() => nudgeScroll(160)}
+          className="shrink-0 rounded p-0.5 text-slate-400 transition hover:bg-slate-800 hover:text-brand-200"
+          title="Scorri filtri a destra"
+          aria-label="Scorri filtri a destra"
+        >
+          <ChevronRight className="h-3 w-3" />
+        </button>
+      )}
+    </div>
+  );
+};
+
 export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
   snapshot,
   watches,
@@ -186,6 +482,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
   const [form, setForm] = useState<WatchFormState>(() => createEmptyForm('normal'));
   const [editingId, setEditingId] = useState<string | null>(null);
   const [filterTab, setFilterTab] = useState<'all' | 'active' | 'triggered' | 'paused'>('all');
+  const [expandedFilters, setExpandedFilters] = useState<Record<string, boolean>>({});
   const [pickerOpen, setPickerOpen] = useState(false);
   const [testSoundPlaying, setTestSoundPlaying] = useState(false);
   const [nowSecTick, setNowSecTick] = useState(() => Date.now());
@@ -1242,8 +1539,8 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                   ? Math.max(5, Math.min(100, (liveBest.rating / Math.max(1, w.targetRating)) * 100))
                   : 0;
                 const hitNow = Boolean(liveBest && liveBest.rating >= w.targetRating);
-                const watchLeagues = getWatchLeagues(w);
-                const watchDateLabel = formatWatchDateRangeLabel(w.dateRange);
+                const filtersOpen = Boolean(expandedFilters[w.id]);
+                const filterCount = countWatchFilterItems(w);
 
                 return (
                   <div
@@ -1283,58 +1580,52 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                           <span className="rounded-md bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand-300 border border-slate-800">
                             {betModeLabelIt(w.mode)} &ge; {w.targetRating.toFixed(1)}%
                           </span>
-                          <span className="rounded-md bg-slate-900 px-1.5 py-0.5 text-[10px] text-slate-300 border border-slate-800">
-                            {MARKET_LABEL_MAP[w.marketType]} &middot;{' '}
-                            {getSelectionOptionsForMarket(w.marketType).find(
-                              (o) => o.value === w.selectionKey
-                            )?.label ?? w.selectionKey}
-                          </span>
-                          {watchLeagues.map((lg) => (
-                            <span
-                              key={lg}
-                              className="rounded-md border border-brand-400/35 bg-brand-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand-200"
-                            >
-                              {lg}
-                            </span>
-                          ))}
-                          {watchDateLabel && (
-                            <span className="inline-flex items-center gap-1 rounded-md border border-accent-400/35 bg-accent-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-accent-200">
-                              <CalendarRange className="h-2.5 w-2.5" />
-                              {watchDateLabel}
-                            </span>
-                          )}
                           {w.triggerCount > 0 && (
                             <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300">
                               Avvisi: {w.triggerCount}
                             </span>
                           )}
+                          <button
+                            type="button"
+                            data-testid={`watch-filters-toggle-${w.id}`}
+                            aria-expanded={filtersOpen}
+                            onClick={() =>
+                              setExpandedFilters((prev) => ({
+                                ...prev,
+                                [w.id]: !prev[w.id],
+                              }))
+                            }
+                            className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-semibold transition ${
+                              filtersOpen
+                                ? 'border-brand-400/50 bg-brand-500/15 text-brand-200'
+                                : 'border-slate-700/80 bg-slate-900 text-slate-300 hover:border-brand-400/40 hover:text-brand-200'
+                            }`}
+                            title={
+                              filtersOpen
+                                ? 'Nascondi banner filtri'
+                                : 'Visualizza tutti i filtri nel banner a scorrimento'
+                            }
+                          >
+                            <SlidersHorizontal className="h-2.5 w-2.5 shrink-0" />
+                            <span>Filtri ({filterCount})</span>
+                            {filtersOpen ? (
+                              <ChevronUp className="h-2.5 w-2.5 shrink-0" />
+                            ) : (
+                              <ChevronDown className="h-2.5 w-2.5 shrink-0" />
+                            )}
+                          </button>
                         </div>
 
-                        <div className="mt-1.5 truncate text-sm font-bold text-white">
-                          {w.eventName.trim()
-                            ? w.eventName
-                            : watchLeagues.length > 0
-                            ? `Tutti gli eventi — ${watchLeagues.join(', ')}`
-                            : `Tutti gli eventi${w.sport ? ` (${sportLabel(w.sport)})` : ''}`}
-                        </div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-                          {w.sport && <span>{sportLabel(w.sport)}</span>}
-                          {watchLeagues.length > 0 && (
-                            <span>
-                              {w.sport ? '· ' : ''}
-                              {watchLeagues.join(', ')}
-                            </span>
-                          )}
-                          {w.startTime && (
-                            <span>
+                        <div className="mt-1.5 flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm font-bold text-white">
+                            {w.eventName.trim() ? w.eventName : 'Tutti gli eventi'}
+                          </span>
+                          {w.eventName.trim() && w.startTime && (
+                            <span className="shrink-0 font-mono text-[11px] text-slate-400">
                               &middot; {formatEventTime(w.startTime).date}{' '}
                               {formatEventTime(w.startTime).time}
                             </span>
                           )}
-                          <span>&middot; Liq &ge; {formatEuro(w.minLiquidity)}</span>
-                          <span>
-                            &middot; Q {w.minBackOdds.toFixed(2)}–{w.maxBackOdds.toFixed(2)}
-                          </span>
                         </div>
                       </div>
 
@@ -1387,41 +1678,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Sources row */}
-                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[10px]">
-                      <span className="text-slate-500">Book:</span>
-                      {w.bookmakerIds.length === 0 ? (
-                        <span className="rounded bg-slate-900 px-1.5 py-0.5 text-slate-300">
-                          Tutti
-                        </span>
-                      ) : (
-                        w.bookmakerIds.map((id) => (
-                          <span
-                            key={id}
-                            className="inline-flex items-center gap-1 rounded bg-slate-900 px-1.5 py-0.5 text-slate-200 border border-slate-800"
-                          >
-                            <BookmakerIcon sourceId={id} size={17} />
-                            {SOURCE_NAME_MAP.get(id) ?? id}
-                          </span>
-                        ))
-                      )}
-                      <span className="ml-1 text-slate-500">Exch:</span>
-                      {w.exchangeIds.length === 0 ? (
-                        <span className="rounded bg-slate-900 px-1.5 py-0.5 text-slate-300">
-                          Tutti
-                        </span>
-                      ) : (
-                        w.exchangeIds.map((id) => (
-                          <span
-                            key={id}
-                            className="inline-flex items-center gap-1 rounded bg-slate-900 px-1.5 py-0.5 text-slate-200 border border-slate-800"
-                          >
-                            <BookmakerIcon sourceId={id} size={17} />
-                            {SOURCE_NAME_MAP.get(id) ?? id}
-                          </span>
-                        ))
-                      )}
-                    </div>
+                    {filtersOpen && <WatchFiltersBanner watch={w} />}
 
                     {/* Current rating progress */}
                     <div className="mt-2.5 rounded-lg border border-slate-800/80 bg-slate-900/60 p-2">
