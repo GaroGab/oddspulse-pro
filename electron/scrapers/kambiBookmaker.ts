@@ -1,3 +1,4 @@
+import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type {
   RawScrapedMarket,
   SelectionQuote,
@@ -5,7 +6,8 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, sleep } from './httpClient';
+import { fetchJson, isAbortError, sleep, throwIfAborted } from './httpClient';
+import { matchesEventHints } from './matchLinker';
 
 interface KambiOutcome {
   label?: string;
@@ -83,33 +85,83 @@ const SPORTS: Array<{ sport: SportKey; kambiPath: string }> = [
   { sport: 'basketball', kambiPath: 'basketball' },
 ];
 
-import { matchesEventHints } from './matchLinker';
+const KAMBI_FUTURE_FOOTBALL_PATHS = [
+  'football/italy',
+  'football/england',
+  'football/spain',
+  'football/germany',
+  'football/france',
+  'football/netherlands',
+  'football/portugal',
+  'football/champions_league',
+  'football/europa_league',
+  'football/conference_league',
+];
+
+const KAMBI_FUTURE_BASKETBALL_PATHS = [
+  'basketball/nba',
+  'basketball/euroleague',
+  'basketball/italy',
+];
 
 export async function scrapeKambiBrand(
   spec: KambiBrandSpec,
   includeLive: boolean,
-  filter?: TargetedScrapeFilter
+  filter?: TargetedScrapeFilter,
+  signal?: AbortSignal
 ): Promise<{ markets: RawScrapedMarket[]; latencyMs: number }> {
   const started = Date.now();
+  const nowMs = Date.now();
   const markets: RawScrapedMarket[] = [];
-  let succeededSports = 0;
+  let succeededRequests = 0;
   let lastErr: unknown = null;
+
+  const dateWindow = filter?.dateWindow;
+  const needsFutureLeaguePaths = Boolean(dateWindow && dateWindow.endMs > nowMs + 20 * 3600_000);
+  const includesNearTerm = !dateWindow || dateWindow.startMs <= nowMs + 24 * 3600_000;
 
   const targetSports =
     filter?.sports && filter.sports.length > 0
       ? SPORTS.filter((s) => filter.sports!.includes(s.sport))
       : SPORTS;
 
+  const jobs: Array<{ sport: SportKey; kambiPath: string }> = [];
   for (const sp of targetSports) {
+    if (!needsFutureLeaguePaths) {
+      jobs.push(sp);
+    } else if (sp.sport === 'football') {
+      if (includesNearTerm) jobs.push({ sport: 'football', kambiPath: 'football' });
+      for (const p of KAMBI_FUTURE_FOOTBALL_PATHS) {
+        jobs.push({ sport: 'football', kambiPath: p });
+      }
+    } else if (sp.sport === 'basketball') {
+      if (includesNearTerm) jobs.push({ sport: 'basketball', kambiPath: 'basketball' });
+      for (const p of KAMBI_FUTURE_BASKETBALL_PATHS) {
+        jobs.push({ sport: 'basketball', kambiPath: p });
+      }
+    } else {
+      jobs.push(sp);
+    }
+  }
+
+  const seenEventIds = new Set<number>();
+  const pauseMs = needsFutureLeaguePaths ? 110 : 220;
+
+  for (let jobIdx = 0; jobIdx < jobs.length; jobIdx++) {
+    const sp = jobs[jobIdx];
+    throwIfAborted(signal);
     const url = `https://eu-offering-api.kambicdn.com/offering/v2018/${spec.kambiOperator}/listView/${sp.kambiPath}.json?lang=it_IT&market=IT&client_id=2&channel_id=1&useCombined=true`;
     try {
-      const { data } = await fetchJson<KambiListResponse>(url, { timeoutMs: 12000, retries: 1 });
+      const { data } = await fetchJson<KambiListResponse>(url, { timeoutMs: 12000, retries: 1, signal });
       const entries = data.events ?? [];
 
       for (const entry of entries) {
         const ev = entry.event;
         if (!ev || !ev.homeName || !ev.awayName) continue;
+        if (seenEventIds.has(ev.id)) continue;
         if (!includeLive && ev.state && ev.state !== 'NOT_STARTED') continue;
+        if (dateWindow && !matchesScrapeDateWindow(ev.start, dateWindow)) continue;
+        seenEventIds.add(ev.id);
 
         const homeTeam = ev.homeName.trim();
         const awayTeam = ev.awayName.trim();
@@ -260,15 +312,18 @@ export async function scrapeKambiBrand(
           }
         }
       }
-      succeededSports++;
+      succeededRequests++;
     } catch (err) {
+      if (signal?.aborted || isAbortError(err)) throw err;
       lastErr = err;
     }
-    // Gentle pause between sport requests to avoid Kambi 429
-    await sleep(220);
+    // Gentle pause between requests to avoid Kambi 429
+    if (jobIdx < jobs.length - 1) {
+      await sleep(pauseMs, signal);
+    }
   }
 
-  if (succeededSports === 0 && lastErr) {
+  if (succeededRequests === 0 && lastErr) {
     throw lastErr;
   }
 

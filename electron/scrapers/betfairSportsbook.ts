@@ -1,3 +1,4 @@
+import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type {
   MarketType,
   RawScrapedMarket,
@@ -5,7 +6,7 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, sleep } from './httpClient';
+import { fetchJson, isAbortError, sleep, throwIfAborted } from './httpClient';
 import { matchesEventHints } from './matchLinker';
 
 const SCAN_URL =
@@ -153,14 +154,25 @@ const SPORT_SPECS: Array<{
 
 export async function scrapeBetfairSportsbook(
   includeLive: boolean,
-  filter?: TargetedScrapeFilter
+  filter?: TargetedScrapeFilter,
+  signal?: AbortSignal
 ): Promise<{
   markets: RawScrapedMarket[];
   latencyMs: number;
 }> {
   const started = Date.now();
   const markets: RawScrapedMarket[] = [];
-  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const dateWindow = filter?.dateWindow;
+  const windowAfterMs = dateWindow
+    ? includeLive
+      ? dateWindow.startMs
+      : Math.max(nowMs, dateWindow.startMs)
+    : null;
+  if (dateWindow && windowAfterMs !== null && windowAfterMs > dateWindow.endMs) {
+    return { markets, latencyMs: Date.now() - started };
+  }
   let succeededSports = 0;
   let lastErr: unknown = null;
 
@@ -170,13 +182,21 @@ export async function scrapeBetfairSportsbook(
       : SPORT_SPECS;
 
   for (const sp of targetSpecs) {
+    throwIfAborted(signal);
     try {
       const payload = {
         filter: {
           productTypes: ['SPORTSBOOK'],
           marketTypeCodes: sp.marketTypeCodes,
           contentGroup: { language: 'it', regionCode: 'UK' },
-          ...(includeLive ? {} : { marketStartingAfter: nowIso }),
+          ...(dateWindow && windowAfterMs !== null
+            ? {
+                marketStartingAfter: new Date(windowAfterMs).toISOString(),
+                marketStartingBefore: new Date(dateWindow.endMs).toISOString(),
+              }
+            : includeLive
+            ? {}
+            : { marketStartingAfter: nowIso }),
           maxResults: sp.maxResults,
           eventTypeIds: [sp.eventTypeId],
         },
@@ -193,6 +213,7 @@ export async function scrapeBetfairSportsbook(
         method: 'POST',
         body: payload,
         timeoutMs: 12000,
+        signal,
       });
 
       const sbMarkets = scan.attachments?.sportsBookMarkets ?? {};
@@ -202,8 +223,12 @@ export async function scrapeBetfairSportsbook(
       const marketIds = Object.values(sbMarkets)
         .filter((m) => {
           if (!includeLive && m.inPlay) return false;
+          const ev = eventsMap[String(m.eventId)];
+          const startTime = m.marketTime ?? ev?.openDate;
+          if (dateWindow && startTime && !matchesScrapeDateWindow(startTime, dateWindow)) {
+            return false;
+          }
           if (filter?.eventHints?.length) {
-            const ev = eventsMap[String(m.eventId)];
             if (ev?.name && !matchesEventHints(ev.name, '', '', sp.sport, filter.eventHints)) {
               return false;
             }
@@ -215,16 +240,18 @@ export async function scrapeBetfairSportsbook(
       // Fetch fixed-odds prices in chunks of 40
       const priceMap = new Map<string, SmpPriceRespItem>();
       for (let i = 0; i < marketIds.length; i += 40) {
+        throwIfAborted(signal);
         const chunk = marketIds.slice(i, i + 40);
         const { data: prices } = await fetchJson<SmpPriceRespItem[]>(SMP_URL, {
           method: 'POST',
           body: { marketIds: chunk, currencyCode: 'EUR' },
           timeoutMs: 12000,
+          signal,
         });
         for (const p of prices ?? []) {
           priceMap.set(p.marketId, p);
         }
-        if (i + 40 < marketIds.length) await sleep(100);
+        if (i + 40 < marketIds.length) await sleep(100, signal);
       }
 
       for (const m of Object.values(sbMarkets)) {
@@ -295,6 +322,7 @@ export async function scrapeBetfairSportsbook(
       }
       succeededSports++;
     } catch (err) {
+      if (signal?.aborted || isAbortError(err)) throw err;
       lastErr = err;
     }
   }

@@ -1,10 +1,11 @@
+import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type {
   RawScrapedMarket,
   SelectionQuote,
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson } from './httpClient';
+import { fetchJson, isAbortError, throwIfAborted } from './httpClient';
 
 const PIN_BASE = 'https://guest.api.arcadia.pinnacle.com/0.1/sports';
 
@@ -51,7 +52,8 @@ import { matchesEventHints } from './matchLinker';
 
 export async function scrapePinnacle(
   includeLive: boolean,
-  filter?: TargetedScrapeFilter
+  filter?: TargetedScrapeFilter,
+  signal?: AbortSignal
 ): Promise<{
   markets: RawScrapedMarket[];
   latencyMs: number;
@@ -68,11 +70,13 @@ export async function scrapePinnacle(
       : PIN_SPORTS;
 
   for (const sp of targetSports) {
+    throwIfAborted(signal);
     try {
       const [{ data: matchups }, { data: straights }] = await Promise.all([
-        fetchJson<PinMatchup[]>(`${PIN_BASE}/${sp.sportId}/matchups`, { timeoutMs: 14000 }),
+        fetchJson<PinMatchup[]>(`${PIN_BASE}/${sp.sportId}/matchups`, { timeoutMs: 14000, signal }),
         fetchJson<PinStraightMarket[]>(`${PIN_BASE}/${sp.sportId}/markets/straight`, {
           timeoutMs: 14000,
+          signal,
         }),
       ]);
 
@@ -81,6 +85,9 @@ export async function scrapePinnacle(
         if (m.type !== 'matchup' || m.special) continue;
         if (!includeLive && m.isLive) continue;
         if (!includeLive && new Date(m.startTime).getTime() < nowMs - 60_000) continue;
+        if (filter?.dateWindow && !matchesScrapeDateWindow(m.startTime, filter.dateWindow)) {
+          continue;
+        }
 
         const parts = m.participants ?? [];
         const home = parts.find((p) => p.alignment === 'home')?.name ?? parts[0]?.name;
@@ -200,6 +207,7 @@ export async function scrapePinnacle(
       }
       succeededSports++;
     } catch (err) {
+      if (signal?.aborted || isAbortError(err)) throw err;
       lastErr = err;
     }
   }

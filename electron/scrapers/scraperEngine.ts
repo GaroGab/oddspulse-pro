@@ -1,3 +1,8 @@
+import { setMaxListeners } from 'events';
+import {
+  formatScrapeDateWindowLabel,
+  matchesScrapeDateWindow,
+} from '../../src/shared/dateRange';
 import { quickRatings, round2 } from '../../src/shared/math';
 import { computeConnectionDiagnostic } from '../../src/shared/networkHealth';
 import { ADM_BATCH_SOURCES, KAMBI_SOURCES } from '../../src/shared/ratingWatch';
@@ -11,6 +16,7 @@ import {
   type OddsmatcherRow,
   type OddsDelta,
   type RawScrapedMarket,
+  type ScrapeDateWindow,
   type ScrapeLogEntry,
   type ScrapeSnapshot,
   type SourceId,
@@ -21,7 +27,7 @@ import {
 import { scrapeBetfairExchange } from './betfairExchange';
 import { scrapeBetfairSportsbook } from './betfairSportsbook';
 import { scrapeBetflagExchange } from './betflagExchange';
-import { sleep } from './httpClient';
+import { isAbortError, sleep } from './httpClient';
 import {
   ITALIAN_ADM_BOOKMAKERS,
   scrapeItalianAdmBookmakers,
@@ -33,14 +39,34 @@ import { scrapePinnacle } from './pinnacleBookmaker';
 import { scrapeSmarketsExchange } from './smarketsExchange';
 
 const SOURCE_META = new Map(SOURCE_CATALOG.map((s) => [s.id, s]));
+const DATE_RANGE_CACHE_TTL_MS = 15 * 60_000;
+const MAX_DATE_RANGE_CACHE_ENTRIES = 4;
+
+interface DateRangeCacheEntry {
+  window: ScrapeDateWindow;
+  fetchedAt: number;
+  markets: RawScrapedMarket[];
+}
 
 export class ScraperEngine {
   private sourceStatuses = new Map<SourceId, SourceStatus>();
   private logs: ScrapeLogEntry[] = [];
   private previousOdds = new Map<string, { back: number; lay: number }>();
+  private lastBaseRawMarkets: RawScrapedMarket[] = [];
+  private dateRangeRawByKey = new Map<string, DateRangeCacheEntry>();
+  private activeDateWindow: ScrapeDateWindow | null = null;
   private lastSnapshot: ScrapeSnapshot;
   private isRunning = false;
   private isTargetedRunning = false;
+  private isDateRangeRunning = false;
+  private dateRangeTarget: { startDate: string; endDate: string } | null = null;
+  private autoScrapeEnabled = true;
+  private nextAutoRefreshAt: number | null = null;
+  private activeCycleAbortController: AbortController | null = null;
+  private activeCyclePromise: Promise<ScrapeSnapshot> | null = null;
+  private dateRangeAbortController: AbortController | null = null;
+  private dateRangeCyclePromise: Promise<ScrapeSnapshot> | null = null;
+  private kambiLock: Promise<void> = Promise.resolve();
   private onUpdate?: (snapshot: ScrapeSnapshot) => void;
   private checkOnline: () => boolean;
 
@@ -86,12 +112,110 @@ export class ScraperEngine {
         lastCycleDurationMs: 0,
         lastCompletedAt: null,
         isRunning: false,
+        isDateRangeScraping: false,
+        activeDateRange: null,
+        autoScrapeEnabled: true,
+        nextAutoRefreshAt: null,
       },
     };
   }
 
   public getSnapshot(): ScrapeSnapshot {
     return this.lastSnapshot;
+  }
+
+  public getIsRunning(): boolean {
+    return this.isRunning;
+  }
+
+  public getActiveDateWindow(): ScrapeDateWindow | null {
+    return this.activeDateWindow;
+  }
+
+  public setActiveDateWindow(window: ScrapeDateWindow | null): ScrapeSnapshot {
+    this.activeDateWindow = window;
+    if (!window) {
+      if (this.dateRangeAbortController) {
+        this.dateRangeAbortController.abort();
+        this.dateRangeAbortController = null;
+      }
+      this.isDateRangeRunning = false;
+      this.dateRangeTarget = null;
+    }
+    this.emitPartial();
+    return this.lastSnapshot;
+  }
+
+  public setAutoRefreshMeta(
+    meta: { autoScrapeEnabled?: boolean; nextAutoRefreshAt?: number | null },
+    emit = true
+  ): ScrapeSnapshot {
+    if (meta.autoScrapeEnabled !== undefined) {
+      this.autoScrapeEnabled = meta.autoScrapeEnabled;
+    }
+    if (meta.nextAutoRefreshAt !== undefined) {
+      this.nextAutoRefreshAt = meta.nextAutoRefreshAt;
+    }
+    this.lastSnapshot = {
+      ...this.lastSnapshot,
+      stats: {
+        ...this.lastSnapshot.stats,
+        autoScrapeEnabled: this.autoScrapeEnabled,
+        nextAutoRefreshAt: this.nextAutoRefreshAt,
+      },
+    };
+    if (emit) {
+      this.onUpdate?.(this.lastSnapshot);
+    }
+    return this.lastSnapshot;
+  }
+
+  public async stopActiveCycle(): Promise<ScrapeSnapshot> {
+    if (this.activeCycleAbortController) {
+      this.activeCycleAbortController.abort();
+    }
+    if (this.dateRangeAbortController) {
+      this.dateRangeAbortController.abort();
+    }
+    const pending: Promise<unknown>[] = [];
+    if (this.activeCyclePromise) pending.push(this.activeCyclePromise);
+    if (this.dateRangeCyclePromise) pending.push(this.dateRangeCyclePromise);
+    if (pending.length > 0) {
+      await Promise.race([Promise.allSettled(pending), sleep(1500).catch(() => {})]);
+    }
+    return this.lastSnapshot;
+  }
+
+  private getActiveDateRangeMeta(): { startDate: string; endDate: string } | null {
+    if (this.dateRangeTarget) return this.dateRangeTarget;
+    if (this.activeDateWindow) {
+      return {
+        startDate: this.activeDateWindow.startDate,
+        endDate: this.activeDateWindow.endDate,
+      };
+    }
+    return null;
+  }
+
+  private async withKambiLock<T>(
+    fn: () => Promise<T>,
+    signal?: AbortSignal,
+    fallback?: T
+  ): Promise<T> {
+    const prev = this.kambiLock;
+    let release!: () => void;
+    this.kambiLock = new Promise<void>((res) => {
+      release = res;
+    });
+    try {
+      await prev;
+      if (signal?.aborted) {
+        return fallback as T;
+      }
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   private getSourcesList(): SourceStatus[] {
@@ -123,6 +247,10 @@ export class ScraperEngine {
       stats: {
         ...this.lastSnapshot.stats,
         isRunning: this.isRunning,
+        isDateRangeScraping: this.isDateRangeRunning,
+        activeDateRange: this.getActiveDateRangeMeta(),
+        autoScrapeEnabled: this.autoScrapeEnabled,
+        nextAutoRefreshAt: this.nextAutoRefreshAt,
       },
     };
     this.onUpdate?.(this.lastSnapshot);
@@ -130,15 +258,24 @@ export class ScraperEngine {
 
   private async runSingleSource(
     id: SourceId,
-    fn: () => Promise<{ markets: RawScrapedMarket[]; latencyMs: number }>
+    fn: () => Promise<{ markets: RawScrapedMarket[]; latencyMs: number }>,
+    signal?: AbortSignal
   ): Promise<RawScrapedMarket[]> {
+    if (signal?.aborted) return [];
     const st = this.sourceStatuses.get(id)!;
+    const prevState = st.state;
+    const prevLastError = st.lastError;
     st.state = 'scraping';
     st.lastError = null;
     this.emitPartial();
 
     try {
       const { markets, latencyMs } = await fn();
+      if (signal?.aborted) {
+        st.state = prevState;
+        st.lastError = prevLastError;
+        return [];
+      }
       const uniqueEvents = new Set(markets.map((m) => m.eventId)).size;
       st.state = 'ok';
       st.latencyMs = latencyMs;
@@ -154,6 +291,11 @@ export class ScraperEngine {
       this.emitPartial();
       return markets;
     } catch (err) {
+      if (signal?.aborted || isAbortError(err)) {
+        st.state = prevState;
+        st.lastError = prevLastError;
+        return [];
+      }
       const msg = err instanceof Error ? err.message : String(err);
       st.state = 'error';
       st.lastError = msg;
@@ -164,80 +306,125 @@ export class ScraperEngine {
     }
   }
 
-  public async runCycle(settings: AppSettings): Promise<ScrapeSnapshot> {
-    if (this.isRunning) return this.lastSnapshot;
-    this.isRunning = true;
-    const cycleStart = Date.now();
-
-    for (const cfg of SOURCE_CATALOG) {
-      const st = this.sourceStatuses.get(cfg.id)!;
-      const enabled = settings.enabledSources[cfg.id] ?? cfg.enabled;
-      st.enabled = enabled;
-      if (!enabled) st.state = 'disabled';
-    }
-
-    // Fast-fail cleanly if the OS reports offline connectivity
-    if (!this.checkOnline()) {
-      for (const cfg of SOURCE_CATALOG) {
-        const st = this.sourceStatuses.get(cfg.id)!;
-        if (st.enabled) {
-          st.state = 'error';
-          st.lastError = 'Nessuna connessione internet rilevata';
-          st.errorCount += 1;
-        }
+  private storeDateRangeMarkets(dateWindow: ScrapeDateWindow, markets: RawScrapedMarket[]) {
+    const key = `${dateWindow.startDate}__${dateWindow.endDate}`;
+    this.dateRangeRawByKey.delete(key);
+    this.dateRangeRawByKey.set(key, {
+      window: dateWindow,
+      fetchedAt: Date.now(),
+      markets,
+    });
+    // Prune expired or overflow entries (keeping the active window if present)
+    const nowMs = Date.now();
+    const activeKey = this.activeDateWindow
+      ? `${this.activeDateWindow.startDate}__${this.activeDateWindow.endDate}`
+      : null;
+    for (const [k, entry] of this.dateRangeRawByKey) {
+      if (k !== activeKey && nowMs - entry.fetchedAt > DATE_RANGE_CACHE_TTL_MS) {
+        this.dateRangeRawByKey.delete(k);
       }
-      this.addLog(
-        'error',
-        'RETE',
-        'Connessione internet assente: impossibile contattare bookmaker ed exchange.'
-      );
-      this.isRunning = false;
-      const sources = this.getSourcesList();
-      this.lastSnapshot = {
-        ...this.lastSnapshot,
-        sources,
-        logs: [...this.logs],
-        connection: computeConnectionDiagnostic({
-          sources,
-          isSystemOnline: false,
-          hasCompletedCycle: true,
-        }),
-        stats: {
-          ...this.lastSnapshot.stats,
-          lastCycleDurationMs: Date.now() - cycleStart,
-          lastCompletedAt: Date.now(),
-          isRunning: false,
-        },
-      };
-      this.onUpdate?.(this.lastSnapshot);
-      return this.lastSnapshot;
+    }
+    while (this.dateRangeRawByKey.size > MAX_DATE_RANGE_CACHE_ENTRIES) {
+      const oldestKey = [...this.dateRangeRawByKey.keys()].find((k) => k !== activeKey);
+      if (!oldestKey) break;
+      this.dateRangeRawByKey.delete(oldestKey);
+    }
+  }
+
+  private collectCombinedRawMarkets(settings: AppSettings, nowMs = Date.now()): RawScrapedMarket[] {
+    const activeKey = this.activeDateWindow
+      ? `${this.activeDateWindow.startDate}__${this.activeDateWindow.endDate}`
+      : null;
+    for (const [k, entry] of this.dateRangeRawByKey) {
+      if (k !== activeKey && nowMs - entry.fetchedAt > DATE_RANGE_CACHE_TTL_MS) {
+        this.dateRangeRawByKey.delete(k);
+      }
     }
 
-    this.addLog(
-      'info',
-      'ENGINE',
-      'Avvio ciclo di scraping live su Exchange e Bookmaker italiani ADM / EU...'
-    );
-    this.emitPartial();
+    const dedup = new Map<string, RawScrapedMarket>();
+    const addMarket = (m: RawScrapedMarket) => {
+      if (settings.enabledSources[m.sourceId] === false) return;
+      const key = `${m.sourceId}|${m.sourceName}|${m.eventId}|${m.marketType}`;
+      const existing = dedup.get(key);
+      if (!existing || m.scrapedAt >= existing.scrapedAt) {
+        dedup.set(key, m);
+      }
+    };
 
+    for (const m of this.lastBaseRawMarkets) addMarket(m);
+    for (const entry of this.dateRangeRawByKey.values()) {
+      for (const m of entry.markets) addMarket(m);
+    }
+    return [...dedup.values()];
+  }
+
+  private async runDateRangeSource(
+    id: SourceId,
+    fn: () => Promise<{ markets: RawScrapedMarket[]; latencyMs: number }>,
+    signal?: AbortSignal
+  ): Promise<RawScrapedMarket[]> {
+    if (signal?.aborted) return [];
+    const st = this.sourceStatuses.get(id)!;
+    try {
+      const { markets, latencyMs } = await fn();
+      if (signal?.aborted) return [];
+      const uniqueEvents = new Set(markets.map((m) => m.eventId)).size;
+      st.state = 'ok';
+      st.latencyMs = latencyMs;
+      if (st.eventsCount === 0 && uniqueEvents > 0) {
+        st.eventsCount = uniqueEvents;
+        st.marketsCount = markets.length;
+      }
+      st.lastScrapedAt = Date.now();
+      st.successCount += 1;
+      return markets;
+    } catch (err) {
+      if (signal?.aborted || isAbortError(err)) return [];
+      const msg = err instanceof Error ? err.message : String(err);
+      if (st.state !== 'ok') {
+        st.state = 'error';
+        st.lastError = msg;
+      }
+      st.errorCount += 1;
+      this.addLog('warn', st.shortName, `Periodo futuro: ${msg}`);
+      return [];
+    }
+  }
+
+  private async scrapeAllSources(
+    settings: AppSettings,
+    filter: TargetedScrapeFilter | undefined,
+    signal: AbortSignal,
+    mode: 'full' | 'date_range'
+  ): Promise<RawScrapedMarket[]> {
     const includeLive = settings.includeLiveEvents;
     const allRaw: RawScrapedMarket[] = [];
+    const runSource =
+      mode === 'full'
+        ? (
+            id: SourceId,
+            fn: () => Promise<{ markets: RawScrapedMarket[]; latencyMs: number }>
+          ) => this.runSingleSource(id, fn, signal)
+        : (
+            id: SourceId,
+            fn: () => Promise<{ markets: RawScrapedMarket[]; latencyMs: number }>
+          ) => this.runDateRangeSource(id, fn, signal);
 
     // 1. Kick off Exchanges first (we also feed their live events into the Italian ADM scraper!)
     const exchangeTasks: Array<Promise<RawScrapedMarket[]>> = [];
     if (settings.enabledSources.betfair_exchange) {
       exchangeTasks.push(
-        this.runSingleSource('betfair_exchange', () => scrapeBetfairExchange(includeLive))
+        runSource('betfair_exchange', () => scrapeBetfairExchange(includeLive, filter, signal))
       );
     }
     if (settings.enabledSources.smarkets_exchange) {
       exchangeTasks.push(
-        this.runSingleSource('smarkets_exchange', () => scrapeSmarketsExchange(includeLive))
+        runSource('smarkets_exchange', () => scrapeSmarketsExchange(includeLive, filter, signal))
       );
     }
     if (settings.enabledSources.betflag_exchange) {
       exchangeTasks.push(
-        this.runSingleSource('betflag_exchange', () => scrapeBetflagExchange(includeLive))
+        runSource('betflag_exchange', () => scrapeBetflagExchange(includeLive, filter, signal))
       );
     }
 
@@ -245,34 +432,47 @@ export class ScraperEngine {
     const otherBookieTasks: Array<Promise<RawScrapedMarket[]>> = [];
     if (settings.enabledSources.betfair_sportsbook) {
       otherBookieTasks.push(
-        this.runSingleSource('betfair_sportsbook', () => scrapeBetfairSportsbook(includeLive))
+        runSource('betfair_sportsbook', () => scrapeBetfairSportsbook(includeLive, filter, signal))
       );
     }
     if (settings.enabledSources.pinnacle) {
-      otherBookieTasks.push(this.runSingleSource('pinnacle', () => scrapePinnacle(includeLive)));
+      otherBookieTasks.push(
+        runSource('pinnacle', () => scrapePinnacle(includeLive, filter, signal))
+      );
     }
     if (settings.enabledSources.the_odds_api && settings.theOddsApiKey.trim()) {
       otherBookieTasks.push(
-        this.runSingleSource('the_odds_api', () =>
-          scrapeTheOddsApiOptional(settings.theOddsApiKey)
+        runSource('the_odds_api', () =>
+          scrapeTheOddsApiOptional(settings.theOddsApiKey, filter, signal)
         )
       );
     }
 
-    // Kambi brands paced politely in parallel with everything else
-    const kambiTask = (async (): Promise<RawScrapedMarket[]> => {
-      const kambiIds: SourceId[] = ['888sport_it', 'leovegas_it', 'unibet', 'paf'];
-      const results: RawScrapedMarket[] = [];
-      for (const kid of kambiIds) {
-        if (!settings.enabledSources[kid]) continue;
-        const spec = KAMBI_BRANDS[kid];
-        if (!spec) continue;
-        const mkts = await this.runSingleSource(kid, () => scrapeKambiBrand(spec, includeLive));
-        results.push(...mkts);
-        await sleep(300);
-      }
-      return results;
-    })();
+    // Kambi brands paced politely under a mutex so concurrent full & date-range cycles never trigger HTTP 429
+    const kambiTask = this.withKambiLock(
+      async (): Promise<RawScrapedMarket[]> => {
+        const kambiIds: SourceId[] = ['888sport_it', 'leovegas_it', 'unibet', 'paf'];
+        const results: RawScrapedMarket[] = [];
+        for (const kid of kambiIds) {
+          if (signal.aborted) break;
+          if (!settings.enabledSources[kid]) continue;
+          const spec = KAMBI_BRANDS[kid];
+          if (!spec) continue;
+          const mkts = await runSource(kid, () => scrapeKambiBrand(spec, includeLive, filter, signal));
+          results.push(...mkts);
+          if (signal.aborted) break;
+          try {
+            await sleep(mode === 'date_range' ? 200 : 300, signal);
+          } catch (err) {
+            if (signal.aborted || isAbortError(err)) break;
+            throw err;
+          }
+        }
+        return results;
+      },
+      signal,
+      []
+    );
 
     // 3. Wait for Exchanges, then immediately launch Italian ADM batch (Sisal, SNAI, Betflag, Eurobet, GoldBet)
     const exchangeChunks = await Promise.all(exchangeTasks);
@@ -284,20 +484,40 @@ export class ScraperEngine {
     );
 
     const admTask = (async (): Promise<RawScrapedMarket[]> => {
-      if (enabledAdmIds.length === 0) return [];
-      for (const id of enabledAdmIds) {
-        const st = this.sourceStatuses.get(id)!;
-        st.state = 'scraping';
-        st.lastError = null;
+      if (enabledAdmIds.length === 0 || signal.aborted) return [];
+      const prevAdmStates = new Map<SourceId, { state: SourceStatus['state']; lastError: string | null }>();
+      if (mode === 'full') {
+        for (const id of enabledAdmIds) {
+          const st = this.sourceStatuses.get(id)!;
+          prevAdmStates.set(id, { state: st.state, lastError: st.lastError });
+          st.state = 'scraping';
+          st.lastError = null;
+        }
+        this.emitPartial();
       }
-      this.emitPartial();
 
       try {
         const { marketsBySource, latencyMs } = await scrapeItalianAdmBookmakers({
           exchangeMarkets,
           enabledSourceIds: enabledAdmIds,
           includeLive,
+          filter,
+          signal,
         });
+
+        if (signal.aborted) {
+          if (mode === 'full') {
+            for (const id of enabledAdmIds) {
+              const st = this.sourceStatuses.get(id)!;
+              const prev = prevAdmStates.get(id);
+              if (prev) {
+                st.state = prev.state;
+                st.lastError = prev.lastError;
+              }
+            }
+          }
+          return [];
+        }
 
         const combined: RawScrapedMarket[] = [];
         for (const id of enabledAdmIds) {
@@ -306,37 +526,78 @@ export class ScraperEngine {
           const uniqueEvents = new Set(mkts.map((m) => m.eventId)).size;
           st.state = 'ok';
           st.latencyMs = latencyMs;
-          st.eventsCount = uniqueEvents;
-          st.marketsCount = mkts.length;
+          if (mode === 'full' || (st.eventsCount === 0 && uniqueEvents > 0)) {
+            st.eventsCount = uniqueEvents;
+            st.marketsCount = mkts.length;
+          }
           st.lastScrapedAt = Date.now();
           st.successCount += 1;
-          this.addLog(
-            'success',
-            st.shortName,
-            `Recuperati ${mkts.length} mercati ADM su ${uniqueEvents} eventi in ${latencyMs}ms`
-          );
+          if (mode === 'full') {
+            this.addLog(
+              'success',
+              st.shortName,
+              `Recuperati ${mkts.length} mercati ADM su ${uniqueEvents} eventi in ${latencyMs}ms`
+            );
+          }
           combined.push(...mkts);
         }
-        this.emitPartial();
+        if (mode === 'full') {
+          this.emitPartial();
+        }
         return combined;
       } catch (err) {
+        if (signal.aborted || isAbortError(err)) {
+          if (mode === 'full') {
+            for (const id of enabledAdmIds) {
+              const st = this.sourceStatuses.get(id)!;
+              const prev = prevAdmStates.get(id);
+              if (prev) {
+                st.state = prev.state;
+                st.lastError = prev.lastError;
+              }
+            }
+          }
+          return [];
+        }
         const msg = err instanceof Error ? err.message : String(err);
         for (const id of enabledAdmIds) {
           const st = this.sourceStatuses.get(id)!;
-          st.state = 'error';
-          st.lastError = msg;
+          if (mode === 'full' || st.state !== 'ok') {
+            st.state = 'error';
+            st.lastError = msg;
+          }
           st.errorCount += 1;
         }
-        this.addLog('error', 'ADM-IT', `Errore scraping ADM: ${msg}`);
-        this.emitPartial();
+        this.addLog(
+          mode === 'full' ? 'error' : 'warn',
+          'ADM-IT',
+          mode === 'full'
+            ? `Errore scraping ADM: ${msg}`
+            : `Errore scraping ADM periodo futuro: ${msg}`
+        );
+        if (mode === 'full') {
+          this.emitPartial();
+        }
         return [];
       }
     })();
 
     const remainingSettled = await Promise.all([...otherBookieTasks, kambiTask, admTask]);
+    if (signal.aborted) return [];
     for (const chunk of remainingSettled) allRaw.push(...chunk);
+    return allRaw;
+  }
 
-    // Link markets across Bookmakers & Exchanges
+  private buildDerivedSnapshotData(
+    allRaw: RawScrapedMarket[],
+    settings: AppSettings
+  ): {
+    groups: LinkedEventGroup[];
+    oddsmatcherRows: OddsmatcherRow[];
+    dutcherRows: DutcherRow[];
+    backMarketGroups: BackMarketGroup[];
+    surebetsCount: number;
+  } {
     const groups = linkScrapedMarkets(allRaw);
     const nextOddsCache = new Map<string, { back: number; lay: number }>();
     const oddsmatcherRows = this.buildOddsmatcherRowsFromGroups(groups, settings, nextOddsCache);
@@ -360,7 +621,6 @@ export class ScraperEngine {
 
     for (const g of groups) {
       for (const [marketType, entries] of g.marketsByType) {
-        // 2. Build Dutcher rows (Best Back) & BackMarketGroups (all bookmaker quotes for Punta-Punta Matcher)
         const allBackSources = entries.filter(
           (e) => e.market.sourceKind === 'bookmaker' && e.selections.length >= 2
         );
@@ -475,54 +735,333 @@ export class ScraperEngine {
     }
 
     this.previousOdds = nextOddsCache;
-
     oddsmatcherRows.sort((a, b) => b.ratingNormal - a.ratingNormal || b.liquidity - a.liquidity);
     dutcherRows.sort((a, b) => b.rating - a.rating);
-
     const surebetsCount = oddsmatcherRows.filter((r) => r.isSurebet).length;
-    const durationMs = Date.now() - cycleStart;
 
-    this.addLog(
-      'info',
-      'LINKER',
-      `Abbinati ${oddsmatcherRows.length} match Punta/Banca (${surebetsCount} surebet >=100%) e ${dutcherRows.length} mercati Dutcher da ${groups.length} eventi in ${(durationMs / 1000).toFixed(1)}s`
-    );
+    return { groups, oddsmatcherRows, dutcherRows, backMarketGroups, surebetsCount };
+  }
 
-    this.isRunning = false;
-    const finalSources = this.getSourcesList();
-    const finalConnection = computeConnectionDiagnostic({
-      sources: finalSources,
-      isSystemOnline: this.checkOnline(),
-      hasCompletedCycle: true,
-    });
+  public async runCycle(settings: AppSettings): Promise<ScrapeSnapshot> {
+    if (this.isRunning && this.activeCyclePromise) {
+      return this.activeCyclePromise;
+    }
+    const promise = this._executeCycle(settings);
+    this.activeCyclePromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.activeCyclePromise === promise) {
+        this.activeCyclePromise = null;
+      }
+    }
+  }
 
-    if (finalConnection.health === 'offline') {
-      this.addLog(
-        'error',
-        'RETE',
-        `Problemi di connessione rilevati (${finalConnection.failedSourcesCount}/${finalConnection.enabledSourcesCount} fonti non raggiungibili): ${finalConnection.lastErrorSummary ?? 'verifica rete'}`
-      );
+  public async runDateRangeCycle(
+    settings: AppSettings,
+    dateWindow: ScrapeDateWindow
+  ): Promise<ScrapeSnapshot> {
+    if (
+      !dateWindow ||
+      !dateWindow.startDate ||
+      !dateWindow.endDate ||
+      !Number.isFinite(dateWindow.startMs) ||
+      !Number.isFinite(dateWindow.endMs) ||
+      dateWindow.endMs < dateWindow.startMs
+    ) {
+      return this.lastSnapshot;
     }
 
-    this.lastSnapshot = {
-      rows: oddsmatcherRows,
-      dutcherRows,
-      backMarketGroups,
-      sources: finalSources,
-      logs: [...this.logs],
-      connection: finalConnection,
-      stats: {
-        totalRawMarkets: allRaw.length,
-        linkedEventsCount: groups.length,
-        totalMatchesCount: oddsmatcherRows.length,
-        surebetsCount,
-        lastCycleDurationMs: durationMs,
-        lastCompletedAt: Date.now(),
-        isRunning: false,
-      },
-    };
-    this.onUpdate?.(this.lastSnapshot);
-    return this.lastSnapshot;
+    // Abort any older in-flight date-range scrape so rapid filter changes stay snappy and race-free
+    if (this.dateRangeAbortController) {
+      this.dateRangeAbortController.abort();
+    }
+
+    const abortController = new AbortController();
+    setMaxListeners(64, abortController.signal);
+    const signal = abortController.signal;
+    this.dateRangeAbortController = abortController;
+    this.activeDateWindow = dateWindow;
+    this.isDateRangeRunning = true;
+    this.dateRangeTarget = { startDate: dateWindow.startDate, endDate: dateWindow.endDate };
+
+    const label = formatScrapeDateWindowLabel(dateWindow);
+    const cycleStart = Date.now();
+
+    const promise = (async (): Promise<ScrapeSnapshot> => {
+      try {
+        for (const cfg of SOURCE_CATALOG) {
+          const st = this.sourceStatuses.get(cfg.id)!;
+          const enabled = settings.enabledSources[cfg.id] ?? cfg.enabled;
+          st.enabled = enabled;
+          if (!enabled) st.state = 'disabled';
+        }
+
+        if (!this.checkOnline()) {
+          this.addLog(
+            'error',
+            'PERIODO',
+            `Connessione internet assente: impossibile cercare quote per il periodo ${label}.`
+          );
+          if (this.dateRangeAbortController === abortController) {
+            this.isDateRangeRunning = false;
+            this.dateRangeTarget = null;
+          }
+          this.emitPartial();
+          return this.lastSnapshot;
+        }
+
+        this.addLog(
+          'info',
+          'PERIODO',
+          `Avvio ricerca quote per il periodo ${label} su Exchange e Bookmaker...`
+        );
+        this.emitPartial();
+
+        const rangeRaw = await this.scrapeAllSources(
+          settings,
+          { dateWindow },
+          signal,
+          'date_range'
+        );
+
+        if (signal.aborted) {
+          return this.lastSnapshot;
+        }
+
+        this.storeDateRangeMarkets(dateWindow, rangeRaw);
+        const combinedRaw = this.collectCombinedRawMarkets(settings);
+        const { groups, oddsmatcherRows, dutcherRows, backMarketGroups, surebetsCount } =
+          this.buildDerivedSnapshotData(combinedRaw, settings);
+
+        const durationMs = Date.now() - cycleStart;
+        const windowEventsCount = groups.filter((g) =>
+          matchesScrapeDateWindow(g.startMs, dateWindow)
+        ).length;
+        const windowMatchesCount = oddsmatcherRows.filter((r) =>
+          matchesScrapeDateWindow(r.startTime, dateWindow)
+        ).length;
+        const windowGroupsCount = backMarketGroups.filter((g) =>
+          matchesScrapeDateWindow(g.startTime, dateWindow)
+        ).length;
+
+        this.addLog(
+          windowMatchesCount > 0 || windowGroupsCount > 0 ? 'success' : 'info',
+          'PERIODO',
+          `Periodo ${label}: trovati ${windowEventsCount} eventi (${windowMatchesCount} quote Punta/Banca, ${windowGroupsCount} mercati Punta-Punta) in ${(
+            durationMs / 1000
+          ).toFixed(1)}s`
+        );
+
+        if (this.dateRangeAbortController === abortController) {
+          this.isDateRangeRunning = false;
+          this.dateRangeTarget = null;
+        }
+
+        const finalSources = this.getSourcesList();
+        const finalConnection = computeConnectionDiagnostic({
+          sources: finalSources,
+          isSystemOnline: this.checkOnline(),
+          hasCompletedCycle: true,
+        });
+
+        this.lastSnapshot = {
+          rows: oddsmatcherRows,
+          dutcherRows,
+          backMarketGroups,
+          sources: finalSources,
+          logs: [...this.logs],
+          connection: finalConnection,
+          stats: {
+            ...this.lastSnapshot.stats,
+            totalRawMarkets: combinedRaw.length,
+            linkedEventsCount: groups.length,
+            totalMatchesCount: oddsmatcherRows.length,
+            surebetsCount,
+            lastCompletedAt: Date.now(),
+            isRunning: this.isRunning,
+            isDateRangeScraping: this.isDateRangeRunning,
+            activeDateRange: this.getActiveDateRangeMeta(),
+            autoScrapeEnabled: this.autoScrapeEnabled,
+            nextAutoRefreshAt: this.nextAutoRefreshAt,
+          },
+        };
+        this.onUpdate?.(this.lastSnapshot);
+        return this.lastSnapshot;
+      } finally {
+        if (this.dateRangeAbortController === abortController) {
+          this.dateRangeAbortController = null;
+          if (this.isDateRangeRunning) {
+            this.isDateRangeRunning = false;
+            this.dateRangeTarget = null;
+            this.emitPartial();
+          }
+        }
+      }
+    })();
+
+    this.dateRangeCyclePromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.dateRangeCyclePromise === promise) {
+        this.dateRangeCyclePromise = null;
+      }
+    }
+  }
+
+  private async _executeCycle(settings: AppSettings): Promise<ScrapeSnapshot> {
+    if (this.isRunning) return this.lastSnapshot;
+    const abortController = new AbortController();
+    setMaxListeners(64, abortController.signal);
+    const signal = abortController.signal;
+    this.activeCycleAbortController = abortController;
+    this.isRunning = true;
+    const cycleStart = Date.now();
+
+    try {
+      for (const cfg of SOURCE_CATALOG) {
+        const st = this.sourceStatuses.get(cfg.id)!;
+        const enabled = settings.enabledSources[cfg.id] ?? cfg.enabled;
+        st.enabled = enabled;
+        if (!enabled) st.state = 'disabled';
+      }
+
+      // Fast-fail cleanly if the OS reports offline connectivity
+      if (!this.checkOnline()) {
+        for (const cfg of SOURCE_CATALOG) {
+          const st = this.sourceStatuses.get(cfg.id)!;
+          if (st.enabled) {
+            st.state = 'error';
+            st.lastError = 'Nessuna connessione internet rilevata';
+            st.errorCount += 1;
+          }
+        }
+        this.addLog(
+          'error',
+          'RETE',
+          'Connessione internet assente: impossibile contattare bookmaker ed exchange.'
+        );
+        this.isRunning = false;
+        const sources = this.getSourcesList();
+        this.lastSnapshot = {
+          ...this.lastSnapshot,
+          sources,
+          logs: [...this.logs],
+          connection: computeConnectionDiagnostic({
+            sources,
+            isSystemOnline: false,
+            hasCompletedCycle: true,
+          }),
+          stats: {
+            ...this.lastSnapshot.stats,
+            lastCycleDurationMs: Date.now() - cycleStart,
+            lastCompletedAt: Date.now(),
+            isRunning: false,
+            isDateRangeScraping: this.isDateRangeRunning,
+            activeDateRange: this.getActiveDateRangeMeta(),
+            autoScrapeEnabled: this.autoScrapeEnabled,
+            nextAutoRefreshAt: this.nextAutoRefreshAt,
+          },
+        };
+        this.onUpdate?.(this.lastSnapshot);
+        return this.lastSnapshot;
+      }
+
+      this.addLog(
+        'info',
+        'ENGINE',
+        'Avvio ciclo di scraping live su Exchange e Bookmaker italiani ADM / EU...'
+      );
+      this.emitPartial();
+
+      const baseRaw = await this.scrapeAllSources(settings, undefined, signal, 'full');
+      if (signal.aborted) {
+        this.isRunning = false;
+        this.addLog('info', 'ENGINE', "Ciclo di scraping fermato dall'utente.");
+        this.emitPartial();
+        return this.lastSnapshot;
+      }
+      this.lastBaseRawMarkets = baseRaw;
+
+      // Keep any actively filtered future date range refreshed during periodic/manual full cycles
+      const activeWin = this.activeDateWindow;
+      if (activeWin && activeWin.endMs >= Date.now() && !this.isDateRangeRunning && !signal.aborted) {
+        const rangeRaw = await this.scrapeAllSources(
+          settings,
+          { dateWindow: activeWin },
+          signal,
+          'date_range'
+        );
+        if (signal.aborted) {
+          this.isRunning = false;
+          this.addLog('info', 'ENGINE', "Ciclo di scraping fermato dall'utente.");
+          this.emitPartial();
+          return this.lastSnapshot;
+        }
+        this.storeDateRangeMarkets(activeWin, rangeRaw);
+      }
+
+      const combinedRaw = this.collectCombinedRawMarkets(settings);
+      const { groups, oddsmatcherRows, dutcherRows, backMarketGroups, surebetsCount } =
+        this.buildDerivedSnapshotData(combinedRaw, settings);
+
+      const durationMs = Date.now() - cycleStart;
+
+      this.addLog(
+        'info',
+        'LINKER',
+        `Abbinati ${oddsmatcherRows.length} match Punta/Banca (${surebetsCount} surebet >=100%) e ${dutcherRows.length} mercati Dutcher da ${groups.length} eventi in ${(durationMs / 1000).toFixed(1)}s`
+      );
+
+      this.isRunning = false;
+      const finalSources = this.getSourcesList();
+      const finalConnection = computeConnectionDiagnostic({
+        sources: finalSources,
+        isSystemOnline: this.checkOnline(),
+        hasCompletedCycle: true,
+      });
+
+      if (finalConnection.health === 'offline') {
+        this.addLog(
+          'error',
+          'RETE',
+          `Problemi di connessione rilevati (${finalConnection.failedSourcesCount}/${finalConnection.enabledSourcesCount} fonti non raggiungibili): ${finalConnection.lastErrorSummary ?? 'verifica rete'}`
+        );
+      }
+
+      this.lastSnapshot = {
+        rows: oddsmatcherRows,
+        dutcherRows,
+        backMarketGroups,
+        sources: finalSources,
+        logs: [...this.logs],
+        connection: finalConnection,
+        stats: {
+          totalRawMarkets: combinedRaw.length,
+          linkedEventsCount: groups.length,
+          totalMatchesCount: oddsmatcherRows.length,
+          surebetsCount,
+          lastCycleDurationMs: durationMs,
+          lastCompletedAt: Date.now(),
+          isRunning: false,
+          isDateRangeScraping: this.isDateRangeRunning,
+          activeDateRange: this.getActiveDateRangeMeta(),
+          autoScrapeEnabled: this.autoScrapeEnabled,
+          nextAutoRefreshAt: this.nextAutoRefreshAt,
+        },
+      };
+      this.onUpdate?.(this.lastSnapshot);
+      return this.lastSnapshot;
+    } finally {
+      if (this.activeCycleAbortController === abortController) {
+        this.activeCycleAbortController = null;
+      }
+      if (this.isRunning) {
+        this.isRunning = false;
+        this.emitPartial();
+      }
+    }
   }
 
   private buildOddsmatcherRowsFromGroups(
@@ -645,6 +1184,7 @@ export class ScraperEngine {
       bookmakerIds: SourceId[];
       exchangeIds: SourceId[];
       sports?: SportKey[];
+      dateWindow?: ScrapeDateWindow;
       eventHints?: TargetedScrapeFilter['eventHints'];
     }
   ): Promise<{
@@ -668,6 +1208,7 @@ export class ScraperEngine {
     const cycleStart = Date.now();
     const filter: TargetedScrapeFilter = {
       sports: plan.sports,
+      dateWindow: plan.dateWindow,
       eventHints: plan.eventHints,
     };
 
@@ -703,59 +1244,21 @@ export class ScraperEngine {
 
     try {
       const tasks: Array<Promise<RawScrapedMarket[]>> = [];
+      const exchangeTasks: Array<Promise<RawScrapedMarket[]>> = [];
 
       // Exchanges in parallel
       for (const exId of plan.exchangeIds) {
         if (exId === 'betfair_exchange') {
-          tasks.push(runSilent(exId, () => scrapeBetfairExchange(includeLive, filter)));
+          exchangeTasks.push(runSilent(exId, () => scrapeBetfairExchange(includeLive, filter)));
         } else if (exId === 'smarkets_exchange') {
-          tasks.push(runSilent(exId, () => scrapeSmarketsExchange(includeLive, filter)));
+          exchangeTasks.push(runSilent(exId, () => scrapeSmarketsExchange(includeLive, filter)));
         } else if (exId === 'betflag_exchange') {
-          tasks.push(runSilent(exId, () => scrapeBetflagExchange(includeLive, filter)));
+          exchangeTasks.push(runSilent(exId, () => scrapeBetflagExchange(includeLive, filter)));
         }
       }
 
-      // ADM batch bookmakers (filtered directly on eventHints so zero need to wait for Exchanges!)
-      const admIds = plan.bookmakerIds.filter((id) => ADM_BATCH_SOURCES.has(id));
-      if (admIds.length > 0) {
-        tasks.push(
-          (async (): Promise<RawScrapedMarket[]> => {
-            try {
-              const { marketsBySource, latencyMs } = await scrapeItalianAdmBookmakers({
-                exchangeMarkets: [],
-                enabledSourceIds: admIds,
-                includeLive,
-                filter,
-              });
-              const out: RawScrapedMarket[] = [];
-              for (const id of admIds) {
-                const mkts = marketsBySource.get(id) ?? [];
-                const st = this.sourceStatuses.get(id);
-                if (st) {
-                  st.state = 'ok';
-                  st.latencyMs = latencyMs;
-                  st.lastScrapedAt = Date.now();
-                  st.successCount += 1;
-                }
-                out.push(...mkts);
-              }
-              return out;
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              if (msg.includes('429')) hadRateLimit = true;
-              for (const id of admIds) {
-                const st = this.sourceStatuses.get(id);
-                if (st) {
-                  st.state = 'error';
-                  st.lastError = msg;
-                  st.errorCount += 1;
-                }
-              }
-              return [];
-            }
-          })()
-        );
-      }
+      const needsExchangeFeedForAdm =
+        (!plan.eventHints || plan.eventHints.length === 0) && exchangeTasks.length > 0;
 
       // Direct non-ADM bookmakers
       if (plan.bookmakerIds.includes('betfair_sportsbook')) {
@@ -791,6 +1294,59 @@ export class ScraperEngine {
             return out;
           })()
         );
+      }
+
+      // ADM batch bookmakers: wait for Exchanges only for eventless/date-range watches so all competitions match
+      const admIds = plan.bookmakerIds.filter((id) => ADM_BATCH_SOURCES.has(id));
+      const runAdmTask = (exchangeMarkets: RawScrapedMarket[]): Promise<RawScrapedMarket[]> =>
+        (async (): Promise<RawScrapedMarket[]> => {
+          try {
+            const { marketsBySource, latencyMs } = await scrapeItalianAdmBookmakers({
+              exchangeMarkets,
+              enabledSourceIds: admIds,
+              includeLive,
+              filter,
+            });
+            const out: RawScrapedMarket[] = [];
+            for (const id of admIds) {
+              const mkts = marketsBySource.get(id) ?? [];
+              const st = this.sourceStatuses.get(id);
+              if (st) {
+                st.state = 'ok';
+                st.latencyMs = latencyMs;
+                st.lastScrapedAt = Date.now();
+                st.successCount += 1;
+              }
+              out.push(...mkts);
+            }
+            return out;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes('429')) hadRateLimit = true;
+            for (const id of admIds) {
+              const st = this.sourceStatuses.get(id);
+              if (st) {
+                st.state = 'error';
+                st.lastError = msg;
+                st.errorCount += 1;
+              }
+            }
+            return [];
+          }
+        })();
+
+      if (needsExchangeFeedForAdm) {
+        const exchangeChunks = await Promise.all(exchangeTasks);
+        const exchangeMarkets = exchangeChunks.flat();
+        targetedRaw.push(...exchangeMarkets);
+        if (admIds.length > 0) {
+          tasks.push(runAdmTask(exchangeMarkets));
+        }
+      } else {
+        tasks.push(...exchangeTasks);
+        if (admIds.length > 0) {
+          tasks.push(runAdmTask([]));
+        }
       }
 
       const settled = await Promise.all(tasks);

@@ -1,4 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowRight,
   CalendarDays,
@@ -6,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  RefreshCw,
   Sparkles,
   X,
 } from 'lucide-react';
@@ -18,6 +21,7 @@ import {
   toLocalDateKey,
   type DateRangeValue,
 } from '../../shared/dateRange';
+import { getDropdownMotionProps } from './CustomSelect';
 
 export { EMPTY_DATE_RANGE, matchesDateRange, toLocalDateKey, type DateRangeValue };
 
@@ -87,17 +91,110 @@ function getWeekendRange(today: Date): { start: string; end: string } {
 
 interface DateRangeCalendarProps {
   value: DateRangeValue;
-  onChange: (next: DateRangeValue) => void;
+  onChange: (next: DateRangeValue, meta?: { pendingEnd?: boolean }) => void;
   eventDateCounts: Record<string, number>;
+  isScraping?: boolean;
+  'data-testid'?: string;
 }
+
+interface CalendarPopoverCoords {
+  left: number;
+  width: number;
+  maxHeight: number;
+  top?: number;
+  bottom?: number;
+  openUpward: boolean;
+}
+
+const POPOVER_WIDTH = 516;
+const POPOVER_ESTIMATED_HEIGHT = 440;
+const TITLEBAR_SAFE_TOP = 56;
+const VIEWPORT_MARGIN = 12;
+const TRIGGER_GAP = 8;
 
 export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
   value,
   onChange,
   eventDateCounts,
+  isScraping = false,
+  'data-testid': dataTestId,
 }) => {
-  const [open, setOpen] = useState(false);
+  const [open, setOpenState] = useState(false);
+  const [coords, setCoords] = useState<CalendarPopoverCoords | null>(null);
+  const openRef = useRef(false);
+  openRef.current = open;
   const rootRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const computeCoords = useCallback((): CalendarPopoverCoords | null => {
+    const el = rootRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return null;
+
+    const width = Math.min(POPOVER_WIDTH, window.innerWidth - VIEWPORT_MARGIN * 2);
+    let left = rect.right - width;
+    if (left < VIEWPORT_MARGIN) {
+      left = Math.min(rect.left, window.innerWidth - VIEWPORT_MARGIN - width);
+    }
+    left = Math.max(VIEWPORT_MARGIN, Math.min(left, window.innerWidth - VIEWPORT_MARGIN - width));
+
+    const spaceBelow = window.innerHeight - rect.bottom - TRIGGER_GAP - VIEWPORT_MARGIN;
+    const spaceAbove = rect.top - TITLEBAR_SAFE_TOP - TRIGGER_GAP;
+
+    if (spaceBelow >= POPOVER_ESTIMATED_HEIGHT) {
+      return {
+        left: Math.round(left),
+        width: Math.round(width),
+        top: Math.round(rect.bottom + TRIGGER_GAP),
+        maxHeight: Math.max(240, Math.floor(spaceBelow)),
+        openUpward: false,
+      };
+    }
+
+    if (spaceAbove >= POPOVER_ESTIMATED_HEIGHT) {
+      return {
+        left: Math.round(left),
+        width: Math.round(width),
+        bottom: Math.round(window.innerHeight - rect.top + TRIGGER_GAP),
+        maxHeight: Math.max(240, Math.floor(spaceAbove)),
+        openUpward: true,
+      };
+    }
+
+    // Medium/compact viewports where neither side fits the full popover: keep the whole calendar visible inside the viewport
+    const availableHeight = Math.max(240, window.innerHeight - TITLEBAR_SAFE_TOP - VIEWPORT_MARGIN);
+    const clampedTop = Math.max(
+      TITLEBAR_SAFE_TOP,
+      Math.round(window.innerHeight - VIEWPORT_MARGIN - Math.min(POPOVER_ESTIMATED_HEIGHT, availableHeight))
+    );
+    return {
+      left: Math.round(left),
+      width: Math.round(width),
+      top: clampedTop,
+      maxHeight: Math.floor(availableHeight),
+      openUpward: false,
+    };
+  }, []);
+
+  const setOpen = useCallback(
+    (next: boolean | ((prev: boolean) => boolean)) => {
+      const resolved = typeof next === 'function' ? next(openRef.current) : next;
+      if (resolved && !openRef.current) {
+        const fresh = computeCoords();
+        if (fresh) setCoords(fresh);
+      }
+      openRef.current = resolved;
+      setOpenState(resolved);
+    },
+    [computeCoords]
+  );
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const fresh = computeCoords();
+    if (fresh) setCoords(fresh);
+  }, [open, computeCoords]);
 
   const today = useMemo(() => new Date(), []);
   const todayKey = useMemo(() => toLocalDateKey(today), [today]);
@@ -114,6 +211,20 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
   const [draftEnd, setDraftEnd] = useState<string | null>(value.endDate);
   const [isPickingEnd, setIsPickingEnd] = useState(false);
   const [hoverKey, setHoverKey] = useState<string | null>(null);
+  const isPickingEndRef = useRef(false);
+  isPickingEndRef.current = isPickingEnd;
+  const draftStartRef = useRef<string | null>(draftStart);
+  draftStartRef.current = draftStart;
+
+  const commitPendingSingleDayIfNeeded = useCallback(() => {
+    if (isPickingEndRef.current && draftStartRef.current) {
+      const k = draftStartRef.current;
+      isPickingEndRef.current = false;
+      setIsPickingEnd(false);
+      setDraftEnd(k);
+      onChange({ mode: 'range', startDate: k, endDate: k }, { pendingEnd: false });
+    }
+  }, [onChange]);
 
   // Sync draft only when opening popover (never clobbering an in-progress 2-click range selection)
   useEffect(() => {
@@ -139,24 +250,50 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
     }
   }, [value.mode]);
 
-  // Close on click outside or Escape
+  // Close on click outside or Escape, and keep portal anchored on resize/scroll
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (rootRef.current?.contains(target) || popoverRef.current?.contains(target)) {
+        return;
+      }
+      commitPendingSingleDayIfNeeded();
+      setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        commitPendingSingleDayIfNeeded();
         setOpen(false);
       }
     };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+    const onViewportChange = (e: Event) => {
+      if (
+        e.type === 'scroll' &&
+        popoverRef.current &&
+        e.target instanceof Node &&
+        popoverRef.current.contains(e.target)
+      ) {
+        return;
+      }
+      const fresh = computeCoords();
+      if (fresh) {
+        setCoords(fresh);
+      } else {
+        setOpen(false);
+      }
     };
     document.addEventListener('mousedown', onPointerDown);
     window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', onViewportChange);
+    window.addEventListener('scroll', onViewportChange, true);
     return () => {
       document.removeEventListener('mousedown', onPointerDown);
       window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', onViewportChange);
+      window.removeEventListener('scroll', onViewportChange, true);
     };
-  }, [open]);
+  }, [open, computeCoords, setOpen, commitPendingSingleDayIfNeeded]);
 
   // Build 42-cell Monday-first calendar grid for (viewYear, viewMonth)
   const calendarCells = useMemo(() => {
@@ -223,19 +360,23 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
   }, [rangeStart, rangeEnd]);
 
   const handleDayClick = (key: string) => {
-    if (!isPickingEnd || !draftStart) {
-      // 1st click: start fresh selection & immediately preview that day
+    if (!isPickingEndRef.current || !draftStartRef.current) {
+      // 1st click: start fresh selection & immediately preview that day (mark pendingEnd so 2nd click avoids throwaway scrapes)
+      draftStartRef.current = key;
+      isPickingEndRef.current = true;
       setDraftStart(key);
       setDraftEnd(null);
       setIsPickingEnd(true);
-      onChange({ mode: 'range', startDate: key, endDate: key });
+      onChange({ mode: 'range', startDate: key, endDate: key }, { pendingEnd: true });
     } else {
       // 2nd click: complete range (auto-order chronologically)
-      const [s, e] = key >= draftStart ? [draftStart, key] : [key, draftStart];
+      const [s, e] = key >= draftStartRef.current ? [draftStartRef.current, key] : [key, draftStartRef.current];
+      draftStartRef.current = s;
+      isPickingEndRef.current = false;
       setDraftStart(s);
       setDraftEnd(e);
       setIsPickingEnd(false);
-      onChange({ mode: 'range', startDate: s, endDate: e });
+      onChange({ mode: 'range', startDate: s, endDate: e }, { pendingEnd: false });
     }
   };
 
@@ -379,7 +520,7 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
   const hoveredDayEvents = hoverKey ? eventDateCounts[hoverKey] ?? 0 : null;
 
   return (
-    <div ref={rootRef} className="relative mt-1">
+    <div ref={rootRef} data-testid={dataTestId} className="relative mt-1">
       {/* Trigger Pill */}
       <div
         className={`flex w-full items-center justify-between gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition ${
@@ -394,9 +535,16 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
           onClick={() => setOpen((v) => !v)}
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left focus:outline-none"
         >
-          <CalendarRange
-            className={`h-3.5 w-3.5 shrink-0 ${isFiltered || open ? 'text-brand-300' : 'text-slate-400'}`}
-          />
+          {isScraping ? (
+            <RefreshCw
+              data-testid="date-range-scraping-spinner"
+              className="h-3.5 w-3.5 shrink-0 animate-spin text-brand-300"
+            />
+          ) : (
+            <CalendarRange
+              className={`h-3.5 w-3.5 shrink-0 ${isFiltered || open ? 'text-brand-300' : 'text-slate-400'}`}
+            />
+          )}
           <span className="truncate font-medium">{triggerLabel}</span>
         </button>
 
@@ -416,12 +564,27 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
         )}
       </div>
 
-      {/* Cutting-Edge Floating Range Calendar Popover */}
-      {open && (
-        <div
-          data-testid="date-range-popover"
-          className="absolute right-0 top-full z-50 mt-2 w-[516px] max-w-[calc(100vw-32px)] overflow-hidden rounded-2xl border border-brand-400/35 bg-[var(--bg-modal-solid)] shadow-[0_24px_72px_rgba(0,0,0,0.9),0_0_38px_-14px_rgb(var(--brand-400)/0.32)]"
-        >
+      {/* Cutting-Edge Floating Range Calendar Popover (portal-mounted to escape overflow-hidden filter drawers) */}
+      {typeof document !== 'undefined' &&
+        createPortal(
+          <AnimatePresence>
+            {open && coords && (
+              <motion.div
+                key="date-range-popover"
+                ref={popoverRef}
+                data-testid="date-range-popover"
+                {...getDropdownMotionProps(coords.openUpward)}
+                style={{
+                  position: 'fixed',
+                  left: coords.left,
+                  width: coords.width,
+                  top: coords.top,
+                  bottom: coords.bottom,
+                  maxHeight: coords.maxHeight,
+                  transformOrigin: coords.openUpward ? 'bottom right' : 'top right',
+                }}
+                className="z-[999] overflow-y-auto overflow-x-hidden rounded-2xl border border-brand-400/35 bg-[var(--bg-modal-solid)] shadow-[0_24px_72px_rgba(0,0,0,0.9),0_0_38px_-14px_rgb(var(--brand-400)/0.32)]"
+              >
           {/* Luminous Aurora Hairline */}
           <div className="aurora-bar h-[2px] w-full" />
 
@@ -632,7 +795,12 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
           {/* Footer Status & Action Bar */}
           <div className="flex items-center justify-between border-t border-slate-800/80 bg-slate-950/70 px-4 py-2.5">
             <div className="flex items-center gap-2 text-[11px] text-slate-400">
-              {hoverKey && hoveredDayEvents !== null ? (
+              {isScraping ? (
+                <span className="inline-flex items-center gap-1.5 font-medium text-brand-300">
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  Ricerca competizioni e quote nel periodo...
+                </span>
+              ) : hoverKey && hoveredDayEvents !== null ? (
                 <span>
                   <strong className="text-slate-200">{formatShortItalianDate(hoverKey)}</strong>:{' '}
                   <span className="font-mono text-brand-300">{hoveredDayEvents}</span> quote live
@@ -657,10 +825,12 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  draftStartRef.current = null;
+                  isPickingEndRef.current = false;
                   setDraftStart(null);
                   setDraftEnd(null);
                   setIsPickingEnd(false);
-                  onChange(EMPTY_DATE_RANGE);
+                  onChange(EMPTY_DATE_RANGE, { pendingEnd: false });
                 }}
                 className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-slate-400 transition hover:border-slate-700 hover:text-white"
               >
@@ -669,15 +839,21 @@ export const DateRangeCalendar: React.FC<DateRangeCalendarProps> = ({
               <button
                 type="button"
                 data-testid="calendar-apply-btn"
-                onClick={() => setOpen(false)}
+                onClick={() => {
+                  commitPendingSingleDayIfNeeded();
+                  setOpen(false);
+                }}
                 className="rounded-lg bg-gradient-to-r from-brand-300 to-accent-400 px-3 py-1 text-[11px] font-bold text-slate-950 shadow-glow transition hover:brightness-110"
               >
                 Fatto
               </button>
             </div>
           </div>
-        </div>
-      )}
+        </motion.div>
+            )}
+          </AnimatePresence>,
+          document.body
+        )}
     </div>
   );
 };

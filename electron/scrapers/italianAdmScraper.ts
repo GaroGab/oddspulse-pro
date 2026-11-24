@@ -1,3 +1,7 @@
+import {
+  getDirettaDayOffsetsForWindow,
+  matchesScrapeDateWindow,
+} from '../../src/shared/dateRange';
 import type {
   MarketType,
   RawScrapedMarket,
@@ -6,7 +10,7 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { DEFAULT_HEADERS, fetchJson } from './httpClient';
+import { DEFAULT_HEADERS, fetchJson, fetchText, isAbortError, throwIfAborted } from './httpClient';
 import { matchesEventHints, teamSimilarity } from './matchLinker';
 
 const FEED_BASE = 'https://400.flashscore.ninja/400/x/feed';
@@ -96,18 +100,8 @@ interface DirettaGraphQLResp {
   };
 }
 
-async function fetchFeedText(url: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 11000);
-  try {
-    const res = await fetch(url, { headers: DIRETTA_HEADERS, signal: controller.signal });
-    clearTimeout(timer);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  } catch (e) {
-    clearTimeout(timer);
-    throw e;
-  }
+async function fetchFeedText(url: string, signal?: AbortSignal): Promise<string> {
+  return fetchText(url, { headers: DIRETTA_HEADERS, timeoutMs: 11000, signal });
 }
 
 function parseDirettaSchedule(
@@ -227,17 +221,25 @@ function selectTargetDirettaEvents(
     }
   }
 
-  // If fewer than 35 matched (e.g., quiet night), supplement with top leagues for Dutcher coverage
-  if (matched.length < 35) {
-    const topLeagueRe =
+  // If fewer than target matched (e.g., quiet night or future window), supplement with top leagues for Dutcher coverage
+  const minSupplementFloor = maxEvents >= 145 ? 55 : 35;
+  const maxSupplementCap = maxEvents >= 145 ? 80 : 60;
+  if (matched.length < minSupplementFloor) {
+    const primaryTopLeagueRe =
+      /^(?:ITALIA:\s*Serie [AB]|INGHILTERRA:\s*(?:Premier League|Championship)|SPAGNA:\s*LaLiga|GERMANIA:\s*Bundesliga|FRANCIA:\s*Ligue 1|OLANDA:\s*Eredivisie|PORTOGALLO:\s*Liga|EUROPA:\s*(?:Champions|Europa|Conference)|ATP|WTA|USA:\s*NBA|EUROPA:\s*Eurolega)/i;
+    const secondaryTopLeagueRe =
       /Serie A|Serie B|Premier League|LaLiga|Bundesliga|Ligue 1|Champions|Europa|ATP|WTA|NBA|Eurolega/i;
-    for (const ev of schedule) {
-      if (matched.length >= 60) break;
-      if (matchedIds.has(ev.eventId)) continue;
-      if (topLeagueRe.test(ev.league)) {
-        matchedIds.add(ev.eventId);
-        matched.push(ev);
+
+    for (const re of [primaryTopLeagueRe, secondaryTopLeagueRe]) {
+      for (const ev of schedule) {
+        if (matched.length >= maxSupplementCap) break;
+        if (matchedIds.has(ev.eventId)) continue;
+        if (re.test(ev.league)) {
+          matchedIds.add(ev.eventId);
+          matched.push(ev);
+        }
       }
+      if (matched.length >= maxSupplementCap) break;
     }
   }
 
@@ -375,13 +377,15 @@ export async function scrapeItalianAdmBookmakers(params: {
   enabledSourceIds: SourceId[];
   includeLive: boolean;
   filter?: TargetedScrapeFilter;
+  signal?: AbortSignal;
 }): Promise<{
   marketsBySource: Map<SourceId, RawScrapedMarket[]>;
   latencyMs: number;
   scannedEvents: number;
 }> {
   const started = Date.now();
-  const { exchangeMarkets, enabledSourceIds, includeLive, filter } = params;
+  const { exchangeMarkets, enabledSourceIds, includeLive, filter, signal } = params;
+  throwIfAborted(signal);
 
   const enabledSet = new Set(enabledSourceIds);
   const activeSpecs = ITALIAN_ADM_BOOKMAKERS.filter((s) => enabledSet.has(s.sourceId));
@@ -394,19 +398,31 @@ export async function scrapeItalianAdmBookmakers(params: {
 
   const activeSpecsByBkId = new Map(activeSpecs.map((s) => [s.bookmakerId, s]));
 
-  // 1. Fetch today (day=0) & tomorrow (day=1) schedules in parallel across requested sports
-  const allFeedJobs: Array<{ sport: SportKey; url: string }> = [
-    { sport: 'football', url: `${FEED_BASE}/f_1_0_1_it-it_1` },
-    { sport: 'football', url: `${FEED_BASE}/f_1_1_1_it-it_1` },
-    { sport: 'tennis', url: `${FEED_BASE}/f_2_0_1_it-it_1` },
-    { sport: 'tennis', url: `${FEED_BASE}/f_2_1_1_it-it_1` },
-    { sport: 'basketball', url: `${FEED_BASE}/f_3_0_1_it-it_1` },
-    { sport: 'basketball', url: `${FEED_BASE}/f_3_1_1_it-it_1` },
+  // 1. Fetch Diretta/Flashscore schedules across requested sports & day offsets (default: today=0, tomorrow=1; dateWindow: up to +7 days)
+  const dayOffsets = getDirettaDayOffsetsForWindow(filter?.dateWindow);
+  if (dayOffsets.length === 0) {
+    return { marketsBySource, latencyMs: Date.now() - started, scannedEvents: 0 };
+  }
+
+  const sportFeeds: Array<{ sport: SportKey; sportCode: number }> = [
+    { sport: 'football', sportCode: 1 },
+    { sport: 'tennis', sportCode: 2 },
+    { sport: 'basketball', sportCode: 3 },
   ];
-  const feedJobs =
+  const requestedSports =
     filter?.sports && filter.sports.length > 0
-      ? allFeedJobs.filter((j) => filter.sports!.includes(j.sport))
-      : allFeedJobs;
+      ? sportFeeds.filter((sf) => filter.sports!.includes(sf.sport))
+      : sportFeeds;
+
+  const feedJobs: Array<{ sport: SportKey; url: string }> = [];
+  for (const sf of requestedSports) {
+    for (const offset of dayOffsets) {
+      feedJobs.push({
+        sport: sf.sport,
+        url: `${FEED_BASE}/f_${sf.sportCode}_${offset}_1_it-it_1`,
+      });
+    }
+  }
 
   const useScheduleCache = Boolean(filter);
   const feedResults = await Promise.allSettled(
@@ -418,12 +434,14 @@ export async function scrapeItalianAdmBookmakers(params: {
           return cached.events;
         }
       }
-      const text = await fetchFeedText(job.url);
+      const text = await fetchFeedText(job.url, signal);
       const parsed = parseDirettaSchedule(text, job.sport, includeLive);
       scheduleCache.set(cacheKey, { fetchedAt: Date.now(), events: parsed });
       return parsed;
     })
   );
+
+  throwIfAborted(signal);
 
   const allScheduled: ScheduledDirettaEvent[] = [];
   const seenEvIds = new Set<string>();
@@ -433,6 +451,9 @@ export async function scrapeItalianAdmBookmakers(params: {
     if (r.status === 'fulfilled') {
       fulfilledFeeds++;
       for (const ev of r.value) {
+        if (filter?.dateWindow && !matchesScrapeDateWindow(ev.startMs, filter.dateWindow)) {
+          continue;
+        }
         if (!seenEvIds.has(ev.eventId)) {
           seenEvIds.add(ev.eventId);
           allScheduled.push(ev);
@@ -461,7 +482,11 @@ export async function scrapeItalianAdmBookmakers(params: {
             )
           )
           .slice(0, 12)
-      : selectTargetDirettaEvents(allScheduled, exchangeMarkets, 140);
+      : selectTargetDirettaEvents(
+          allScheduled,
+          exchangeMarkets,
+          filter?.dateWindow ? 150 : 140
+        );
 
   // 3. Fetch GraphQL odds with clean bounded concurrency (14 parallel workers)
   const CONCURRENCY = 14;
@@ -469,6 +494,7 @@ export async function scrapeItalianAdmBookmakers(params: {
 
   const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
     while (cursor < targets.length) {
+      throwIfAborted(signal);
       const idx = cursor++;
       const ev = targets[idx];
       try {
@@ -479,18 +505,21 @@ export async function scrapeItalianAdmBookmakers(params: {
           headers: DIRETTA_HEADERS,
           timeoutMs: 9000,
           retries: 0,
+          signal,
         });
         const oddsBlocks = data?.data?.findOddsByEventId?.odds ?? [];
         if (oddsBlocks.length > 0) {
           extractMarketsFromOddsResponse(ev, oddsBlocks, activeSpecsByBkId, marketsBySource);
         }
-      } catch {
+      } catch (err) {
+        if (signal?.aborted || isAbortError(err)) throw err;
         // Ignore single event timeout
       }
     }
   });
 
   await Promise.all(workers);
+  throwIfAborted(signal);
 
   return {
     marketsBySource,

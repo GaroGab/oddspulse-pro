@@ -1,11 +1,17 @@
 import { app, BrowserWindow, ipcMain, net, Notification, screen, shell } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { computeAdaptiveWatchPlan, evaluateRatingWatch } from '../src/shared/ratingWatch';
+import { buildAutoScrapeSettingsPatch, isAutoScrapeActive } from '../src/shared/autoScrape';
+import {
+  computeAdaptiveWatchPlan,
+  evaluateRatingWatch,
+  sanitizeIgnoredWatchEvents,
+} from '../src/shared/ratingWatch';
 import {
   DEFAULT_SETTINGS,
   THEME_CATALOG,
   type AppSettings,
+  type DateRangeValue,
   type DisplayInfo,
   type OddsmatcherRow,
   type RatingWatch,
@@ -14,6 +20,7 @@ import {
   type RatingWatchTriggerEvent,
   type SavedMultiplePlan,
   type SavedMultiplePlanInput,
+  type ScrapeDateWindow,
   type ScrapeSnapshot,
   type TrackedBet,
 } from '../src/shared/types';
@@ -22,6 +29,7 @@ import { ScraperEngine } from './scrapers/scraperEngine';
 let mainWindow: BrowserWindow | null = null;
 let scraperEngine: ScraperEngine;
 let refreshTimer: NodeJS.Timeout | null = null;
+let bootScrapeTimer: NodeJS.Timeout | null = null;
 let watchTimer: NodeJS.Timeout | null = null;
 let currentSettings: AppSettings = { ...DEFAULT_SETTINGS };
 let trackedBets: TrackedBet[] = [];
@@ -312,6 +320,7 @@ async function runTargetedWatchCycleAndEvaluate(): Promise<void> {
       bookmakerIds: plan.bookmakerIds,
       exchangeIds: plan.exchangeIds,
       sports: plan.sports,
+      dateWindow: plan.dateWindow,
       eventHints: plan.eventHints,
     });
 
@@ -394,16 +403,73 @@ function scheduleWatchPolling(): void {
   }, delaySec * 1000);
 }
 
-function setupRefreshTimer() {
+function clearRefreshTimer(emitUpdate = false): void {
   if (refreshTimer) {
-    clearInterval(refreshTimer);
+    clearTimeout(refreshTimer);
     refreshTimer = null;
   }
-  const sec = currentSettings.refreshIntervalSec;
-  if (sec > 0) {
-    refreshTimer = setInterval(() => {
-      void scraperEngine.runCycle(currentSettings);
-    }, sec * 1000);
+  if (bootScrapeTimer) {
+    clearTimeout(bootScrapeTimer);
+    bootScrapeTimer = null;
+  }
+  scraperEngine?.setAutoRefreshMeta(
+    {
+      autoScrapeEnabled: isAutoScrapeActive(currentSettings),
+      nextAutoRefreshAt: null,
+    },
+    emitUpdate
+  );
+}
+
+function setupRefreshTimer(emitUpdate = true): void {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  const active = isAutoScrapeActive(currentSettings);
+  if (!active) {
+    scraperEngine?.setAutoRefreshMeta(
+      { autoScrapeEnabled: false, nextAutoRefreshAt: null },
+      emitUpdate
+    );
+    return;
+  }
+  if (scraperEngine?.getIsRunning()) {
+    scraperEngine.setAutoRefreshMeta(
+      { autoScrapeEnabled: true, nextAutoRefreshAt: null },
+      emitUpdate
+    );
+    return;
+  }
+  const delayMs = currentSettings.refreshIntervalSec * 1000;
+  const nextAt = Date.now() + delayMs;
+  scraperEngine?.setAutoRefreshMeta(
+    { autoScrapeEnabled: true, nextAutoRefreshAt: nextAt },
+    emitUpdate
+  );
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    void runFullCycleAndReschedule();
+  }, delayMs);
+}
+
+async function runFullCycleAndReschedule(): Promise<ScrapeSnapshot> {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  if (bootScrapeTimer) {
+    clearTimeout(bootScrapeTimer);
+    bootScrapeTimer = null;
+  }
+  scraperEngine.setAutoRefreshMeta(
+    { autoScrapeEnabled: isAutoScrapeActive(currentSettings), nextAutoRefreshAt: null },
+    false
+  );
+  try {
+    return await scraperEngine.runCycle(currentSettings);
+  } finally {
+    setupRefreshTimer(true);
   }
 }
 
@@ -605,12 +671,43 @@ app.whenReady().then(() => {
   // Scraper IPC
   ipcMain.handle('scraper:getSnapshot', () => scraperEngine.getSnapshot());
   ipcMain.handle('scraper:runNow', async () => {
-    return await scraperEngine.runCycle(currentSettings);
+    return await runFullCycleAndReschedule();
+  });
+  ipcMain.handle('scraper:scrapeDateRange', async (_ev, dateWindow: ScrapeDateWindow) => {
+    return await scraperEngine.runDateRangeCycle(currentSettings, dateWindow);
+  });
+  ipcMain.handle('scraper:setActiveDateRange', (_ev, dateWindow: ScrapeDateWindow | null) => {
+    scraperEngine.setActiveDateWindow(dateWindow);
+  });
+  ipcMain.handle('scraper:stopAuto', async () => {
+    const patch = buildAutoScrapeSettingsPatch(currentSettings, false);
+    currentSettings = { ...currentSettings, ...patch };
+    saveSettings(currentSettings);
+    clearRefreshTimer(false);
+    await scraperEngine.stopActiveCycle();
+    const snapshot = scraperEngine.setAutoRefreshMeta(
+      { autoScrapeEnabled: false, nextAutoRefreshAt: null },
+      true
+    );
+    return { settings: currentSettings, snapshot };
+  });
+  ipcMain.handle('scraper:startAuto', () => {
+    const patch = buildAutoScrapeSettingsPatch(currentSettings, true);
+    currentSettings = { ...currentSettings, ...patch };
+    saveSettings(currentSettings);
+    scraperEngine.setAutoRefreshMeta(
+      { autoScrapeEnabled: true, nextAutoRefreshAt: null },
+      false
+    );
+    void runFullCycleAndReschedule();
+    return { settings: currentSettings, snapshot: scraperEngine.getSnapshot() };
   });
 
   // Settings IPC
   ipcMain.handle('settings:get', () => currentSettings);
-  ipcMain.handle('settings:update', (_ev, patch: Partial<AppSettings>) => {
+  ipcMain.handle('settings:update', async (_ev, patch: Partial<AppSettings>) => {
+    const prevRefreshSec = currentSettings.refreshIntervalSec;
+    const prevAutoActive = isAutoScrapeActive(currentSettings);
     currentSettings = {
       ...currentSettings,
       ...patch,
@@ -624,7 +721,17 @@ app.whenReady().then(() => {
       if (bg) mainWindow.setBackgroundColor(bg);
     }
     saveSettings(currentSettings);
-    setupRefreshTimer();
+    const nextAutoActive = isAutoScrapeActive(currentSettings);
+    if (patch.autoScrapeEnabled === false) {
+      clearRefreshTimer(false);
+      await scraperEngine.stopActiveCycle();
+      scraperEngine.setAutoRefreshMeta(
+        { autoScrapeEnabled: false, nextAutoRefreshAt: null },
+        true
+      );
+    } else if (prevRefreshSec !== currentSettings.refreshIntervalSec || prevAutoActive !== nextAutoActive) {
+      setupRefreshTimer(true);
+    }
     scheduleWatchPolling();
     return currentSettings;
   });
@@ -705,6 +812,25 @@ app.whenReady().then(() => {
     return savedMultiples;
   });
 
+  function normalizeWatchDateRange(raw: DateRangeValue | undefined): DateRangeValue | undefined {
+    if (!raw || raw.mode === 'all') return undefined;
+    if (raw.mode === 'hours') {
+      const hrs =
+        typeof raw.hours === 'number' && Number.isFinite(raw.hours)
+          ? Math.max(1, Math.min(168, Math.round(raw.hours)))
+          : 24;
+      return { mode: 'hours', hours: hrs, startDate: null, endDate: null };
+    }
+    if (raw.mode === 'range' && raw.startDate) {
+      const s = String(raw.startDate).trim();
+      const e = String(raw.endDate || raw.startDate).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || !/^\d{4}-\d{2}-\d{2}$/.test(e)) return undefined;
+      const [startDate, endDate] = s <= e ? [s, e] : [e, s];
+      return { mode: 'range', startDate, endDate };
+    }
+    return undefined;
+  }
+
   // Rating Watch ("Radar Rating") IPC
   ipcMain.handle('watches:list', () => ratingWatches);
   ipcMain.handle('watches:getStatus', () => watchStatus);
@@ -729,6 +855,8 @@ app.whenReady().then(() => {
       league: normalizedLeagues[0] || undefined,
       leagues: normalizedLeagues,
       startTime: input.startTime || undefined,
+      dateRange: normalizeWatchDateRange(input.dateRange),
+      ignoredEvents: sanitizeIgnoredWatchEvents(input.ignoredEvents),
       marketType: input.marketType || 'ALL',
       selectionKey: input.selectionKey || 'ALL',
       bookmakerIds: Array.isArray(input.bookmakerIds) ? input.bookmakerIds : [],
@@ -776,6 +904,8 @@ app.whenReady().then(() => {
           patch.sport !== undefined ||
           patch.league !== undefined ||
           patch.leagues !== undefined ||
+          patch.dateRange !== undefined ||
+          patch.ignoredEvents !== undefined ||
           patch.marketType !== undefined ||
           patch.selectionKey !== undefined ||
           patch.bookmakerIds !== undefined ||
@@ -787,6 +917,12 @@ app.whenReady().then(() => {
         return {
           ...w,
           ...patch,
+          ...(patch.dateRange !== undefined
+            ? { dateRange: normalizeWatchDateRange(patch.dateRange) }
+            : {}),
+          ...(patch.ignoredEvents !== undefined
+            ? { ignoredEvents: sanitizeIgnoredWatchEvents(patch.ignoredEvents) }
+            : {}),
           updatedAt: now,
           // Clear cooldown lock when re-arming or changing thresholds
           ...(reEnabled || filtersEdited ? { lastTriggeredAt: null } : {}),
@@ -829,13 +965,20 @@ app.whenReady().then(() => {
   });
 
   createWindow();
-  setupRefreshTimer();
+  scraperEngine.setAutoRefreshMeta(
+    { autoScrapeEnabled: isAutoScrapeActive(currentSettings), nextAutoRefreshAt: null },
+    false
+  );
+  setupRefreshTimer(false);
   scheduleWatchPolling();
 
-  // Trigger initial live scrape shortly after window opens
-  setTimeout(() => {
-    void scraperEngine.runCycle(currentSettings);
-  }, 500);
+  // Trigger initial live scrape shortly after window opens when auto-scrape is enabled
+  if (isAutoScrapeActive(currentSettings)) {
+    bootScrapeTimer = setTimeout(() => {
+      bootScrapeTimer = null;
+      void runFullCycleAndReschedule();
+    }, 500);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -845,7 +988,8 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (refreshTimer) clearInterval(refreshTimer);
+  if (refreshTimer) clearTimeout(refreshTimer);
+  if (bootScrapeTimer) clearTimeout(bootScrapeTimer);
   if (watchTimer) clearTimeout(watchTimer);
   if (process.platform !== 'darwin') {
     app.quit();

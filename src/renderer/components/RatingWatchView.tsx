@@ -4,12 +4,15 @@ import {
   BellPlus,
   BellRing,
   Calculator,
+  CalendarRange,
   CheckCircle2,
   Clock,
   Edit3,
+  EyeOff,
   Pause,
   Play,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldAlert,
   Trash2,
@@ -18,27 +21,43 @@ import {
   X,
 } from 'lucide-react';
 import {
+  EMPTY_DATE_RANGE,
+  formatScrapeDateWindowLabel,
+  matchesDateRange,
+  needsFutureDateScrape,
+  resolveScrapeDateWindow,
+  toLocalDateKey,
+  type DateRangeValue,
+} from '../../shared/dateRange';
+import {
+  appendIgnoredWatchEvent,
   betModeLabelIt,
   buildCompetitionOptions,
+  countAvailableCompetitions,
   estimateSingleWatchInterval,
   evaluateRatingWatch,
+  extractMatchEventKey,
   getSelectionOptionsForMarket,
   getWatchLeagues,
   inferSportFromLeague,
+  isRowIgnoredByWatch,
   isWatchExpired,
   matchesWatchLeagues,
   normalizeWatchQuery,
+  removeIgnoredWatchEvent,
   resolveCanonicalCompetition,
 } from '../../shared/ratingWatch';
 import {
   SOURCE_CATALOG,
   type AppSettings,
   type BetMode,
+  type IgnoredWatchEvent,
   type MarketType,
   type OddsmatcherRow,
   type RatingWatch,
   type RatingWatchEngineStatus,
   type RatingWatchInput,
+  type RatingWatchMatchSnapshot,
   type ScrapeSnapshot,
   type SourceId,
   type SportKey,
@@ -47,6 +66,7 @@ import { formatEuro, formatEventTime, formatOdds, ratingTone, sportLabel } from 
 import { playRatingAlertBurst, stopPersistentRatingAlarm } from '../utils/sound';
 import { BookmakerIcon } from './BookmakerIcon';
 import { CustomMultiSelect, CustomSelect } from './CustomSelect';
+import { DateRangeCalendar } from './DateRangeCalendar';
 import { NumericInput } from './NumericInput';
 import { SlidingPillTrack } from './SlidingPillTrack';
 import { SourceMultiSelect } from './SourceSelect';
@@ -66,6 +86,10 @@ interface RatingWatchViewProps {
   onUpdateWatch: (id: string, patch: Partial<RatingWatch>) => Promise<void> | void;
   onDeleteWatch: (id: string) => Promise<void> | void;
   onRunNow: () => Promise<void> | void;
+  onDateRangeFilterChange?: (
+    range: DateRangeValue,
+    opts?: { pendingEnd?: boolean; force?: boolean }
+  ) => void;
   onEnableSound: () => void;
   onOpenCalculator: (row: OddsmatcherRow, mode?: BetMode) => void;
   onConsumeDraftSeed?: () => void;
@@ -79,6 +103,7 @@ interface WatchFormState {
   league?: string;
   leagues: string[];
   startTime?: string;
+  dateRange: DateRangeValue;
   marketType: MarketType | 'ALL';
   selectionKey: string;
   bookmakerIds: SourceId[];
@@ -102,6 +127,7 @@ function createEmptyForm(defaultMode: BetMode = 'normal'): WatchFormState {
     league: undefined,
     leagues: [],
     startTime: undefined,
+    dateRange: EMPTY_DATE_RANGE,
     marketType: 'ALL',
     selectionKey: 'ALL',
     bookmakerIds: [],
@@ -115,6 +141,20 @@ function createEmptyForm(defaultMode: BetMode = 'normal'): WatchFormState {
     autoPauseOnTrigger: true,
     cooldownSec: 60,
   };
+}
+
+function formatWatchDateRangeLabel(range?: DateRangeValue): string | null {
+  if (!range || range.mode === 'all') return null;
+  if (range.mode === 'hours') {
+    return range.hours === 6 ? 'Prossime 6h' : `Prossime ${range.hours ?? 24}h`;
+  }
+  if (range.mode === 'range' && range.startDate) {
+    return formatScrapeDateWindowLabel({
+      startDate: range.startDate,
+      endDate: range.endDate ?? range.startDate,
+    });
+  }
+  return null;
 }
 
 const SOURCE_NAME_MAP = new Map<SourceId, string>(SOURCE_CATALOG.map((s) => [s.id, s.name]));
@@ -138,6 +178,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
   onUpdateWatch,
   onDeleteWatch,
   onRunNow,
+  onDateRangeFilterChange,
   onEnableSound,
   onOpenCalculator,
   onConsumeDraftSeed,
@@ -184,6 +225,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
       league: canonLeague,
       leagues: canonLeague ? [canonLeague] : [],
       startTime: row.startTime,
+      dateRange: EMPTY_DATE_RANGE,
       marketType: row.marketType,
       selectionKey: row.selectionKey,
       bookmakerIds: [row.bookmakerId],
@@ -248,10 +290,28 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
     );
   }, [snapshot.rows]);
 
+  // Live event density map per local calendar day (YYYY-MM-DD) for calendar day dots
+  const eventDateCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const r of snapshot.rows) {
+      const d = new Date(r.startTime);
+      if (!Number.isFinite(d.getTime())) continue;
+      const key = toLocalDateKey(d);
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
+  }, [snapshot.rows]);
+
+  const dateFilteredCatalogEvents = useMemo(() => {
+    if (form.dateRange.mode === 'all') return catalogEvents;
+    const nowMs = Date.now();
+    return catalogEvents.filter((ev) => matchesDateRange(ev.startTime, form.dateRange, nowMs));
+  }, [catalogEvents, form.dateRange]);
+
   const filteredEventSuggestions = useMemo(() => {
     const q = normalizeWatchQuery(form.eventName);
     const tokens = q ? q.split(' ').filter(Boolean) : [];
-    return catalogEvents
+    return dateFilteredCatalogEvents
       .filter((ev) => {
         if (form.sport && ev.sport !== form.sport) return false;
         if (form.leagues.length > 0 && !matchesWatchLeagues(form.leagues, ev.league, ev.sport)) {
@@ -262,13 +322,51 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
         return tokens.every((t) => hay.includes(t));
       })
       .slice(0, 35);
-  }, [catalogEvents, form.eventName, form.sport, form.leagues]);
+  }, [dateFilteredCatalogEvents, form.eventName, form.sport, form.leagues]);
 
-  // Preset + dynamic live competition options filtered by current sport
+  // Preset + dynamic live competition options filtered by current sport and selected date range
   const competitionOptions = useMemo(
-    () => buildCompetitionOptions(catalogEvents, form.sport, form.leagues),
-    [catalogEvents, form.sport, form.leagues]
+    () =>
+      buildCompetitionOptions(
+        dateFilteredCatalogEvents,
+        form.sport,
+        form.leagues,
+        form.dateRange.mode !== 'all'
+      ),
+    [dateFilteredCatalogEvents, form.sport, form.leagues, form.dateRange.mode]
   );
+
+  const availableCompetitionsCount = useMemo(
+    () => countAvailableCompetitions(dateFilteredCatalogEvents, form.sport),
+    [dateFilteredCatalogEvents, form.sport]
+  );
+
+  const isFutureDateSelected = useMemo(
+    () => needsFutureDateScrape(form.dateRange),
+    [form.dateRange]
+  );
+  const selectedDateWindow = useMemo(
+    () => resolveScrapeDateWindow(form.dateRange),
+    [form.dateRange]
+  );
+  const selectedDateLabel = selectedDateWindow
+    ? formatScrapeDateWindowLabel(selectedDateWindow)
+    : null;
+  const isDateRangeScraping = Boolean(snapshot.stats.isDateRangeScraping);
+
+  const handleDateRangeChange = (next: DateRangeValue, meta?: { pendingEnd?: boolean }) => {
+    setForm((prev) => {
+      const keepLinked =
+        !prev.startTime || next.mode === 'all' || matchesDateRange(prev.startTime, next);
+      return {
+        ...prev,
+        dateRange: next,
+        eventKey: keepLinked ? prev.eventKey : undefined,
+        startTime: keepLinked ? prev.startTime : undefined,
+      };
+    });
+    onDateRangeFilterChange?.(next, meta);
+  };
 
   const selectionOptions = useMemo(
     () => getSelectionOptionsForMarket(form.marketType),
@@ -348,6 +446,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
 
   const hasAnyWatchFilter = Boolean(
     form.eventName.trim() ||
+      form.dateRange.mode !== 'all' ||
       form.sport ||
       form.leagues.length > 0 ||
       form.league?.trim() ||
@@ -370,6 +469,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
       league: cleanLeagues[0] || form.league?.trim() || undefined,
       leagues: cleanLeagues,
       startTime: form.eventName.trim() ? form.startTime : undefined,
+      dateRange: form.dateRange.mode !== 'all' ? form.dateRange : undefined,
       marketType: form.marketType,
       selectionKey: form.selectionKey,
       bookmakerIds: form.bookmakerIds,
@@ -390,6 +490,9 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
     } else {
       await onCreateWatch(payload);
     }
+    if (form.dateRange.mode !== 'all') {
+      onDateRangeFilterChange?.(EMPTY_DATE_RANGE);
+    }
     setForm(createEmptyForm(form.mode));
   };
 
@@ -397,6 +500,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
     const resolvedLeagues = getWatchLeagues(w).map(
       (lg) => resolveCanonicalCompetition(lg, w.sport) ?? lg
     );
+    const nextDateRange = w.dateRange ?? EMPTY_DATE_RANGE;
     setEditingId(w.id);
     setForm({
       enabled: w.enabled,
@@ -406,6 +510,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
       league: resolvedLeagues[0],
       leagues: resolvedLeagues,
       startTime: w.startTime,
+      dateRange: nextDateRange,
       marketType: w.marketType,
       selectionKey: w.selectionKey,
       bookmakerIds: w.bookmakerIds,
@@ -419,7 +524,37 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
       autoPauseOnTrigger: w.autoPauseOnTrigger,
       cooldownSec: w.cooldownSec,
     });
+    if (nextDateRange.mode !== 'all') {
+      onDateRangeFilterChange?.(nextDateRange);
+    }
     formTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const handleIgnoreBestMatch = async (
+    watch: RatingWatch,
+    match: RatingWatchMatchSnapshot
+  ) => {
+    const nextIgnored = appendIgnoredWatchEvent(watch.ignoredEvents, match);
+    await onUpdateWatch(watch.id, {
+      ignoredEvents: nextIgnored,
+      enabled: true,
+    });
+  };
+
+  const handleRestoreIgnoredEvent = async (
+    watch: RatingWatch,
+    target: IgnoredWatchEvent
+  ) => {
+    const nextIgnored = removeIgnoredWatchEvent(watch.ignoredEvents, target);
+    await onUpdateWatch(watch.id, {
+      ignoredEvents: nextIgnored,
+    });
+  };
+
+  const handleClearIgnoredEvents = async (watch: RatingWatch) => {
+    await onUpdateWatch(watch.id, {
+      ignoredEvents: [],
+    });
   };
 
   const handleTestSound = () => {
@@ -566,6 +701,9 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                 type="button"
                 onClick={() => {
                   setEditingId(null);
+                  if (form.dateRange.mode !== 'all') {
+                    onDateRangeFilterChange?.(EMPTY_DATE_RANGE);
+                  }
                   setForm(createEmptyForm('normal'));
                 }}
                 className="flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300 hover:text-white"
@@ -659,6 +797,38 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
             )}
           </div>
 
+          {/* Date Range Calendar Filter (searches all competitions & events in range) */}
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Data / Periodo (Competizioni)
+              </label>
+              {isDateRangeScraping && isFutureDateSelected ? (
+                <span
+                  data-testid="watch-date-scraping-status"
+                  className="inline-flex items-center gap-1 font-mono text-[10px] font-semibold text-brand-300"
+                >
+                  <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                  Ricerca {selectedDateLabel ?? 'periodo'}...
+                </span>
+              ) : form.dateRange.mode !== 'all' ? (
+                <span
+                  data-testid="watch-date-summary"
+                  className="font-mono text-[10px] text-emerald-300"
+                >
+                  {availableCompetitionsCount} competizioni &middot; {dateFilteredCatalogEvents.length} eventi
+                </span>
+              ) : null}
+            </div>
+            <DateRangeCalendar
+              data-testid="watch-date-range-calendar"
+              value={form.dateRange}
+              onChange={handleDateRangeChange}
+              eventDateCounts={eventDateCounts}
+              isScraping={isDateRangeScraping && isFutureDateSelected}
+            />
+          </div>
+
           {/* Sport & Competition Multi-Select Filters */}
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             <div>
@@ -704,7 +874,9 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                 data-testid="watch-league-select"
                 values={form.leagues}
                 allLabel="Tutte le competizioni"
-                minMenuWidth={240}
+                searchable
+                searchPlaceholder="Cerca competizione nel periodo..."
+                minMenuWidth={255}
                 onChange={(vals) =>
                   setForm((prev) => ({
                     ...prev,
@@ -964,7 +1136,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
               data-testid="watch-no-filter-hint"
               className="text-[11px] text-amber-300/90"
             >
-              Seleziona almeno un filtro (evento, sport, competizione, bookmaker, exchange, mercato o esito) per attivare il tracking.
+              Seleziona almeno un filtro (evento, periodo/date, sport, competizione, bookmaker, exchange, mercato o esito) per attivare il tracking.
             </p>
           )}
 
@@ -974,7 +1146,7 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
             disabled={!hasAnyWatchFilter}
             title={
               !hasAnyWatchFilter
-                ? 'Seleziona almeno un filtro (evento, sport, competizione, bookmaker, exchange, mercato o esito)'
+                ? 'Seleziona almeno un filtro (evento, periodo/date, sport, competizione, bookmaker, exchange, mercato o esito)'
                 : undefined
             }
             className="mt-auto flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-300 to-accent-400 px-4 py-2.5 text-xs font-extrabold text-slate-950 shadow-glow transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1055,13 +1227,23 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
             ) : (
               filteredWatches.map((w) => {
                 const expired = isWatchExpired(w, nowSecTick, settings.includeLiveEvents);
-                const liveBest = w.lastBestMatch;
+                const rawBest = w.lastBestMatch;
+                const liveBest =
+                  rawBest &&
+                  !isRowIgnoredByWatch(w, {
+                    eventKey: extractMatchEventKey(rawBest),
+                    eventName: rawBest.eventName,
+                    startTime: rawBest.startTime,
+                  })
+                    ? rawBest
+                    : null;
                 const liveRow = liveBest ? rowById.get(liveBest.rowId) : undefined;
                 const progressPct = liveBest
                   ? Math.max(5, Math.min(100, (liveBest.rating / Math.max(1, w.targetRating)) * 100))
                   : 0;
                 const hitNow = Boolean(liveBest && liveBest.rating >= w.targetRating);
                 const watchLeagues = getWatchLeagues(w);
+                const watchDateLabel = formatWatchDateRangeLabel(w.dateRange);
 
                 return (
                   <div
@@ -1115,6 +1297,12 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                               {lg}
                             </span>
                           ))}
+                          {watchDateLabel && (
+                            <span className="inline-flex items-center gap-1 rounded-md border border-accent-400/35 bg-accent-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-accent-200">
+                              <CalendarRange className="h-2.5 w-2.5" />
+                              {watchDateLabel}
+                            </span>
+                          )}
                           {w.triggerCount > 0 && (
                             <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300">
                               Avvisi: {w.triggerCount}
@@ -1266,7 +1454,73 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
                           }`}
                         />
                       </div>
+                      {liveBest && (
+                        <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-800/70 pt-1.5 text-[10px]">
+                          <div className="min-w-0 truncate text-slate-300">
+                            <span className="text-slate-500">Evento rilevato: </span>
+                            <span className="font-semibold text-white">{liveBest.eventName}</span>
+                            {liveBest.league && (
+                              <span className="text-slate-400"> &middot; {liveBest.league}</span>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            data-testid={`watch-ignore-best-${w.id}`}
+                            onClick={() => void handleIgnoreBestMatch(w, liveBest)}
+                            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-400/35 bg-amber-500/10 px-2 py-0.5 font-semibold text-amber-200 transition hover:border-amber-400/60 hover:bg-amber-500/20 hover:text-amber-100"
+                            title="Quote cambiate o non giocabili? Ignora questo evento e continua la ricerca del rating"
+                          >
+                            <EyeOff className="h-3 w-3 shrink-0" />
+                            Ignora evento
+                          </button>
+                        </div>
+                      )}
                     </div>
+
+                    {w.ignoredEvents && w.ignoredEvents.length > 0 && (
+                      <div
+                        data-testid={`watch-ignored-list-${w.id}`}
+                        className="mt-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-amber-400/20 bg-amber-500/5 px-2.5 py-1.5 text-[10px]"
+                      >
+                        <span className="inline-flex items-center gap-1 font-semibold text-amber-300">
+                          <EyeOff className="h-3 w-3 shrink-0" />
+                          Eventi ignorati ({w.ignoredEvents.length}):
+                        </span>
+                        {w.ignoredEvents.map((ig) => {
+                          const igKey = ig.eventKey || `${ig.eventName}|${ig.startTime ?? ''}`;
+                          return (
+                            <span
+                              key={igKey}
+                              className="inline-flex items-center gap-1 rounded-md border border-slate-700/80 bg-slate-900 px-1.5 py-0.5 text-slate-200"
+                            >
+                              <span className="max-w-[180px] truncate">{ig.eventName}</span>
+                              <button
+                                type="button"
+                                data-testid={`watch-restore-ignored-${w.id}`}
+                                onClick={() => void handleRestoreIgnoredEvent(w, ig)}
+                                className="rounded p-0.5 text-slate-400 transition hover:bg-slate-800 hover:text-emerald-300"
+                                title={`Ripristina ${ig.eventName} nella ricerca`}
+                                aria-label={`Ripristina ${ig.eventName}`}
+                              >
+                                <X className="h-2.5 w-2.5" />
+                              </button>
+                            </span>
+                          );
+                        })}
+                        {w.ignoredEvents.length > 1 && (
+                          <button
+                            type="button"
+                            data-testid={`watch-clear-ignored-${w.id}`}
+                            onClick={() => void handleClearIgnoredEvents(w)}
+                            className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-semibold text-amber-200 transition hover:bg-amber-500/15 hover:text-white"
+                            title="Ripristina tutti gli eventi ignorati"
+                          >
+                            <RotateCcw className="h-2.5 w-2.5" />
+                            Ripristina tutti
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })

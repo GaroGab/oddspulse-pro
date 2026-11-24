@@ -2,6 +2,17 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion';
 import { Flame, Sparkles } from 'lucide-react';
 import {
+  buildAutoScrapeSettingsPatch,
+  getEffectiveAutoRefreshSec,
+  isAutoScrapeActive,
+} from '../shared/autoScrape';
+import {
+  needsFutureDateScrape,
+  resolveScrapeDateWindow,
+  type DateRangeValue,
+} from '../shared/dateRange';
+import { appendIgnoredWatchEvent, evaluateRatingWatch } from '../shared/ratingWatch';
+import {
   DEFAULT_SETTINGS,
   SOURCE_CATALOG,
   type AppSettings,
@@ -88,7 +99,9 @@ const INITIAL_SNAPSHOT: ScrapeSnapshot = {
     surebetsCount: 0,
     lastCycleDurationMs: 0,
     lastCompletedAt: null,
-    isRunning: true,
+    isRunning: false,
+    autoScrapeEnabled: true,
+    nextAutoRefreshAt: null,
   },
 };
 
@@ -136,8 +149,11 @@ export const App: React.FC = () => {
   );
   const [dismissedDegradedAt, setDismissedDegradedAt] = useState<number | null>(null);
   const [showConnectionBanner, setShowConnectionBanner] = useState<boolean>(false);
+  const [isTogglingAutoScrape, setIsTogglingAutoScrape] = useState<boolean>(false);
 
   const lastSurebetAlertRef = useRef<number>(0);
+  const dateScrapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastDateScrapeRef = useRef<{ key: string; at: number } | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
@@ -159,8 +175,15 @@ export const App: React.FC = () => {
     const handleOnline = () => {
       setIsBrowserOnline(true);
       setDismissedDegradedAt(null);
-      pushToast('Connessione Ripristinata', 'Avvio aggiornamento automatico delle quote live...');
-      void window.oddspulse?.runScrapeNow();
+      if (isAutoScrapeActive(settingsRef.current)) {
+        pushToast('Connessione Ripristinata', 'Avvio aggiornamento automatico delle quote live...');
+        void window.oddspulse?.runScrapeNow();
+      } else {
+        pushToast(
+          'Connessione Ripristinata',
+          'Rete nuovamente disponibile. Usa Aggiorna Quote o Riavvia per aggiornare.'
+        );
+      }
     };
     const handleOffline = () => {
       setIsBrowserOnline(false);
@@ -241,6 +264,114 @@ export const App: React.FC = () => {
   const handleRunScrape = useCallback(() => {
     void window.oddspulse?.runScrapeNow();
   }, []);
+
+  const handleDateRangeFilterChange = useCallback(
+    (range: DateRangeValue, opts?: { pendingEnd?: boolean; force?: boolean }) => {
+      if (dateScrapeTimerRef.current) {
+        clearTimeout(dateScrapeTimerRef.current);
+        dateScrapeTimerRef.current = null;
+      }
+
+      if (!needsFutureDateScrape(range)) {
+        lastDateScrapeRef.current = null;
+        void window.oddspulse?.setActiveDateRange?.(null);
+        return;
+      }
+
+      const dateWindow = resolveScrapeDateWindow(range);
+      if (!dateWindow) return;
+
+      const winKey = `${dateWindow.startDate}__${dateWindow.endDate}`;
+      const triggerScrape = () => {
+        const now = Date.now();
+        if (
+          !opts?.force &&
+          lastDateScrapeRef.current &&
+          lastDateScrapeRef.current.key === winKey &&
+          now - lastDateScrapeRef.current.at < 8000
+        ) {
+          return;
+        }
+        lastDateScrapeRef.current = { key: winKey, at: now };
+        void window.oddspulse?.scrapeDateRange?.(dateWindow);
+      };
+
+      if (opts?.pendingEnd) {
+        dateScrapeTimerRef.current = setTimeout(() => {
+          dateScrapeTimerRef.current = null;
+          triggerScrape();
+        }, 700);
+      } else {
+        triggerScrape();
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    return () => {
+      if (dateScrapeTimerRef.current) {
+        clearTimeout(dateScrapeTimerRef.current);
+        dateScrapeTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleStopAutoScrape = useCallback(async () => {
+    setIsTogglingAutoScrape(true);
+    try {
+      if (window.oddspulse?.stopAutoScrape) {
+        const res = await window.oddspulse.stopAutoScrape();
+        setSettings(res.settings);
+        setSnapshot(res.snapshot);
+      } else {
+        setSettings((prev) => ({ ...prev, ...buildAutoScrapeSettingsPatch(prev, false) }));
+        setSnapshot((prev) => ({
+          ...prev,
+          stats: {
+            ...prev.stats,
+            isRunning: false,
+            autoScrapeEnabled: false,
+            nextAutoRefreshAt: null,
+          },
+        }));
+      }
+      pushToast(
+        'Auto-Scraping Fermato',
+        'Aggiornamento automatico in pausa. Le quote correnti restano congelate.'
+      );
+    } finally {
+      setIsTogglingAutoScrape(false);
+    }
+  }, [pushToast]);
+
+  const handleStartAutoScrape = useCallback(async () => {
+    setIsTogglingAutoScrape(true);
+    try {
+      const intervalSec = getEffectiveAutoRefreshSec(settingsRef.current);
+      if (window.oddspulse?.startAutoScrape) {
+        const res = await window.oddspulse.startAutoScrape();
+        setSettings(res.settings);
+        setSnapshot(res.snapshot);
+      } else {
+        setSettings((prev) => ({ ...prev, ...buildAutoScrapeSettingsPatch(prev, true) }));
+        setSnapshot((prev) => ({
+          ...prev,
+          stats: {
+            ...prev.stats,
+            autoScrapeEnabled: true,
+            nextAutoRefreshAt: Date.now() + intervalSec * 1000,
+          },
+        }));
+      }
+      pushToast(
+        'Auto-Scraping Riavviato',
+        `Aggiornamento automatico attivo ogni ${intervalSec}s. Scansione avviata.`
+      );
+    } finally {
+      setIsTogglingAutoScrape(false);
+    }
+  }, [pushToast]);
 
   const handleUpdateSettings = useCallback(async (patch: Partial<AppSettings>) => {
     setSettings((prev) => ({
@@ -479,17 +610,35 @@ export const App: React.FC = () => {
     [pushToast]
   );
 
-  const handleUpdateWatch = useCallback(async (id: string, patch: Partial<RatingWatch>) => {
-    const res = await window.oddspulse?.updateWatch?.({ id, patch });
-    if (res) {
-      setRatingWatches(res.watches);
-      setWatchStatus(res.status);
-    } else {
-      setRatingWatches((prev) =>
-        prev.map((w) => (w.id === id ? { ...w, ...patch, updatedAt: Date.now() } : w))
-      );
-    }
-  }, []);
+  const handleUpdateWatch = useCallback(
+    async (id: string, patch: Partial<RatingWatch>) => {
+      const res = await window.oddspulse?.updateWatch?.({ id, patch });
+      if (res) {
+        setRatingWatches(res.watches);
+        setWatchStatus(res.status);
+      } else {
+        setRatingWatches((prev) =>
+          prev.map((w) => {
+            if (w.id !== id) return w;
+            const nextWatch: RatingWatch = {
+              ...w,
+              ...patch,
+              ...(patch.enabled === true && !w.enabled ? { lastTriggeredAt: null } : {}),
+              updatedAt: Date.now(),
+            };
+            if (patch.ignoredEvents !== undefined) {
+              nextWatch.lastTriggeredAt = null;
+              nextWatch.lastBestMatch = evaluateRatingWatch(nextWatch, snapshot.rows, {
+                includeLiveEvents: settings.includeLiveEvents,
+              }).bestMatch;
+            }
+            return nextWatch;
+          })
+        );
+      }
+    },
+    [settings.includeLiveEvents, snapshot.rows]
+  );
 
   const handleDeleteWatch = useCallback(async (id: string) => {
     const res = await window.oddspulse?.deleteWatch?.(id);
@@ -541,6 +690,35 @@ export const App: React.FC = () => {
     setIsAlarmRinging(false);
     void window.oddspulse?.ackWatchAlert?.();
   }, []);
+
+  const handleIgnoreAlertEvent = useCallback(
+    async (ev: RatingWatchTriggerEvent) => {
+      setActiveWatchAlerts((prev) => {
+        const next = prev.filter((a) => a.id !== ev.id);
+        if (next.length === 0) {
+          stopPersistentRatingAlarm();
+          setIsAlarmRinging(false);
+          void window.oddspulse?.ackWatchAlert?.();
+        }
+        return next;
+      });
+
+      const targetWatch = ratingWatches.find((w) => w.id === ev.watchId);
+      if (targetWatch) {
+        const nextIgnored = appendIgnoredWatchEvent(targetWatch.ignoredEvents, ev.match);
+        await handleUpdateWatch(targetWatch.id, {
+          ignoredEvents: nextIgnored,
+          enabled: true,
+        });
+      }
+
+      pushToast(
+        'Evento Ignorato — Ricerca Attiva',
+        `${ev.match.eventName} escluso; continua il monitoraggio sugli altri eventi.`
+      );
+    },
+    [handleUpdateWatch, pushToast, ratingWatches]
+  );
 
   const handleOpenAlertInCalculator = useCallback(
     (ev: RatingWatchTriggerEvent) => {
@@ -641,6 +819,8 @@ export const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [rawBannerKind, suppressedByViewEmptyState, snapshot.stats.lastCompletedAt]);
 
+  const autoScrapeActive = isAutoScrapeActive(settings);
+
   return (
     <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg-base)] text-slate-100">
       {/* Ambient Background Layers (pure radial-gradient, zero GPU blur filter cost) */}
@@ -659,9 +839,13 @@ export const App: React.FC = () => {
         theme={settings.theme}
         isBrowserOnline={isBrowserOnline}
         refreshIntervalSec={settings.refreshIntervalSec}
+        autoScrapeActive={autoScrapeActive}
+        isTogglingAutoScrape={isTogglingAutoScrape}
         soundEnabled={settings.soundEnabled}
         onToggleSound={handleToggleSound}
         onRunScrape={handleRunScrape}
+        onStopAutoScrape={() => void handleStopAutoScrape()}
+        onStartAutoScrape={() => void handleStartAutoScrape()}
       />
 
       {/* Main Layout */}
@@ -708,6 +892,7 @@ export const App: React.FC = () => {
                 <OddsmatcherView
                   snapshot={snapshot}
                   isBrowserOnline={isBrowserOnline}
+                  autoScrapeActive={autoScrapeActive}
                   mode={mode}
                   stake={stake}
                   tableDensity={settings.tableDensity}
@@ -719,7 +904,9 @@ export const App: React.FC = () => {
                   onToggleLockMulti={handleToggleLockMulti}
                   onCreateRatingWatch={handleStartWatchFromRow}
                   onToggleKpis={handleToggleOddsmatcherKpis}
+                  onDateRangeFilterChange={handleDateRangeFilterChange}
                   onRetryScrape={handleRunScrape}
+                  onRestartAutoScrape={() => void handleStartAutoScrape()}
                   onOpenScrapers={handleOpenScrapers}
                 />
               )}
@@ -728,6 +915,7 @@ export const App: React.FC = () => {
                 <MultioddsView
                   snapshot={snapshot}
                   isBrowserOnline={isBrowserOnline}
+                  autoScrapeActive={autoScrapeActive}
                   lockedRows={lockedRows}
                   savedMultiples={savedMultiples}
                   soundEnabled={settings.soundEnabled}
@@ -737,6 +925,7 @@ export const App: React.FC = () => {
                   onSaveMultiplePlan={handleSaveMultiplePlan}
                   onDeleteSavedMultiple={(id) => void handleDeleteSavedMultiple(id)}
                   onRetryScrape={handleRunScrape}
+                  onRestartAutoScrape={() => void handleStartAutoScrape()}
                   onOpenScrapers={() => setActiveTab('scrapers')}
                 />
               )}
@@ -745,12 +934,15 @@ export const App: React.FC = () => {
                 <DutcherView
                   snapshot={snapshot}
                   isBrowserOnline={isBrowserOnline}
+                  autoScrapeActive={autoScrapeActive}
                   soundEnabled={settings.soundEnabled}
                   defaultStake={settings.defaultStake}
                   tableDensity={settings.tableDensity}
                   defaultShowKpis={settings.showOddsmatcherKpis ?? true}
                   onSaveTrackedBet={(bet) => void handleSaveBet(bet)}
+                  onDateRangeFilterChange={handleDateRangeFilterChange}
                   onRetryScrape={handleRunScrape}
+                  onRestartAutoScrape={() => void handleStartAutoScrape()}
                   onOpenScrapers={() => setActiveTab('scrapers')}
                 />
               )}
@@ -776,6 +968,7 @@ export const App: React.FC = () => {
                   onUpdateWatch={handleUpdateWatch}
                   onDeleteWatch={handleDeleteWatch}
                   onRunNow={handleRunWatchNow}
+                  onDateRangeFilterChange={handleDateRangeFilterChange}
                   onEnableSound={() => void handleUpdateSettings({ soundEnabled: true })}
                   onOpenCalculator={(row, watchMode) => {
                     if (watchMode) setMode(watchMode);
@@ -789,8 +982,12 @@ export const App: React.FC = () => {
                 <ScrapersView
                   snapshot={snapshot}
                   settings={settings}
+                  autoScrapeActive={autoScrapeActive}
+                  isTogglingAutoScrape={isTogglingAutoScrape}
                   onUpdateSettings={(p) => void handleUpdateSettings(p)}
                   onRunScrape={handleRunScrape}
+                  onStopAutoScrape={() => void handleStopAutoScrape()}
+                  onStartAutoScrape={() => void handleStartAutoScrape()}
                 />
               )}
 
@@ -836,6 +1033,7 @@ export const App: React.FC = () => {
         onDismiss={handleDismissAlert}
         onDismissAll={handleDismissAllAlerts}
         onOpenCalculator={handleOpenAlertInCalculator}
+        onIgnoreEvent={(ev) => void handleIgnoreAlertEvent(ev)}
       />
 
       {/* Animated Toast Notifications */}

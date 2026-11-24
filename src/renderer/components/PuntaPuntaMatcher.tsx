@@ -8,6 +8,8 @@ import {
   Filter,
   Flame,
   LayoutGrid,
+  Radar,
+  RefreshCw,
   RotateCcw,
   Scale,
   Search,
@@ -15,7 +17,14 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
-import { EMPTY_DATE_RANGE, toLocalDateKey, type DateRangeValue } from '../../shared/dateRange';
+import {
+  EMPTY_DATE_RANGE,
+  formatScrapeDateWindowLabel,
+  needsFutureDateScrape,
+  resolveScrapeDateWindow,
+  toLocalDateKey,
+  type DateRangeValue,
+} from '../../shared/dateRange';
 import type { PuntaPuntaCalcInput } from '../../shared/math';
 import {
   extractBackMarketGroupsFromSnapshot,
@@ -45,6 +54,7 @@ import {
   sportLabel,
 } from '../utils/format';
 import { AnimatedNumber } from './AnimatedNumber';
+import { AutoScrapePausedState } from './AutoScrapePausedState';
 import { BookmakerIcon } from './BookmakerIcon';
 import { ConnectionAlert } from './ConnectionAlert';
 import { CustomMultiSelect, CustomSelect } from './CustomSelect';
@@ -56,6 +66,7 @@ import { buildBookmakerSourceOptions, SourceMultiSelect } from './SourceSelect';
 interface PuntaPuntaMatcherProps {
   snapshot: ScrapeSnapshot;
   isBrowserOnline: boolean;
+  autoScrapeActive?: boolean;
   mode: BetMode;
   stake: number;
   anchorMode: NonNullable<PuntaPuntaCalcInput['anchorMode']>;
@@ -70,7 +81,12 @@ interface PuntaPuntaMatcherProps {
   onChangeRefundRetention: (v: number) => void;
   onSelectRow: (row: PuntaPuntaCandidateRow) => void;
   onToggleKpis: () => void;
+  onDateRangeFilterChange?: (
+    next: DateRangeValue,
+    opts?: { pendingEnd?: boolean; force?: boolean }
+  ) => void;
   onRetryScrape: () => void;
+  onRestartAutoScrape?: () => void;
   onOpenScrapers: () => void;
 }
 
@@ -92,6 +108,7 @@ const OUTCOMES_MODE_OPTIONS: Array<{ value: OutcomesFilterMode; label: string; h
 export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
   snapshot,
   isBrowserOnline,
+  autoScrapeActive = true,
   mode,
   stake,
   anchorMode,
@@ -106,7 +123,9 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
   onChangeRefundRetention,
   onSelectRow,
   onToggleKpis,
+  onDateRangeFilterChange,
   onRetryScrape,
+  onRestartAutoScrape,
   onOpenScrapers,
 }) => {
   const rowPad =
@@ -281,6 +300,18 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
     );
   };
 
+  const handleDateRangeChange = (next: DateRangeValue, meta?: { pendingEnd?: boolean }) => {
+    setDateRange(next);
+    onDateRangeFilterChange?.(next, meta);
+  };
+
+  const isFutureDateSelected = useMemo(() => needsFutureDateScrape(dateRange), [dateRange]);
+  const selectedDateWindow = useMemo(() => resolveScrapeDateWindow(dateRange), [dateRange]);
+  const selectedDateLabel = selectedDateWindow
+    ? formatScrapeDateWindowLabel(selectedDateWindow)
+    : null;
+  const isDateRangeScraping = Boolean(snapshot.stats.isDateRangeScraping);
+
   const applyPreset = (
     preset: 'qualifier' | 'snr' | 'surebet' | 'twoway' | 'reset'
   ) => {
@@ -295,7 +326,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
       setMinBack(1.15);
       setMaxBack(15);
       setMinRating(0);
-      setDateRange(EMPTY_DATE_RANGE);
+      handleDateRangeChange(EMPTY_DATE_RANGE);
       setOnlySurebets(false);
       setSearch('');
       setSortBy('rating');
@@ -443,7 +474,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
       chips.push({
         id: 'date',
         label: dateLabel,
-        onClear: () => setDateRange(EMPTY_DATE_RANGE),
+        onClear: () => handleDateRangeChange(EMPTY_DATE_RANGE),
       });
     }
 
@@ -739,14 +770,6 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
               }`}
             />
             <span>Filtri</span>
-            {activeFilterChips.length > 0 && (
-              <span
-                data-testid="pp-filters-active-count"
-                className="ml-0.5 rounded-full bg-brand-400/25 px-1.5 py-0.2 font-mono text-[10px] font-extrabold text-brand-200"
-              >
-                {activeFilterChips.length}
-              </span>
-            )}
           </button>
         </div>
 
@@ -982,8 +1005,9 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
                     <div className="mt-1">
                       <DateRangeCalendar
                         value={dateRange}
-                        onChange={setDateRange}
+                        onChange={handleDateRangeChange}
                         eventDateCounts={eventDateCounts}
+                        isScraping={isDateRangeScraping && isFutureDateSelected}
                         data-testid="pp-filter-date-range"
                       />
                     </div>
@@ -997,16 +1021,51 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
 
       {/* Results Table or Connection Alert */}
       {matchedRows.length === 0 ? (
-        snapshot.rows.length === 0 && (snapshot.backMarketGroups?.length ?? 0) === 0 ? (
-          <div className="glass-panel rounded-2xl">
-            <ConnectionAlert
-              snapshot={snapshot}
-              isBrowserOnline={isBrowserOnline}
-              variant="empty"
-              onRetry={onRetryScrape}
-              onOpenScrapers={onOpenScrapers}
-            />
+        isDateRangeScraping && isFutureDateSelected ? (
+          <div
+            data-testid="pp-date-scrape-loading"
+            className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-slate-800 bg-slate-900/50 p-10 text-center"
+          >
+            <div className="relative flex h-14 w-14 items-center justify-center">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400/30" />
+              <div className="relative flex h-11 w-11 items-center justify-center rounded-2xl border border-brand-400/40 bg-brand-500/15 text-brand-300 shadow-glow">
+                <Radar className="h-5 w-5 animate-spin" />
+              </div>
+            </div>
+            <div>
+              <h3 className="font-display text-sm font-bold text-white">
+                Ricerca Quote Future in Corso...
+              </h3>
+              <p className="mx-auto mt-1 max-w-md text-xs text-slate-400">
+                Scansione di tutti i Bookmaker per trovare le competizioni e le quote Punta-Punta nel periodo{' '}
+                <strong className="font-mono text-brand-200">{selectedDateLabel}</strong>.
+              </p>
+            </div>
           </div>
+        ) : snapshot.rows.length === 0 && (snapshot.backMarketGroups?.length ?? 0) === 0 ? (
+          !autoScrapeActive &&
+          !snapshot.stats.isRunning &&
+          isBrowserOnline &&
+          snapshot.connection.health !== 'offline' &&
+          snapshot.connection.failedSourcesCount === 0 ? (
+            <div className="glass-panel rounded-2xl">
+              <AutoScrapePausedState
+                description="Riavvia l'aggiornamento automatico o avvia una scansione manuale per generare gli abbinamenti Punta-Punta."
+                onRetryScrape={onRetryScrape}
+                onRestartAutoScrape={onRestartAutoScrape}
+              />
+            </div>
+          ) : (
+            <div className="glass-panel rounded-2xl">
+              <ConnectionAlert
+                snapshot={snapshot}
+                isBrowserOnline={isBrowserOnline}
+                variant="empty"
+                onRetry={onRetryScrape}
+                onOpenScrapers={onOpenScrapers}
+              />
+            </div>
+          )
         ) : (
           <div
             data-testid="pp-empty-state"
@@ -1017,21 +1076,53 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
               Nessun confronto Punta-Punta con questi filtri
             </h3>
             <p className="mx-auto mt-1 max-w-md text-xs text-slate-400">
-              Prova ad allargare i filtri di quota, abbassare il rating minimo o selezionare più bookmaker per Punta 1 / Copertura.
+              {isFutureDateSelected
+                ? `Nessun confronto trovato nel periodo ${selectedDateLabel} con i filtri attuali. Puoi rilanciare la scansione sul periodo o allargare i filtri.`
+                : 'Prova ad allargare i filtri di quota, abbassare il rating minimo o selezionare più bookmaker per Punta 1 / Copertura.'}
             </p>
-            {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={() => applyPreset('reset')}
-                className="mt-4 rounded-lg border border-brand-400/40 bg-brand-500/15 px-3.5 py-1.5 text-xs font-semibold text-brand-200 hover:bg-brand-500/25"
-              >
-                Ripristina tutti i filtri
-              </button>
-            )}
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              {isFutureDateSelected && onDateRangeFilterChange && (
+                <button
+                  type="button"
+                  data-testid="pp-rescan-date-btn"
+                  onClick={() => onDateRangeFilterChange(dateRange, { force: true })}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-500/15 px-3.5 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Riscansiona periodo {selectedDateLabel}
+                </button>
+              )}
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  onClick={() => applyPreset('reset')}
+                  className="rounded-lg border border-brand-400/40 bg-brand-500/15 px-3.5 py-1.5 text-xs font-semibold text-brand-200 hover:bg-brand-500/25"
+                >
+                  Ripristina tutti i filtri
+                </button>
+              )}
+            </div>
           </div>
         )
       ) : (
         <div className="overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-900/70 shadow-xl">
+          {isDateRangeScraping && isFutureDateSelected && (
+            <div
+              data-testid="pp-date-scrape-banner"
+              className="flex items-center justify-between gap-2 border-b border-brand-400/25 bg-brand-500/10 px-4 py-2 text-xs text-brand-200"
+            >
+              <div className="flex items-center gap-2">
+                <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-brand-300" />
+                <span>
+                  Ricerca competizioni e quote Punta-Punta per il periodo{' '}
+                  <strong className="font-mono text-white">{selectedDateLabel}</strong> in corso...
+                </span>
+              </div>
+              <span className="font-mono text-[11px] text-brand-300/90">
+                {matchedRows.length} abbinamenti già disponibili
+              </span>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left text-xs">
               <thead>
@@ -1050,7 +1141,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
                   </th>
                   <th className="px-3.5 py-3">{sortHeader('Lavagna', 'impliedProb')}</th>
                   <th className="px-3.5 py-3">{sortHeader('Esito (€)', 'profit')}</th>
-                  <th className="px-3.5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  <th className="px-3.5 py-3 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                     Azioni
                   </th>
                 </tr>
@@ -1191,7 +1282,7 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
                         </div>
                       </td>
 
-                      <td className={`whitespace-nowrap px-3.5 ${rowPad} text-right`}>
+                      <td className={`whitespace-nowrap px-3.5 ${rowPad} text-center`}>
                         <button
                           type="button"
                           onClick={(e) => {

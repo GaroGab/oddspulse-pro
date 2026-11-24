@@ -10,7 +10,9 @@ import {
   Filter,
   Layers,
   Lock,
+  Play,
   Plus,
+  RefreshCw,
   Search,
   ShieldCheck,
   Trash2,
@@ -53,6 +55,7 @@ import { SourceMultiSelect } from './SourceSelect';
 interface ManualMultioddsBuilderProps {
   snapshot: ScrapeSnapshot;
   isBrowserOnline: boolean;
+  autoScrapeActive?: boolean;
   lockedRows: OddsmatcherRow[];
   soundEnabled: boolean;
   savedCount?: number;
@@ -62,6 +65,7 @@ interface ManualMultioddsBuilderProps {
   ) => Promise<SavedMultiplePlan | null> | SavedMultiplePlan | null | void;
   onOpenSavedList?: (planId?: string) => void;
   onRetryScrape: () => void;
+  onRestartAutoScrape?: () => void;
   onOpenScrapers: () => void;
 }
 
@@ -71,6 +75,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
   ({
     snapshot,
     isBrowserOnline,
+    autoScrapeActive = true,
     lockedRows,
     soundEnabled,
     savedCount = 0,
@@ -78,6 +83,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     onSaveMultiplePlan,
     onOpenSavedList,
     onRetryScrape,
+    onRestartAutoScrape,
     onOpenScrapers,
   }) => {
     // Selected leg IDs + fallback row cache so background scrape refreshes update odds without losing picks
@@ -529,11 +535,35 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                 <Layers className="h-8 w-8 text-slate-600" />
                 <div className="text-sm font-semibold text-slate-300">
                   {snapshot.rows.length === 0
-                    ? 'In attesa delle quote live dallo scraper...'
+                    ? !autoScrapeActive && !snapshot.stats.isRunning
+                      ? 'Aggiornamento automatico dello scraping fermo'
+                      : 'In attesa delle quote live dallo scraper...'
                     : onlyEligible
                     ? 'Nessun evento idoneo compatibile con questi filtri'
                     : 'Nessun evento trovato con i filtri attuali'}
                 </div>
+                {snapshot.rows.length === 0 && !autoScrapeActive && !snapshot.stats.isRunning && (
+                  <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+                    {onRestartAutoScrape && (
+                      <button
+                        type="button"
+                        onClick={onRestartAutoScrape}
+                        className="flex items-center gap-1.5 rounded-xl border border-emerald-400/50 bg-emerald-500/20 px-3 py-1.5 text-xs font-bold text-emerald-200 hover:bg-emerald-500/30"
+                      >
+                        <Play className="h-3.5 w-3.5 fill-current" />
+                        Riavvia Auto-Scraping
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={onRetryScrape}
+                      className="flex items-center gap-1.5 rounded-xl border border-brand-400/40 bg-brand-500/15 px-3 py-1.5 text-xs font-bold text-brand-200 hover:bg-brand-500/25"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Scansiona Ora
+                    </button>
+                  </div>
+                )}
                 {onlyEligible && ineligibleCount > 0 && (
                   <button
                     type="button"

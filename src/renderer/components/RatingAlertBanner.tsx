@@ -1,6 +1,6 @@
 import React from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ArrowRight, BellRing, Calculator, Check, VolumeX, X } from 'lucide-react';
+import { ArrowRight, BellRing, Calculator, Check, EyeOff, VolumeX, X } from 'lucide-react';
 import type { RatingWatchTriggerEvent } from '../../shared/types';
 import { betModeLabelIt } from '../../shared/ratingWatch';
 import { formatEuro, formatOdds } from '../utils/format';
@@ -13,6 +13,7 @@ interface RatingAlertBannerProps {
   onDismiss: (alertId: string) => void;
   onDismissAll: () => void;
   onOpenCalculator: (alert: RatingWatchTriggerEvent) => void;
+  onIgnoreEvent: (alert: RatingWatchTriggerEvent) => void;
 }
 
 /**
@@ -26,6 +27,7 @@ export const RatingAlertBanner: React.FC<RatingAlertBannerProps> = ({
   onDismiss,
   onDismissAll,
   onOpenCalculator,
+  onIgnoreEvent,
 }) => {
   if (alerts.length === 0) return null;
 
@@ -157,6 +159,17 @@ export const RatingAlertBanner: React.FC<RatingAlertBannerProps> = ({
                   OK
                 </button>
               </div>
+
+              <button
+                type="button"
+                data-testid="rating-alert-ignore-event"
+                onClick={() => onIgnoreEvent(ev)}
+                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-xl border border-amber-400/35 bg-amber-500/10 px-3 py-1.5 text-[11px] font-semibold text-amber-200 transition hover:border-amber-400/60 hover:bg-amber-500/20 hover:text-amber-100"
+                title="Quote cambiate? Escludi questo evento e continua la ricerca del rating su altri match"
+              >
+                <EyeOff className="h-3.5 w-3.5 shrink-0" />
+                Ignora evento e continua ricerca
+              </button>
             </div>
           </motion.div>
         ))}

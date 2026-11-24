@@ -194,6 +194,20 @@ export interface ConnectionDiagnostic {
   lastErrorSummary: string | null;
 }
 
+export interface ScrapeDateWindow {
+  startDate: string; // YYYY-MM-DD (local calendar day)
+  endDate: string;   // YYYY-MM-DD (local calendar day)
+  startMs: number;   // inclusive UTC epoch ms
+  endMs: number;     // inclusive UTC epoch ms
+}
+
+export interface DateRangeValue {
+  mode: 'all' | 'hours' | 'range';
+  hours?: number;
+  startDate: string | null; // YYYY-MM-DD (local calendar day)
+  endDate: string | null;   // YYYY-MM-DD (local calendar day)
+}
+
 export interface ScrapeSnapshot {
   rows: OddsmatcherRow[];
   dutcherRows: DutcherRow[];
@@ -209,6 +223,10 @@ export interface ScrapeSnapshot {
     lastCycleDurationMs: number;
     lastCompletedAt: number | null;
     isRunning: boolean;
+    isDateRangeScraping?: boolean;
+    activeDateRange?: { startDate: string; endDate: string } | null;
+    autoScrapeEnabled?: boolean;
+    nextAutoRefreshAt?: number | null;
   };
 }
 
@@ -359,6 +377,7 @@ export interface TrackedBet {
 
 export interface TargetedScrapeFilter {
   sports?: SportKey[];
+  dateWindow?: ScrapeDateWindow;
   eventHints?: Array<{
     eventName: string;
     homeTeam?: string;
@@ -367,8 +386,16 @@ export interface TargetedScrapeFilter {
   }>;
 }
 
+export interface IgnoredWatchEvent {
+  eventKey?: string;
+  eventName: string;
+  startTime?: string;
+  ignoredAt: number;
+}
+
 export interface RatingWatchMatchSnapshot {
   rowId: string;
+  eventKey?: string;
   eventName: string;
   league: string;
   startTime: string;
@@ -400,6 +427,8 @@ export interface RatingWatch {
   league?: string;
   leagues?: string[];
   startTime?: string;
+  dateRange?: DateRangeValue;
+  ignoredEvents?: IgnoredWatchEvent[];
   marketType: MarketType | 'ALL';
   selectionKey: string | 'ALL';
   bookmakerIds: SourceId[];
@@ -538,6 +567,7 @@ export interface DisplayInfo {
 
 export interface AppSettings {
   refreshIntervalSec: number; // 0 = manual, 30, 60, 120, 300
+  autoScrapeEnabled: boolean; // true = automatic periodic scraping enabled, false = stopped/paused
   defaultStake: number;
   betfairCommission: number; // default 0.045 (4.5% Italy)
   smarketsCommission: number; // default 0.02 (2%)
@@ -747,6 +777,7 @@ export const SOURCE_CATALOG: SourceConfig[] = [
 
 export const DEFAULT_SETTINGS: AppSettings = {
   refreshIntervalSec: 60,
+  autoScrapeEnabled: true,
   defaultStake: 50,
   betfairCommission: 0.045,
   smarketsCommission: 0.02,

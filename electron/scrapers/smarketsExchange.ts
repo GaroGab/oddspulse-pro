@@ -1,3 +1,4 @@
+import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type {
   MarketType,
   RawScrapedMarket,
@@ -5,7 +6,7 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, sleep } from './httpClient';
+import { fetchJson, isAbortError, sleep, throwIfAborted } from './httpClient';
 import { matchesEventHints } from './matchLinker';
 
 const SM_BASE = 'https://api.smarkets.com/v3';
@@ -131,13 +132,25 @@ const SM_SPORTS: Array<{ sport: SportKey; smType: string; limit: number }> = [
 
 export async function scrapeSmarketsExchange(
   includeLive: boolean,
-  filter?: TargetedScrapeFilter
+  filter?: TargetedScrapeFilter,
+  signal?: AbortSignal
 ): Promise<{
   markets: RawScrapedMarket[];
   latencyMs: number;
 }> {
   const started = Date.now();
   const markets: RawScrapedMarket[] = [];
+  const nowMs = Date.now();
+  const dateWindow = filter?.dateWindow;
+  const windowAfterMs = dateWindow
+    ? includeLive
+      ? dateWindow.startMs
+      : Math.max(nowMs, dateWindow.startMs)
+    : null;
+  if (dateWindow && windowAfterMs !== null && windowAfterMs > dateWindow.endMs) {
+    return { markets, latencyMs: Date.now() - started };
+  }
+
   const stateParam = includeLive ? 'state=upcoming&state=live' : 'state=upcoming';
   let succeededSports = 0;
   let lastErr: unknown = null;
@@ -148,13 +161,53 @@ export async function scrapeSmarketsExchange(
       : SM_SPORTS;
 
   for (const cfg of targetSports) {
+    throwIfAborted(signal);
     try {
-      const { data: evResp } = await fetchJson<{ events?: SmEvent[] }>(
-        `${SM_BASE}/events/?${stateParam}&type=${cfg.smType}&limit=${cfg.limit}&sort=start_datetime,id`,
-        { timeoutMs: 12000 }
-      );
-      const events = (evResp.events ?? []).filter((e) => {
+      const sortParam = dateWindow ? 'display_order,start_datetime,id' : 'start_datetime,id';
+      const dateQuery =
+        dateWindow && windowAfterMs !== null
+          ? `&start_datetime_min=${encodeURIComponent(
+              new Date(windowAfterMs).toISOString()
+            )}&start_datetime_max=${encodeURIComponent(new Date(dateWindow.endMs).toISOString())}`
+          : '';
+      const firstUrl = `${SM_BASE}/events/?${stateParam}&type=${cfg.smType}&limit=${cfg.limit}&sort=${sortParam}${dateQuery}`;
+      const rawEvents: SmEvent[] = [];
+      const seenEvIds = new Set<string>();
+      const maxPages = dateWindow && cfg.sport === 'football' ? 2 : 1;
+      let nextUrl: string | null = firstUrl;
+
+      for (let page = 0; page < maxPages && nextUrl; page++) {
+        throwIfAborted(signal);
+        const pageUrl: string = nextUrl;
+        const pageRes: {
+          data: { events?: SmEvent[]; pagination?: { next_page?: string | null } };
+          latencyMs: number;
+        } = await fetchJson<{
+          events?: SmEvent[];
+          pagination?: { next_page?: string | null };
+        }>(pageUrl, { timeoutMs: 12000, signal });
+        const evResp = pageRes.data;
+        for (const ev of evResp.events ?? []) {
+          const eid = String(ev.id);
+          if (!seenEvIds.has(eid)) {
+            seenEvIds.add(eid);
+            rawEvents.push(ev);
+          }
+        }
+        const np: string | null | undefined = evResp.pagination?.next_page;
+        if (np && page + 1 < maxPages) {
+          nextUrl = np.startsWith('http')
+            ? np
+            : `${SM_BASE}/events/${np.startsWith('?') ? np : `?${np}`}`;
+          await sleep(100, signal);
+        } else {
+          nextUrl = null;
+        }
+      }
+
+      const events = rawEvents.filter((e) => {
         if (!e.start_datetime) return false;
+        if (dateWindow && !matchesScrapeDateWindow(e.start_datetime, dateWindow)) return false;
         const teams = splitTeams(e.name);
         if (!teams) return false;
         if (
@@ -180,33 +233,37 @@ export async function scrapeSmarketsExchange(
       }> = [];
 
       for (let i = 0; i < events.length; i += 25) {
+        throwIfAborted(signal);
         const chunkIds = events
           .slice(i, i + 25)
           .map((e) => e.id)
           .join(',');
         const { data: mResp } = await fetchJson<{ markets?: SmMarket[] }>(
           `${SM_BASE}/events/${chunkIds}/markets/?popular=true`,
-          { timeoutMs: 12000 }
+          { timeoutMs: 12000, signal }
         );
         for (const m of mResp.markets ?? []) {
           if (m.state && m.state !== 'open') continue;
           const mapped = parseSmMarketType(cfg.sport, m.name ?? '', m.market_type?.name ?? '');
           if (mapped) selectedMarkets.push({ market: m, mapped });
         }
-        if (i + 25 < events.length) await sleep(120);
+        if (i + 25 < events.length) await sleep(120, signal);
       }
 
       // Fetch contracts & quotes in chunks of 30 markets
       for (let i = 0; i < selectedMarkets.length; i += 30) {
+        throwIfAborted(signal);
         const slice = selectedMarkets.slice(i, i + 30);
         const mIds = slice.map((s) => s.market.id).join(',');
 
         const [{ data: cResp }, { data: qResp }] = await Promise.all([
           fetchJson<{ contracts?: SmContract[] }>(`${SM_BASE}/markets/${mIds}/contracts/`, {
             timeoutMs: 12000,
+            signal,
           }),
           fetchJson<Record<string, SmQuote>>(`${SM_BASE}/markets/${mIds}/quotes/`, {
             timeoutMs: 12000,
+            signal,
           }),
         ]);
 
@@ -289,10 +346,11 @@ export async function scrapeSmarketsExchange(
             });
           }
         }
-        if (i + 30 < selectedMarkets.length) await sleep(120);
+        if (i + 30 < selectedMarkets.length) await sleep(120, signal);
       }
       succeededSports++;
     } catch (err) {
+      if (signal?.aborted || isAbortError(err)) throw err;
       lastErr = err;
     }
   }

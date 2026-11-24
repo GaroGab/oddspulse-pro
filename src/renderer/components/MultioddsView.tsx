@@ -12,6 +12,8 @@ import {
   ListPlus,
   Lock,
   Percent,
+  Play,
+  RefreshCw,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -44,6 +46,7 @@ import { SourceMultiSelect } from './SourceSelect';
 interface MultioddsViewProps {
   snapshot: ScrapeSnapshot;
   isBrowserOnline: boolean;
+  autoScrapeActive?: boolean;
   lockedRows: OddsmatcherRow[];
   savedMultiples?: SavedMultiplePlan[];
   soundEnabled: boolean;
@@ -55,12 +58,14 @@ interface MultioddsViewProps {
   ) => Promise<SavedMultiplePlan | null> | SavedMultiplePlan | null | void;
   onDeleteSavedMultiple?: (id: string) => void;
   onRetryScrape: () => void;
+  onRestartAutoScrape?: () => void;
   onOpenScrapers: () => void;
 }
 
 export const MultioddsView: React.FC<MultioddsViewProps> = ({
   snapshot,
   isBrowserOnline,
+  autoScrapeActive = true,
   lockedRows,
   savedMultiples = [],
   soundEnabled,
@@ -70,6 +75,7 @@ export const MultioddsView: React.FC<MultioddsViewProps> = ({
   onSaveMultiplePlan,
   onDeleteSavedMultiple,
   onRetryScrape,
+  onRestartAutoScrape,
   onOpenScrapers,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'manual' | 'saved' | 'auto'>('manual');
@@ -316,6 +322,7 @@ export const MultioddsView: React.FC<MultioddsViewProps> = ({
         <ManualMultioddsBuilder
           snapshot={snapshot}
           isBrowserOnline={isBrowserOnline}
+          autoScrapeActive={autoScrapeActive}
           lockedRows={lockedRows}
           soundEnabled={soundEnabled}
           savedCount={savedMultiples.length}
@@ -323,6 +330,7 @@ export const MultioddsView: React.FC<MultioddsViewProps> = ({
           onSaveMultiplePlan={onSaveMultiplePlan}
           onOpenSavedList={handleOpenSavedPlan}
           onRetryScrape={onRetryScrape}
+          onRestartAutoScrape={onRestartAutoScrape}
           onOpenScrapers={onOpenScrapers}
         />
       ) : activeSubTab === 'saved' ? (
@@ -710,12 +718,37 @@ export const MultioddsView: React.FC<MultioddsViewProps> = ({
             <Layers className="h-9 w-9 text-slate-600" />
             <div className="text-sm font-semibold text-slate-300">
               {snapshot.rows.length === 0
-                ? 'In attesa delle quote live dallo scraper...'
+                ? !autoScrapeActive && !snapshot.stats.isRunning
+                  ? 'Aggiornamento automatico dello scraping fermo'
+                  : 'In attesa delle quote live dallo scraper...'
                 : 'Nessuna combinazione trovata con questi parametri'}
             </div>
-            <p className="max-w-md text-xs text-slate-500">
-              Suggerimento: prova ad abbassare la Quota Singola Minima (es. 1.20), ridurre la Quota Totale Minima o impostare Gap Sequenziale su 60m / Sovrapposti OK.
-            </p>
+            {snapshot.rows.length === 0 && !autoScrapeActive && !snapshot.stats.isRunning ? (
+              <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+                {onRestartAutoScrape && (
+                  <button
+                    type="button"
+                    onClick={onRestartAutoScrape}
+                    className="flex items-center gap-1.5 rounded-xl border border-emerald-400/50 bg-emerald-500/20 px-3.5 py-1.5 text-xs font-bold text-emerald-200 hover:bg-emerald-500/30"
+                  >
+                    <Play className="h-3.5 w-3.5 fill-current" />
+                    Riavvia Auto-Scraping
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onRetryScrape}
+                  className="flex items-center gap-1.5 rounded-xl border border-brand-400/40 bg-brand-500/15 px-3.5 py-1.5 text-xs font-bold text-brand-200 hover:bg-brand-500/25"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Scansiona Ora
+                </button>
+              </div>
+            ) : (
+              <p className="max-w-md text-xs text-slate-500">
+                Suggerimento: prova ad abbassare la Quota Singola Minima (es. 1.20), ridurre la Quota Totale Minima o impostare Gap Sequenziale su 60m / Sovrapposti OK.
+              </p>
+            )}
           </div>
         ) : (
           plans.map((plan, idx) => {

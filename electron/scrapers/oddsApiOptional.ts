@@ -1,5 +1,6 @@
+import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type { RawScrapedMarket, SelectionQuote, TargetedScrapeFilter } from '../../src/shared/types';
-import { fetchJson } from './httpClient';
+import { fetchJson, isAbortError, throwIfAborted } from './httpClient';
 import { matchesEventHints } from './matchLinker';
 
 interface OddsApiEvent {
@@ -28,7 +29,8 @@ const LEAGUES = [
 
 export async function scrapeTheOddsApiOptional(
   apiKey: string,
-  filter?: TargetedScrapeFilter
+  filter?: TargetedScrapeFilter,
+  signal?: AbortSignal
 ): Promise<{ markets: RawScrapedMarket[]; latencyMs: number }> {
   const started = Date.now();
   const markets: RawScrapedMarket[] = [];
@@ -40,13 +42,17 @@ export async function scrapeTheOddsApiOptional(
   }
 
   for (const sportKey of LEAGUES) {
+    throwIfAborted(signal);
     try {
       const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${encodeURIComponent(
         apiKey.trim()
       )}&regions=eu&markets=h2h&oddsFormat=decimal`;
-      const { data } = await fetchJson<OddsApiEvent[]>(url, { timeoutMs: 10000, retries: 0 });
+      const { data } = await fetchJson<OddsApiEvent[]>(url, { timeoutMs: 10000, retries: 0, signal });
 
       for (const ev of data ?? []) {
+        if (filter?.dateWindow && !matchesScrapeDateWindow(ev.commence_time, filter.dateWindow)) {
+          continue;
+        }
         if (
           filter?.eventHints?.length &&
           !matchesEventHints(
@@ -94,7 +100,8 @@ export async function scrapeTheOddsApiOptional(
           }
         }
       }
-    } catch {
+    } catch (err) {
+      if (signal?.aborted || isAbortError(err)) throw err;
       // Ignore individual league errors
     }
   }

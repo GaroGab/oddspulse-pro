@@ -8,6 +8,7 @@ import type {
   RatingWatchTriggerEvent,
   SavedMultiplePlan,
   SavedMultiplePlanInput,
+  ScrapeDateWindow,
   ScrapeSnapshot,
   TrackedBet,
 } from '../src/shared/types';
@@ -33,6 +34,10 @@ export interface OddsPulseAPI {
 
   getSnapshot: () => Promise<ScrapeSnapshot>;
   runScrapeNow: () => Promise<ScrapeSnapshot>;
+  scrapeDateRange: (dateWindow: ScrapeDateWindow) => Promise<ScrapeSnapshot>;
+  setActiveDateRange: (dateWindow: ScrapeDateWindow | null) => Promise<void>;
+  stopAutoScrape: () => Promise<{ settings: AppSettings; snapshot: ScrapeSnapshot }>;
+  startAutoScrape: () => Promise<{ settings: AppSettings; snapshot: ScrapeSnapshot }>;
   onScrapeUpdate: (cb: (snapshot: ScrapeSnapshot) => void) => () => void;
 
   getSettings: () => Promise<AppSettings>;
@@ -97,6 +102,10 @@ const api: OddsPulseAPI = {
 
   getSnapshot: () => ipcRenderer.invoke('scraper:getSnapshot'),
   runScrapeNow: () => ipcRenderer.invoke('scraper:runNow'),
+  scrapeDateRange: (dateWindow) => ipcRenderer.invoke('scraper:scrapeDateRange', dateWindow),
+  setActiveDateRange: (dateWindow) => ipcRenderer.invoke('scraper:setActiveDateRange', dateWindow),
+  stopAutoScrape: () => ipcRenderer.invoke('scraper:stopAuto'),
+  startAutoScrape: () => ipcRenderer.invoke('scraper:startAuto'),
   onScrapeUpdate: (cb) => {
     const listener = (_ev: Electron.IpcRendererEvent, snapshot: ScrapeSnapshot) => cb(snapshot);
     ipcRenderer.on('scraper:update', listener);

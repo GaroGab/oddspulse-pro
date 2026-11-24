@@ -1,13 +1,21 @@
+import {
+  addDays,
+  matchesDateRange,
+  resolveScrapeDateWindow,
+  toLocalDateKey,
+} from './dateRange';
 import { calculateSingleMatch } from './math';
 import {
   SOURCE_CATALOG,
   type AppSettings,
   type BetMode,
+  type IgnoredWatchEvent,
   type MarketType,
   type OddsmatcherRow,
   type RatingWatch,
   type RatingWatchInput,
   type RatingWatchMatchSnapshot,
+  type ScrapeDateWindow,
   type SourceId,
   type SportKey,
   type TargetedScrapeFilter,
@@ -370,7 +378,8 @@ function sportHintLabelIt(sport: SportKey): string {
 export function buildCompetitionOptions(
   items: Array<{ eventKey?: string; league: string; sport: SportKey }>,
   sportFilter?: SportKey,
-  activeLeagues: string[] = []
+  activeLeagues: string[] = [],
+  prioritizeWithEvents = false
 ): Array<{ value: string; label: string; hint?: string }> {
   const opts: Array<{ value: string; label: string; hint?: string }> = [];
   const seenValues = new Set<string>();
@@ -403,28 +412,58 @@ export function buildCompetitionOptions(
     }
   }
 
-  for (const preset of COMPETITION_PRESETS) {
-    if (sportFilter && preset.sport !== sportFilter) continue;
+  const presetEntries = COMPETITION_PRESETS.filter(
+    (preset) => !sportFilter || preset.sport === sportFilter
+  ).map((preset) => {
     const liveCnt = seenEventKeysPerLeague.get(preset.value)?.size ?? 0;
-    opts.push({
+    return {
       value: preset.value,
       label: preset.label,
       hint: liveCnt > 0 ? `${preset.hint} · ${liveCnt}` : preset.hint,
-    });
-    seenValues.add(preset.value);
-  }
+      liveCnt,
+    };
+  });
 
   const sortedExtras = Array.from(extraDynamicLeagues.values()).sort(
     (a, b) => b.count - a.count || a.label.localeCompare(b.label)
   );
-  for (const ex of sortedExtras) {
-    if (seenValues.has(ex.label)) continue;
-    opts.push({
-      value: ex.label,
-      label: ex.label,
-      hint: `${sportHintLabelIt(ex.sport)} · ${ex.count}`,
-    });
-    seenValues.add(ex.label);
+
+  if (prioritizeWithEvents) {
+    const livePresets = presetEntries
+      .filter((p) => p.liveCnt > 0)
+      .sort((a, b) => b.liveCnt - a.liveCnt);
+    for (const p of livePresets) {
+      opts.push({ value: p.value, label: p.label, hint: p.hint });
+      seenValues.add(p.value);
+    }
+    for (const ex of sortedExtras) {
+      if (seenValues.has(ex.label)) continue;
+      opts.push({
+        value: ex.label,
+        label: ex.label,
+        hint: `${sportHintLabelIt(ex.sport)} · ${ex.count}`,
+      });
+      seenValues.add(ex.label);
+    }
+    for (const p of presetEntries) {
+      if (seenValues.has(p.value)) continue;
+      opts.push({ value: p.value, label: p.label, hint: p.hint });
+      seenValues.add(p.value);
+    }
+  } else {
+    for (const p of presetEntries) {
+      opts.push({ value: p.value, label: p.label, hint: p.hint });
+      seenValues.add(p.value);
+    }
+    for (const ex of sortedExtras) {
+      if (seenValues.has(ex.label)) continue;
+      opts.push({
+        value: ex.label,
+        label: ex.label,
+        hint: `${sportHintLabelIt(ex.sport)} · ${ex.count}`,
+      });
+      seenValues.add(ex.label);
+    }
   }
 
   for (const lg of activeLeagues) {
@@ -435,6 +474,22 @@ export function buildCompetitionOptions(
   }
 
   return opts;
+}
+
+/**
+ * Counts how many distinct canonical competitions have at least one event in `items`.
+ */
+export function countAvailableCompetitions(
+  items: Array<{ league: string; sport: SportKey }>,
+  sportFilter?: SportKey
+): number {
+  const set = new Set<string>();
+  for (const it of items) {
+    if (sportFilter && it.sport !== sportFilter) continue;
+    const canonical = resolveCanonicalCompetition(it.league, it.sport);
+    if (canonical) set.add(canonical);
+  }
+  return set.size;
 }
 
 /**
@@ -463,14 +518,20 @@ export function formatFittingListSummary(items: string[], maxChars = 26): string
  * (unless live events are explicitly enabled by settings).
  */
 export function isWatchExpired(
-  watch: Pick<RatingWatch, 'startTime'>,
+  watch: Pick<RatingWatch, 'startTime' | 'dateRange'>,
   nowMs = Date.now(),
   includeLiveEvents = false
 ): boolean {
-  if (includeLiveEvents || !watch.startTime) return false;
-  const startMs = new Date(watch.startTime).getTime();
-  if (!Number.isFinite(startMs)) return false;
-  return startMs < nowMs - 5 * 60_000;
+  if (includeLiveEvents) return false;
+  if (watch.startTime) {
+    const startMs = new Date(watch.startTime).getTime();
+    if (Number.isFinite(startMs) && startMs < nowMs - 5 * 60_000) return true;
+  }
+  if (!watch.startTime && watch.dateRange?.mode === 'range') {
+    const win = resolveScrapeDateWindow(watch.dateRange);
+    if (win && win.endMs < nowMs - 5 * 60_000) return true;
+  }
+  return false;
 }
 
 function tokenizeWatchPart(raw: string): string[] {
@@ -489,6 +550,124 @@ function splitEventTeamsText(raw: string): [string, string] | null {
     }
   }
   return null;
+}
+
+/**
+ * Extracts the canonical eventKey from a saved match snapshot (falling back to the rowId prefix).
+ */
+export function extractMatchEventKey(
+  match: Pick<RatingWatchMatchSnapshot, 'rowId' | 'eventKey'>
+): string | undefined {
+  if (typeof match.eventKey === 'string' && match.eventKey.trim()) {
+    return match.eventKey.trim();
+  }
+  if (typeof match.rowId === 'string' && match.rowId.includes('|')) {
+    const prefix = match.rowId.split('|')[0]?.trim();
+    if (prefix) return prefix;
+  }
+  return undefined;
+}
+
+function sameStartTimestamp(a?: string, b?: string): boolean {
+  if (!a || !b) return true;
+  if (a === b) return true;
+  const msA = Date.parse(a);
+  const msB = Date.parse(b);
+  if (Number.isFinite(msA) && Number.isFinite(msB)) {
+    return Math.abs(msA - msB) <= 60_000;
+  }
+  return false;
+}
+
+/**
+ * Checks whether a candidate event matches a specific IgnoredWatchEvent entry.
+ */
+export function matchesIgnoredWatchEvent(
+  ignored: Pick<IgnoredWatchEvent, 'eventKey' | 'eventName' | 'startTime'>,
+  candidate: { eventKey?: string; eventName: string; startTime?: string }
+): boolean {
+  if (ignored.eventKey && candidate.eventKey && ignored.eventKey === candidate.eventKey) {
+    return true;
+  }
+  const igName = normalizeWatchQuery(ignored.eventName);
+  const candName = normalizeWatchQuery(candidate.eventName);
+  if (!igName || !candName || igName !== candName) return false;
+  return sameStartTimestamp(ignored.startTime, candidate.startTime);
+}
+
+/**
+ * Returns true if the given row belongs to an event ignored on this watch.
+ */
+export function isRowIgnoredByWatch(
+  watch: Pick<RatingWatch, 'ignoredEvents'>,
+  candidate: { eventKey?: string; eventName: string; startTime?: string }
+): boolean {
+  if (!watch.ignoredEvents || watch.ignoredEvents.length === 0) return false;
+  return watch.ignoredEvents.some((ig) => matchesIgnoredWatchEvent(ig, candidate));
+}
+
+/**
+ * Sanitizes and deduplicates an untrusted list of ignored events.
+ */
+export function sanitizeIgnoredWatchEvents(raw: unknown): IgnoredWatchEvent[] {
+  if (!Array.isArray(raw)) return [];
+  const out: IgnoredWatchEvent[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Partial<IgnoredWatchEvent>;
+    const eventKey =
+      typeof obj.eventKey === 'string' && obj.eventKey.trim() ? obj.eventKey.trim() : undefined;
+    const eventName = String(obj.eventName ?? '').trim();
+    const startTime =
+      typeof obj.startTime === 'string' && obj.startTime.trim() ? obj.startTime.trim() : undefined;
+    if (!eventKey && !eventName) continue;
+    const candidate = {
+      eventKey,
+      eventName: eventName || eventKey || '',
+      startTime,
+      ignoredAt: Number.isFinite(obj.ignoredAt) ? Number(obj.ignoredAt) : Date.now(),
+    };
+    if (!out.some((existing) => matchesIgnoredWatchEvent(existing, candidate))) {
+      out.push(candidate);
+    }
+  }
+  return out;
+}
+
+/**
+ * Adds a matched event to a watch's ignored list without duplicates.
+ */
+export function appendIgnoredWatchEvent(
+  existing: IgnoredWatchEvent[] | undefined,
+  match: Pick<RatingWatchMatchSnapshot, 'rowId' | 'eventKey' | 'eventName' | 'startTime'>,
+  nowMs = Date.now()
+): IgnoredWatchEvent[] {
+  const list = Array.isArray(existing) ? existing : [];
+  const eventKey = extractMatchEventKey(match);
+  const eventName = String(match.eventName ?? '').trim();
+  const startTime = match.startTime || undefined;
+  if (!eventKey && !eventName) return list;
+  const candidate: IgnoredWatchEvent = {
+    eventKey,
+    eventName: eventName || eventKey || '',
+    startTime,
+    ignoredAt: nowMs,
+  };
+  if (list.some((ig) => matchesIgnoredWatchEvent(ig, candidate))) {
+    return list;
+  }
+  return [...list, candidate];
+}
+
+/**
+ * Removes an ignored event from a watch's ignored list so it can match again.
+ */
+export function removeIgnoredWatchEvent(
+  existing: IgnoredWatchEvent[] | undefined,
+  target: Pick<IgnoredWatchEvent, 'eventKey' | 'eventName' | 'startTime'>
+): IgnoredWatchEvent[] {
+  if (!Array.isArray(existing) || existing.length === 0) return [];
+  return existing.filter((ig) => !matchesIgnoredWatchEvent(ig, target));
 }
 
 /**
@@ -558,6 +737,10 @@ export function evaluateRatingWatch(
   let bestMatch: RatingWatchMatchSnapshot | null = null;
 
   for (const row of rows) {
+    if (watch.dateRange && watch.dateRange.mode !== 'all') {
+      if (!matchesDateRange(row.startTime, watch.dateRange, nowMs)) continue;
+    }
+    if (isRowIgnoredByWatch(watch, row)) continue;
     if (!matchesWatchEvent(watch, row)) continue;
     if (watch.marketType !== 'ALL' && row.marketType !== watch.marketType) continue;
     if (watch.selectionKey !== 'ALL' && row.selectionKey !== watch.selectionKey) continue;
@@ -584,6 +767,7 @@ export function evaluateRatingWatch(
     ) {
       bestMatch = {
         rowId: row.id,
+        eventKey: row.eventKey,
         eventName: row.eventName,
         league: row.league,
         startTime: row.startTime,
@@ -628,9 +812,63 @@ export interface AdaptiveWatchPlan {
   bookmakerIds: SourceId[];
   exchangeIds: SourceId[];
   sports?: SportKey[];
+  dateWindow?: ScrapeDateWindow;
   eventHints: NonNullable<TargetedScrapeFilter['eventHints']>;
   intervalSec: number | null;
   rateLimitReasons: string[];
+}
+
+function computeWatchPlanDateWindow(
+  activeWatches: RatingWatch[],
+  nowMs: number
+): ScrapeDateWindow | undefined {
+  const todayKey = toLocalDateKey(new Date(nowMs));
+  const tomorrowKey = toLocalDateKey(addDays(new Date(nowMs), 1));
+
+  let minStartDate: string | null = null;
+  let maxEndDate: string | null = null;
+  let hasUnrestrictedWatch = false;
+  let hasDatedWatch = false;
+
+  for (const w of activeWatches) {
+    const dr = w.dateRange;
+    if (!dr || dr.mode === 'all') {
+      hasUnrestrictedWatch = true;
+      continue;
+    }
+
+    if (dr.mode === 'range') {
+      const win = resolveScrapeDateWindow(dr);
+      if (!win) {
+        hasUnrestrictedWatch = true;
+        continue;
+      }
+      hasDatedWatch = true;
+      if (!minStartDate || win.startDate < minStartDate) minStartDate = win.startDate;
+      if (!maxEndDate || win.endDate > maxEndDate) maxEndDate = win.endDate;
+    } else if (dr.mode === 'hours') {
+      hasDatedWatch = true;
+      const hrs = dr.hours ?? 24;
+      const endKey = toLocalDateKey(new Date(nowMs + hrs * 3600_000));
+      if (!minStartDate || todayKey < minStartDate) minStartDate = todayKey;
+      if (!maxEndDate || endKey > maxEndDate) maxEndDate = endKey;
+    }
+  }
+
+  if (!hasDatedWatch || !minStartDate || !maxEndDate) return undefined;
+
+  if (hasUnrestrictedWatch) {
+    if (maxEndDate <= tomorrowKey) return undefined;
+    if (todayKey < minStartDate) minStartDate = todayKey;
+  }
+
+  return (
+    resolveScrapeDateWindow({
+      mode: 'range',
+      startDate: minStartDate,
+      endDate: maxEndDate,
+    }) ?? undefined
+  );
 }
 
 function computeIntervalForSources(
@@ -784,6 +1022,7 @@ export function computeAdaptiveWatchPlan(
   }
 
   const { intervalSec, rateLimitReasons } = computeIntervalForSources(bookmakerSet, exchangeSet);
+  const dateWindow = computeWatchPlanDateWindow(activeWatches, nowMs);
 
   return {
     activeWatches,
@@ -791,6 +1030,7 @@ export function computeAdaptiveWatchPlan(
     bookmakerIds: Array.from(bookmakerSet),
     exchangeIds: Array.from(exchangeSet),
     sports: needsAllSports || sportSet.size === 0 ? undefined : Array.from(sportSet),
+    dateWindow,
     eventHints: hasWildcardEventWatch ? [] : eventHints,
     intervalSec,
     rateLimitReasons,

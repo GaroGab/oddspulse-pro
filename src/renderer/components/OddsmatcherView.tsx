@@ -12,12 +12,18 @@ import {
   Layers,
   Lock,
   Radar,
+  RefreshCw,
   RotateCcw,
   Search,
   Sparkles,
   TrendingUp,
   X,
 } from 'lucide-react';
+import {
+  formatScrapeDateWindowLabel,
+  needsFutureDateScrape,
+  resolveScrapeDateWindow,
+} from '../../shared/dateRange';
 import { calculateSingleMatch } from '../../shared/math';
 import {
   buildCompetitionOptions,
@@ -42,6 +48,7 @@ import {
   sportLabel,
 } from '../utils/format';
 import { AnimatedNumber } from './AnimatedNumber';
+import { AutoScrapePausedState } from './AutoScrapePausedState';
 import { NumericInput } from './NumericInput';
 import { BookmakerIcon } from './BookmakerIcon';
 import { ConnectionAlert } from './ConnectionAlert';
@@ -64,6 +71,7 @@ import {
 interface OddsmatcherViewProps {
   snapshot: ScrapeSnapshot;
   isBrowserOnline: boolean;
+  autoScrapeActive?: boolean;
   mode: BetMode;
   stake: number;
   tableDensity: TableDensity;
@@ -75,7 +83,12 @@ interface OddsmatcherViewProps {
   onToggleLockMulti: (row: OddsmatcherRow) => void;
   onCreateRatingWatch?: (row: OddsmatcherRow) => void;
   onToggleKpis: () => void;
+  onDateRangeFilterChange?: (
+    next: DateRangeValue,
+    opts?: { pendingEnd?: boolean; force?: boolean }
+  ) => void;
   onRetryScrape: () => void;
+  onRestartAutoScrape?: () => void;
   onOpenScrapers: () => void;
 }
 
@@ -84,6 +97,7 @@ type SortKey = 'rating' | 'profit' | 'backOdds' | 'layOdds' | 'liquidity' | 'sta
 export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   snapshot,
   isBrowserOnline,
+  autoScrapeActive = true,
   mode,
   stake,
   tableDensity,
@@ -95,7 +109,9 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   onToggleLockMulti,
   onCreateRatingWatch,
   onToggleKpis,
+  onDateRangeFilterChange,
   onRetryScrape,
+  onRestartAutoScrape,
   onOpenScrapers,
 }) => {
   const rowPad =
@@ -293,9 +309,22 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     (snapshot.rows.length === 0 &&
       !snapshot.stats.isRunning &&
       (snapshot.connection.failedSourcesCount > 0 ||
-        snapshot.connection.exchangesOnlineCount === 0));
+        (snapshot.stats.lastCompletedAt !== null &&
+          snapshot.connection.exchangesOnlineCount === 0)));
 
   const noSourcesEnabled = snapshot.connection.enabledSourcesCount === 0;
+
+  const handleDateRangeChange = (next: DateRangeValue, meta?: { pendingEnd?: boolean }) => {
+    setDateRange(next);
+    onDateRangeFilterChange?.(next, meta);
+  };
+
+  const isFutureDateSelected = useMemo(() => needsFutureDateScrape(dateRange), [dateRange]);
+  const selectedDateWindow = useMemo(() => resolveScrapeDateWindow(dateRange), [dateRange]);
+  const selectedDateLabel = selectedDateWindow
+    ? formatScrapeDateWindowLabel(selectedDateWindow)
+    : null;
+  const isDateRangeScraping = Boolean(snapshot.stats.isDateRangeScraping);
 
   const resetAllFilters = () => {
     onChangeMode('normal');
@@ -308,7 +337,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     setMaxBack(15);
     setMinRating(0);
     setMinLiquidity(5);
-    setDateRange(EMPTY_DATE_RANGE);
+    handleDateRangeChange(EMPTY_DATE_RANGE);
     setOnlySurebets(false);
     setSearch('');
   };
@@ -403,7 +432,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
       chips.push({
         id: 'date',
         label: dateLabel,
-        onClear: () => setDateRange(EMPTY_DATE_RANGE),
+        onClear: () => handleDateRangeChange(EMPTY_DATE_RANGE),
       });
     }
 
@@ -627,7 +656,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Cerca squadra, lega, esito..."
-                className="w-56 rounded-xl border border-slate-800 bg-slate-950/80 py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-500 focus:border-brand-400/60 focus:outline-none"
+                className="w-44 rounded-xl border border-slate-800 bg-slate-950/80 py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-500 focus:border-brand-400/60 focus:outline-none xl:w-52 2xl:w-56"
               />
             </div>
             <button
@@ -662,14 +691,6 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                 }`}
               />
               <span>Filtri</span>
-              {activeFilterChips.length > 0 && (
-                <span
-                  data-testid="om-filters-active-count"
-                  className="ml-0.5 rounded-full bg-brand-400/25 px-1.5 py-0.2 font-mono text-[10px] font-extrabold text-brand-200"
-                >
-                  {activeFilterChips.length}
-                </span>
-              )}
             </button>
           </div>
         </div>
@@ -910,8 +931,9 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
               </label>
               <DateRangeCalendar
                 value={dateRange}
-                onChange={setDateRange}
+                onChange={handleDateRangeChange}
                 eventDateCounts={eventDateCounts}
+                isScraping={isDateRangeScraping && isFutureDateSelected}
               />
             </div>
             </div>
@@ -926,8 +948,51 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
         style={{ contain: 'layout style' }}
         className="glass-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl"
       >
+        {isDateRangeScraping && isFutureDateSelected && enriched.length > 0 && (
+          <div
+            data-testid="oddsmatcher-date-scrape-banner"
+            className="flex items-center justify-between gap-2 border-b border-brand-400/25 bg-brand-500/10 px-4 py-2 text-xs text-brand-200"
+          >
+            <div className="flex items-center gap-2">
+              <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-brand-300" />
+              <span>
+                Ricerca competizioni e quote aggiuntive per il periodo{' '}
+                <strong className="font-mono text-white">{selectedDateLabel}</strong> in corso...
+              </span>
+            </div>
+            <span className="font-mono text-[11px] text-brand-300/90">
+              {enriched.length} quote già disponibili
+            </span>
+          </div>
+        )}
         <div className="flex-1 overflow-auto">
-          {snapshot.rows.length === 0 && snapshot.stats.isRunning ? (
+          {enriched.length === 0 && isDateRangeScraping && isFutureDateSelected ? (
+            <div
+              data-testid="oddsmatcher-date-scrape-loading"
+              className="flex h-full flex-col items-center justify-center gap-4 p-10 text-center"
+            >
+              <div className="relative flex h-16 w-16 items-center justify-center">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400/30" />
+                <div className="relative flex h-12 w-12 items-center justify-center rounded-2xl border border-brand-400/40 bg-brand-500/15 text-brand-300 shadow-glow">
+                  <Radar className="h-6 w-6 animate-spin" />
+                </div>
+              </div>
+              <div>
+                <h3 className="font-display text-base font-bold text-white">
+                  Ricerca Quote Future in Corso...
+                </h3>
+                <p className="mt-1 max-w-md text-xs text-slate-400">
+                  Scansione di Exchange e Bookmaker per trovare le competizioni e le quote nel periodo{' '}
+                  <strong className="font-mono text-brand-200">{selectedDateLabel}</strong>.
+                </p>
+              </div>
+            </div>
+          ) : snapshot.rows.length === 0 &&
+          (snapshot.stats.isRunning ||
+            (autoScrapeActive &&
+              snapshot.connection.health === 'idle' &&
+              snapshot.connection.failedSourcesCount === 0 &&
+              isBrowserOnline)) ? (
             <div className="flex h-full flex-col items-center justify-center gap-4 p-10 text-center">
               <div className="relative flex h-16 w-16 items-center justify-center">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400/30" />
@@ -995,21 +1060,77 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                 Apri Motore Scraping
               </button>
             </div>
+          ) : snapshot.rows.length === 0 && !autoScrapeActive ? (
+            <AutoScrapePausedState
+              data-testid="oddsmatcher-paused-empty"
+              onRetryScrape={onRetryScrape}
+              onRestartAutoScrape={onRestartAutoScrape}
+            />
+          ) : snapshot.rows.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-10 text-center">
+              <Radar className="h-8 w-8 text-slate-500" />
+              <div className="text-sm font-semibold text-slate-200">
+                Nessuna quota abbinata trovata nell&apos;ultimo ciclo
+              </div>
+              <p className="max-w-md text-xs text-slate-400">
+                Verifica le fonti abilitate o avvia una nuova scansione per aggiornare i mercati disponibili.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onRetryScrape}
+                  className="flex items-center gap-1.5 rounded-xl border border-brand-400/40 bg-brand-500/15 px-4 py-2 text-xs font-bold text-brand-200 hover:bg-brand-500/25"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Scansiona Ora
+                </button>
+                <button
+                  type="button"
+                  onClick={onOpenScrapers}
+                  className="rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-xs font-semibold text-slate-300 hover:border-brand-400/40 hover:text-white"
+                >
+                  Apri Motore Scraping
+                </button>
+              </div>
+            </div>
           ) : enriched.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2.5 p-10 text-center">
               <Search className="h-8 w-8 text-slate-600" />
               <div className="text-sm font-semibold text-slate-300">
                 Nessun match corrisponde ai filtri attuali
               </div>
-              <p className="text-xs text-slate-500">
-                Ci sono <strong className="text-slate-300">{snapshot.rows.length}</strong> quote live disponibili: prova ad abbassare la liquidità minima, allargare le quote o ripristinare i filtri.
+              <p className="max-w-md text-xs text-slate-500">
+                {isFutureDateSelected ? (
+                  <>
+                    Nessuna quota abbinata trovata per il periodo{' '}
+                    <strong className="font-mono text-slate-300">{selectedDateLabel}</strong> con i filtri correnti.
+                    Puoi rilanciare la scansione sul periodo o allargare i filtri (alcuni bookmaker/exchange pubblicano le quote fino a 7–14 giorni prima).
+                  </>
+                ) : (
+                  <>
+                    Ci sono <strong className="text-slate-300">{snapshot.rows.length}</strong> quote live disponibili: prova ad abbassare la liquidità minima, allargare le quote o ripristinare i filtri.
+                  </>
+                )}
               </p>
-              <button
-                onClick={resetAllFilters}
-                className="mt-1 rounded-xl border border-brand-400/40 bg-brand-500/15 px-4 py-1.5 text-xs font-bold text-brand-200 transition hover:bg-brand-500/25"
-              >
-                Ripristina tutti i filtri
-              </button>
+              <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+                {isFutureDateSelected && onDateRangeFilterChange && (
+                  <button
+                    type="button"
+                    data-testid="oddsmatcher-rescan-date-btn"
+                    onClick={() => onDateRangeFilterChange(dateRange, { force: true })}
+                    className="flex items-center gap-1.5 rounded-xl border border-emerald-400/40 bg-emerald-500/15 px-4 py-1.5 text-xs font-bold text-emerald-200 transition hover:bg-emerald-500/25"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Riscansiona periodo {selectedDateLabel}
+                  </button>
+                )}
+                <button
+                  onClick={resetAllFilters}
+                  className="rounded-xl border border-brand-400/40 bg-brand-500/15 px-4 py-1.5 text-xs font-bold text-brand-200 transition hover:bg-brand-500/25"
+                >
+                  Ripristina tutti i filtri
+                </button>
+              </div>
             </div>
           ) : (
             <table className="w-full min-w-[1040px] border-collapse text-left text-xs">
@@ -1047,7 +1168,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                       Esito (€) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="whitespace-nowrap px-3.5 py-3 text-right">Azioni</th>
+                  <th className="whitespace-nowrap px-3.5 py-3 text-center">Azioni</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/55">
@@ -1178,7 +1299,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                       </td>
 
                       <td
-                        className={`whitespace-nowrap px-3.5 ${rowPad} text-right`}
+                        className={`whitespace-nowrap px-3.5 ${rowPad} text-center`}
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="inline-flex items-center gap-1.5">

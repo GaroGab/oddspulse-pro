@@ -1,3 +1,4 @@
+import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type {
   MarketType,
   RawScrapedMarket,
@@ -5,7 +6,7 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, sleep } from './httpClient';
+import { fetchJson, isAbortError, sleep, throwIfAborted } from './httpClient';
 import { matchesEventHints } from './matchLinker';
 
 const SCAN_URL =
@@ -178,7 +179,8 @@ const SPORT_CONFIGS: Array<{
 
 export async function scrapeBetfairExchange(
   includeLive: boolean,
-  filter?: TargetedScrapeFilter
+  filter?: TargetedScrapeFilter,
+  signal?: AbortSignal
 ): Promise<{
   markets: RawScrapedMarket[];
   latencyMs: number;
@@ -189,12 +191,23 @@ export async function scrapeBetfairExchange(
   let succeededSports = 0;
   let lastErr: unknown = null;
 
+  const dateWindow = filter?.dateWindow;
+  const windowAfterMs = dateWindow
+    ? includeLive
+      ? dateWindow.startMs
+      : Math.max(nowMs, dateWindow.startMs)
+    : null;
+  if (dateWindow && windowAfterMs !== null && windowAfterMs > dateWindow.endMs) {
+    return { markets, latencyMs: Date.now() - started };
+  }
+
   const targetSports =
     filter?.sports && filter.sports.length > 0
       ? SPORT_CONFIGS.filter((sc) => filter.sports!.includes(sc.sport))
       : SPORT_CONFIGS;
 
   for (const sc of targetSports) {
+    throwIfAborted(signal);
     try {
       const scanPayload = {
         filter: {
@@ -203,6 +216,12 @@ export async function scrapeBetfairExchange(
           marketTypeCodes: sc.marketTypeCodes,
           selectBy: 'MAXIMUM_TRADED',
           contentGroup: { language: 'it', regionCode: 'UK' },
+          ...(dateWindow && windowAfterMs !== null
+            ? {
+                marketStartingAfter: new Date(windowAfterMs).toISOString(),
+                marketStartingBefore: new Date(dateWindow.endMs).toISOString(),
+              }
+            : {}),
           maxResults: sc.maxResults,
           eventTypeIds: [sc.eventTypeId],
         },
@@ -218,6 +237,7 @@ export async function scrapeBetfairExchange(
         method: 'POST',
         body: scanPayload,
         timeoutMs: 12000,
+        signal,
       });
 
       const compById = new Map<number, string>();
@@ -231,9 +251,17 @@ export async function scrapeBetfairExchange(
       const eventCompMap = new Map<number, string>();
       const marketIds: string[] = [];
       for (const r of scan.results ?? []) {
-        if (filter?.eventHints?.length && r.eventId !== undefined) {
+        if (r.eventId !== undefined) {
           const evMeta = scanEvents[String(r.eventId)];
           if (
+            dateWindow &&
+            evMeta?.openDate &&
+            !matchesScrapeDateWindow(evMeta.openDate, dateWindow)
+          ) {
+            continue;
+          }
+          if (
+            filter?.eventHints?.length &&
             evMeta?.name &&
             !matchesEventHints(evMeta.name, '', '', sc.sport, filter.eventHints)
           ) {
@@ -249,9 +277,10 @@ export async function scrapeBetfairExchange(
       // Fetch ERO prices in batches of 30
       const batchSize = 30;
       for (let i = 0; i < marketIds.length; i += batchSize) {
+        throwIfAborted(signal);
         const batch = marketIds.slice(i, i + batchSize);
         const eroUrl = `${ERO_BASE}&marketIds=${batch.join(',')}`;
-        const { data: ero } = await fetchJson<BetfairEroResponse>(eroUrl, { timeoutMs: 12000 });
+        const { data: ero } = await fetchJson<BetfairEroResponse>(eroUrl, { timeoutMs: 12000, signal });
 
         for (const et of ero.eventTypes ?? []) {
           for (const evNode of et.eventNodes ?? []) {
@@ -273,6 +302,7 @@ export async function scrapeBetfairExchange(
 
               const startTime = mn.description?.marketTime ?? evNode.event.openDate;
               if (!includeLive && new Date(startTime).getTime() < nowMs - 60_000) continue;
+              if (dateWindow && !matchesScrapeDateWindow(startTime, dateWindow)) continue;
 
               const mapped = mapBetfairMarket(sc.sport, mn.description?.marketType ?? '');
               if (!mapped) continue;
@@ -326,11 +356,12 @@ export async function scrapeBetfairExchange(
           }
         }
         if (i + batchSize < marketIds.length) {
-          await sleep(120);
+          await sleep(120, signal);
         }
       }
       succeededSports++;
     } catch (err) {
+      if (signal?.aborted || isAbortError(err)) throw err;
       lastErr = err;
     }
   }

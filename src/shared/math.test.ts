@@ -13,14 +13,31 @@ import {
   extractBackMarketGroupsFromSnapshot,
   findPuntaPuntaMatches,
 } from './puntaPuntaMatcher';
-import { EMPTY_DATE_RANGE } from './dateRange';
 import {
+  buildAutoScrapeSettingsPatch,
+  getEffectiveAutoRefreshSec,
+  isAutoScrapeActive,
+} from './autoScrape';
+import {
+  EMPTY_DATE_RANGE,
+  formatScrapeDateWindowLabel,
+  getDirettaDayOffsetsForWindow,
+  matchesScrapeDateWindow,
+  needsFutureDateScrape,
+  resolveScrapeDateWindow,
+} from './dateRange';
+import {
+  appendIgnoredWatchEvent,
+  buildCompetitionOptions,
   computeAdaptiveWatchPlan,
+  countAvailableCompetitions,
   evaluateRatingWatch,
+  extractMatchEventKey,
   formatFittingListSummary,
   isWatchExpired,
   matchesWatchLeague,
   matchesWatchLeagues,
+  removeIgnoredWatchEvent,
   resolveCanonicalCompetition,
 } from './ratingWatch';
 import {
@@ -1115,6 +1132,186 @@ describe('Rating Watch Engine & Adaptive Interval', () => {
       formatFittingListSummary(['Serie A', 'Serie B', 'Serie C', 'Premier League'], 26)
     ).toBe('Serie A, Serie B +2');
   });
+
+  it('filters RatingWatch by calendar dateRange, prioritizes competitions in range, and sets adaptive plan dateWindow', () => {
+    const baseNow = new Date(2026, 10, 24, 12, 0, 0, 0).getTime(); // 2026-11-24 12:00 local
+    const todayIso = new Date(2026, 10, 24, 20, 0, 0, 0).toISOString();
+    const weekendSatIso = new Date(2026, 10, 28, 18, 0, 0, 0).toISOString();
+    const weekendSunIso = new Date(2026, 10, 29, 20, 45, 0, 0).toISOString();
+
+    const todayRow = makeRow({
+      id: 'today-row',
+      eventKey: 'ev_today',
+      eventName: 'Inter - Napoli',
+      league: 'ITALIA: Serie A',
+      startTime: todayIso,
+      backOdds: 2.3,
+      layOdds: 2.1, // higher rating, but outside weekend range
+    });
+    const satRow = makeRow({
+      id: 'sat-row',
+      eventKey: 'ev_sat',
+      eventName: 'Arsenal - Chelsea',
+      league: 'INGHILTERRA: Premier League',
+      startTime: weekendSatIso,
+      backOdds: 2.1,
+      layOdds: 2.04,
+    });
+    const sunExtraRow = makeRow({
+      id: 'sun-row',
+      eventKey: 'ev_sun',
+      eventName: 'Feyenoord - Ajax',
+      league: 'OLANDA: Eredivisie',
+      startTime: weekendSunIso,
+      backOdds: 2.05,
+      layOdds: 2.04,
+    });
+
+    const weekendWatch = makeWatch({
+      eventKey: undefined,
+      eventName: '',
+      sport: undefined,
+      league: undefined,
+      leagues: [],
+      startTime: undefined,
+      dateRange: { mode: 'range', startDate: '2026-11-28', endDate: '2026-11-29' },
+      bookmakerIds: [],
+      exchangeIds: [],
+      targetRating: 95,
+    });
+
+    // Today's row is ignored even though it has a higher rating; Saturday's row matches
+    const evRes = evaluateRatingWatch(weekendWatch, [todayRow, satRow, sunExtraRow], {
+      nowMs: baseNow,
+    });
+    expect(evRes.isExpired).toBe(false);
+    expect(evRes.bestMatch?.rowId).toBe('sat-row');
+    expect(evRes.shouldTrigger).toBe(true);
+
+    // Past dateRange expires cleanly when includeLiveEvents is false
+    const pastRangeWatch = makeWatch({
+      eventKey: undefined,
+      eventName: '',
+      startTime: undefined,
+      dateRange: { mode: 'range', startDate: '2026-11-20', endDate: '2026-11-21' },
+    });
+    expect(isWatchExpired(pastRangeWatch, baseNow, false)).toBe(true);
+    expect(isWatchExpired(pastRangeWatch, baseNow, true)).toBe(false);
+
+    // Adaptive watch plan computes dateWindow even when general autoScrapeEnabled is false
+    const stoppedAutoSettings = { ...DEFAULT_SETTINGS, autoScrapeEnabled: false };
+    const planSingle = computeAdaptiveWatchPlan([weekendWatch], stoppedAutoSettings, baseNow);
+    expect(planSingle.activeWatches).toHaveLength(1);
+    expect(planSingle.dateWindow?.startDate).toBe('2026-11-28');
+    expect(planSingle.dateWindow?.endDate).toBe('2026-11-29');
+
+    // Mixed unrestricted + future dateRange watch widens dateWindow from today through 2026-11-29
+    const nearWatch = makeWatch({
+      id: 'w-near',
+      eventKey: undefined,
+      eventName: '',
+      startTime: undefined,
+      dateRange: undefined,
+    });
+    const planMixed = computeAdaptiveWatchPlan(
+      [nearWatch, weekendWatch],
+      stoppedAutoSettings,
+      baseNow
+    );
+    expect(planMixed.dateWindow?.startDate).toBe('2026-11-24');
+    expect(planMixed.dateWindow?.endDate).toBe('2026-11-29');
+
+    // Competition options prioritize leagues present in the date-filtered event list
+    const dateEvents = [satRow, sunExtraRow];
+    expect(countAvailableCompetitions(dateEvents)).toBe(2);
+    const prioritizedOpts = buildCompetitionOptions(dateEvents, undefined, [], true);
+    expect(prioritizedOpts[0].value).toBe('Premier League');
+    expect(prioritizedOpts[1].value).toBe('Eredivisie');
+  });
+
+  it('ignores excluded events in evaluateRatingWatch, falls back cleanly to next match, and restores via helper', () => {
+    const baseNow = new Date('2026-11-24T12:00:00Z').getTime();
+    const rowFirst = makeRow({
+      id: 'ev_first|1X2|HOME|snai_it|Snai|betfair_it',
+      eventKey: 'ev_first',
+      eventName: 'Inter - Milan',
+      homeTeam: 'Inter',
+      awayTeam: 'Milan',
+      league: 'Serie A',
+      startTime: '2026-11-24T19:45:00Z',
+      backOdds: 2.1,
+      layOdds: 2.08,
+      liquidity: 450,
+    });
+    const rowSecond = makeRow({
+      id: 'ev_second|1X2|HOME|snai_it|Snai|betfair_it',
+      eventKey: 'ev_second',
+      eventName: 'Napoli - Roma',
+      homeTeam: 'Napoli',
+      awayTeam: 'Roma',
+      league: 'Serie A',
+      startTime: '2026-11-24T20:00:00Z',
+      backOdds: 2.04,
+      layOdds: 2.04,
+      liquidity: 350,
+    });
+
+    const baseWatch = makeWatch({
+      eventKey: undefined,
+      eventName: '',
+      startTime: undefined,
+      sport: 'football',
+      leagues: ['Serie A'],
+      bookmakerIds: [],
+      exchangeIds: [],
+      targetRating: 95,
+    });
+
+    const initialEval = evaluateRatingWatch(baseWatch, [rowFirst, rowSecond], { nowMs: baseNow });
+    expect(initialEval.shouldTrigger).toBe(true);
+    expect(initialEval.bestMatch?.eventName).toBe('Inter - Milan');
+    expect(extractMatchEventKey(initialEval.bestMatch!)).toBe('ev_first');
+
+    // Ignore first match (simulate user clicking "Ignora evento")
+    const ignoredList = appendIgnoredWatchEvent([], initialEval.bestMatch!, baseNow + 1000);
+    expect(ignoredList).toHaveLength(1);
+    // Re-appending the same event (even with missing eventKey fallback via rowId) deduplicates cleanly
+    const dedupedList = appendIgnoredWatchEvent(
+      ignoredList,
+      { ...initialEval.bestMatch!, eventKey: undefined },
+      baseNow + 2000
+    );
+    expect(dedupedList).toHaveLength(1);
+
+    const watchAfterIgnore = { ...baseWatch, ignoredEvents: dedupedList };
+    const afterIgnoreEval = evaluateRatingWatch(watchAfterIgnore, [rowFirst, rowSecond], {
+      nowMs: baseNow + 2000,
+    });
+    expect(afterIgnoreEval.bestMatch?.eventName).toBe('Napoli - Roma');
+    expect(afterIgnoreEval.bestMatch?.rowId).toBe(rowSecond.id);
+    expect(afterIgnoreEval.shouldTrigger).toBe(true);
+
+    // Fallback matching when eventKey differs or is absent matches by normalized name + startTime
+    const watchByNameOnly = {
+      ...baseWatch,
+      ignoredEvents: [{ eventName: 'inter - milan', startTime: '2026-11-24T19:45:00Z', ignoredAt: baseNow }],
+    };
+    const rowFirstAltKey = { ...rowFirst, eventKey: 'different_source_key' };
+    const altKeyEval = evaluateRatingWatch(watchByNameOnly, [rowFirstAltKey, rowSecond], {
+      nowMs: baseNow + 3000,
+    });
+    expect(altKeyEval.bestMatch?.eventName).toBe('Napoli - Roma');
+
+    // Restoring removes the event from ignoredEvents and allows it to win again
+    const restoredList = removeIgnoredWatchEvent(dedupedList, dedupedList[0]);
+    expect(restoredList).toHaveLength(0);
+    const restoredEval = evaluateRatingWatch(
+      { ...baseWatch, ignoredEvents: restoredList },
+      [rowFirst, rowSecond],
+      { nowMs: baseNow + 4000 }
+    );
+    expect(restoredEval.bestMatch?.eventName).toBe('Inter - Milan');
+  });
 });
 
 describe('Saved Multiple Progressive Engine', () => {
@@ -1487,5 +1684,134 @@ describe('Punta-Punta Matcher Engine', () => {
 
     expect(only2Way.rows.length).toBeGreaterThanOrEqual(2);
     expect(only2Way.rows.every((r) => r.outcomeCount === 2 && r.isSurebet)).toBe(true);
+  });
+});
+
+describe('Auto-Scrape Pause & Restart Helpers', () => {
+  it('evaluates isAutoScrapeActive from autoScrapeEnabled and refreshIntervalSec', () => {
+    expect(isAutoScrapeActive(DEFAULT_SETTINGS)).toBe(true);
+    expect(isAutoScrapeActive({ autoScrapeEnabled: false, refreshIntervalSec: 60 })).toBe(false);
+    expect(isAutoScrapeActive({ autoScrapeEnabled: true, refreshIntervalSec: 0 })).toBe(false);
+    expect(isAutoScrapeActive({ autoScrapeEnabled: true, refreshIntervalSec: 30 })).toBe(true);
+  });
+
+  it('preserves user interval on stop and restores it (or falls back to 60s) on restart', () => {
+    const customSettings = {
+      ...DEFAULT_SETTINGS,
+      refreshIntervalSec: 120,
+      autoScrapeEnabled: true,
+    };
+
+    const stopPatch = buildAutoScrapeSettingsPatch(customSettings, false);
+    expect(stopPatch).toEqual({ autoScrapeEnabled: false });
+    const stopped = { ...customSettings, ...stopPatch };
+    expect(stopped.refreshIntervalSec).toBe(120);
+    expect(isAutoScrapeActive(stopped)).toBe(false);
+
+    const restartPatch = buildAutoScrapeSettingsPatch(stopped, true);
+    expect(restartPatch).toEqual({ autoScrapeEnabled: true, refreshIntervalSec: 120 });
+
+    const manualSettings = {
+      ...DEFAULT_SETTINGS,
+      refreshIntervalSec: 0,
+      autoScrapeEnabled: false,
+    };
+    expect(getEffectiveAutoRefreshSec(manualSettings)).toBe(60);
+    expect(buildAutoScrapeSettingsPatch(manualSettings, true)).toEqual({
+      autoScrapeEnabled: true,
+      refreshIntervalSec: 60,
+    });
+  });
+});
+
+describe('Future Date Range Scraping Helpers', () => {
+  const fixedNow = new Date(2026, 10, 24, 12, 0, 0).getTime(); // 2026-11-24 12:00 local
+
+  it('resolves normalized date windows and detects future ranges accurately', () => {
+    expect(resolveScrapeDateWindow(EMPTY_DATE_RANGE)).toBeNull();
+    expect(
+      resolveScrapeDateWindow({ mode: 'hours', hours: 6, startDate: null, endDate: null })
+    ).toBeNull();
+
+    expect(needsFutureDateScrape(EMPTY_DATE_RANGE, fixedNow)).toBe(false);
+    expect(
+      needsFutureDateScrape(
+        { mode: 'range', startDate: '2026-11-24', endDate: '2026-11-24' },
+        fixedNow
+      )
+    ).toBe(false);
+    expect(
+      needsFutureDateScrape(
+        { mode: 'range', startDate: '2026-11-23', endDate: '2026-11-23' },
+        fixedNow
+      )
+    ).toBe(false);
+
+    // Future single day (+5 days) & reversed range (+6 -> +5)
+    const futureWin = resolveScrapeDateWindow({
+      mode: 'range',
+      startDate: '2026-11-30',
+      endDate: '2026-11-29',
+    });
+    expect(futureWin).not.toBeNull();
+    expect(futureWin!.startDate).toBe('2026-11-29');
+    expect(futureWin!.endDate).toBe('2026-11-30');
+    expect(futureWin!.endMs).toBeGreaterThan(futureWin!.startMs);
+    expect(
+      needsFutureDateScrape(
+        { mode: 'range', startDate: '2026-11-29', endDate: '2026-11-30' },
+        fixedNow
+      )
+    ).toBe(true);
+    expect(
+      needsFutureDateScrape(
+        { mode: 'range', startDate: '2026-11-24', endDate: '2026-11-30' },
+        fixedNow
+      )
+    ).toBe(true);
+  });
+
+  it('computes Diretta/Flashscore day offsets clamped to 0..7', () => {
+    expect(getDirettaDayOffsetsForWindow(undefined, fixedNow)).toEqual([0, 1]);
+
+    const win56 = resolveScrapeDateWindow({
+      mode: 'range',
+      startDate: '2026-11-29',
+      endDate: '2026-11-30',
+    })!;
+    expect(getDirettaDayOffsetsForWindow(win56, fixedNow)).toEqual([5, 6]);
+
+    const winWide = resolveScrapeDateWindow({
+      mode: 'range',
+      startDate: '2026-11-28',
+      endDate: '2026-12-05',
+    })!;
+    expect(getDirettaDayOffsetsForWindow(winWide, fixedNow)).toEqual([4, 5, 6, 7]);
+
+    const winTooFar = resolveScrapeDateWindow({
+      mode: 'range',
+      startDate: '2026-12-04',
+      endDate: '2026-12-06',
+    })!;
+    expect(getDirettaDayOffsetsForWindow(winTooFar, fixedNow)).toEqual([]);
+  });
+
+  it('matches timestamps against ScrapeDateWindow and formats labels', () => {
+    const win = resolveScrapeDateWindow({
+      mode: 'range',
+      startDate: '2026-11-29',
+      endDate: '2026-11-30',
+    })!;
+    const inside = new Date(2026, 10, 29, 15, 0, 0).toISOString();
+    const outsideBefore = new Date(2026, 10, 28, 22, 0, 0).toISOString();
+    const outsideAfter = new Date(2026, 11, 1, 10, 0, 0).toISOString();
+
+    expect(matchesScrapeDateWindow(inside, win)).toBe(true);
+    expect(matchesScrapeDateWindow(outsideBefore, win)).toBe(false);
+    expect(matchesScrapeDateWindow(outsideAfter, win)).toBe(false);
+    expect(formatScrapeDateWindowLabel(win)).toBe('29/11–30/11');
+    expect(
+      formatScrapeDateWindowLabel({ startDate: '2026-11-29', endDate: '2026-11-29' })
+    ).toBe('29/11');
   });
 });

@@ -5,12 +5,15 @@ import {
   Maximize2,
   Minimize2,
   Minus,
+  Play,
   RefreshCw,
+  Square,
   Volume2,
   VolumeX,
   X,
   Zap,
 } from 'lucide-react';
+import { formatScrapeDateWindowLabel } from '../../shared/dateRange';
 import { THEME_CATALOG, type ScrapeSnapshot, type ThemeId } from '../../shared/types';
 
 interface TitleBarProps {
@@ -18,9 +21,13 @@ interface TitleBarProps {
   theme: ThemeId;
   isBrowserOnline: boolean;
   refreshIntervalSec: number;
+  autoScrapeActive: boolean;
+  isTogglingAutoScrape?: boolean;
   soundEnabled: boolean;
   onToggleSound: () => void;
   onRunScrape: () => void;
+  onStopAutoScrape: () => void;
+  onStartAutoScrape: () => void;
 }
 
 export const TitleBar: React.FC<TitleBarProps> = React.memo(({
@@ -28,9 +35,13 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({
   theme,
   isBrowserOnline,
   refreshIntervalSec,
+  autoScrapeActive,
+  isTogglingAutoScrape = false,
   soundEnabled,
   onToggleSound,
   onRunScrape,
+  onStopAutoScrape,
+  onStartAutoScrape,
 }) => {
   const themeMeta = THEME_CATALOG.find((t) => t.id === theme) ?? THEME_CATALOG[0];
   const isOffline = !isBrowserOnline || snapshot.connection.health === 'offline';
@@ -46,28 +57,54 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({
   }, []);
 
   useEffect(() => {
-    if (refreshIntervalSec <= 0 || !snapshot.stats.lastCompletedAt) {
-      setSecondsLeft(refreshIntervalSec);
+    if (!autoScrapeActive || refreshIntervalSec <= 0) {
+      setSecondsLeft(0);
       return;
     }
+    const targetAt = snapshot.stats.nextAutoRefreshAt;
+    if (!targetAt) {
+      if (!snapshot.stats.lastCompletedAt) {
+        setSecondsLeft(refreshIntervalSec);
+        return;
+      }
+      const fallbackTick = () => {
+        const elapsed = Math.floor((Date.now() - (snapshot.stats.lastCompletedAt ?? Date.now())) / 1000);
+        const rem = Math.max(0, refreshIntervalSec - (elapsed % Math.max(1, refreshIntervalSec)));
+        setSecondsLeft(rem);
+      };
+      fallbackTick();
+      const id = setInterval(fallbackTick, 1000);
+      return () => clearInterval(id);
+    }
+
     const tick = () => {
-      const elapsed = Math.floor((Date.now() - (snapshot.stats.lastCompletedAt ?? Date.now())) / 1000);
-      const rem = Math.max(0, refreshIntervalSec - (elapsed % Math.max(1, refreshIntervalSec)));
-      setSecondsLeft(rem);
+      const rem = Math.max(0, Math.ceil((targetAt - Date.now()) / 1000));
+      setSecondsLeft(Math.min(refreshIntervalSec, rem));
     };
     tick();
-    const id = setInterval(tick, 1000);
+    const id = setInterval(tick, 500);
     return () => clearInterval(id);
-  }, [refreshIntervalSec, snapshot.stats.lastCompletedAt]);
+  }, [
+    autoScrapeActive,
+    refreshIntervalSec,
+    snapshot.stats.nextAutoRefreshAt,
+    snapshot.stats.lastCompletedAt,
+  ]);
 
   const progress =
-    refreshIntervalSec > 0 ? Math.max(0, Math.min(1, secondsLeft / refreshIntervalSec)) : 0;
+    autoScrapeActive && refreshIntervalSec > 0
+      ? Math.max(0, Math.min(1, secondsLeft / refreshIntervalSec))
+      : 0;
   const radius = 8;
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference * (1 - progress);
 
   const activeSources = snapshot.sources.filter((s) => s.state === 'ok').length;
   const enabledSources = snapshot.sources.filter((s) => s.enabled).length;
+  const isAnyScraping = Boolean(snapshot.stats.isRunning || snapshot.stats.isDateRangeScraping);
+  const dateRangeLabel = snapshot.stats.activeDateRange
+    ? formatScrapeDateWindowLabel(snapshot.stats.activeDateRange)
+    : null;
 
   return (
     <header className="relative z-40 h-12 shrink-0 select-none border-b border-slate-800/80 bg-[var(--bg-modal-solid)]">
@@ -79,7 +116,7 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({
         <div className="flex items-center gap-3">
           <div className="relative flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-brand-400 via-brand-400 to-accent-500 shadow-glow">
             <Zap className="h-4 w-4 text-slate-950" strokeWidth={2.6} />
-            {snapshot.stats.isRunning && (
+            {isAnyScraping && (
               <span className="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-300 opacity-80" />
                 <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-brand-400" />
@@ -99,20 +136,25 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({
 
           {/* Live Scraper Status Telemetry Pill */}
           <div
+            data-testid="titlebar-status-pill"
             className={`hidden items-center gap-2 rounded-full border px-3 py-1 text-xs sm:flex ${
               isOffline
                 ? 'border-rose-500/45 bg-rose-500/10'
+                : !isAnyScraping && !autoScrapeActive
+                ? 'border-amber-400/35 bg-amber-500/10'
                 : 'border-slate-800/90 bg-slate-900/70'
             }`}
           >
             <span className="relative flex h-2 w-2">
-              {snapshot.stats.isRunning ? (
+              {isAnyScraping ? (
                 <>
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400 opacity-80" />
                   <span className="relative inline-flex h-2 w-2 rounded-full bg-brand-400" />
                 </>
               ) : isOffline ? (
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500 shadow-[0_0_8px_#f43f5e]" />
+              ) : !autoScrapeActive ? (
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
               ) : activeSources > 0 ? (
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#10b981]" />
               ) : (
@@ -120,11 +162,21 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({
               )}
             </span>
             <span className="text-slate-300">
-              {snapshot.stats.isRunning ? (
+              {snapshot.stats.isDateRangeScraping ? (
+                <span className="text-brand-300 font-medium">
+                  Ricerca periodo {dateRangeLabel ?? 'futuro'}...
+                </span>
+              ) : snapshot.stats.isRunning ? (
                 <span className="text-brand-300 font-medium">Scraping Live in corso...</span>
               ) : isOffline ? (
                 <span className="font-semibold text-rose-300">
-                  Offline • Problemi di connessione
+                  {autoScrapeActive
+                    ? 'Offline • Problemi di connessione'
+                    : 'Offline • Auto-scraping fermo'}
+                </span>
+              ) : !autoScrapeActive ? (
+                <span className="font-semibold text-amber-300">
+                  Auto-scraping fermo
                 </span>
               ) : (
                 <>
@@ -163,10 +215,11 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({
             whileTap={{ scale: 0.96 }}
             onClick={onRunScrape}
             disabled={snapshot.stats.isRunning}
+            data-testid="titlebar-run-scrape-btn"
             className="flex items-center gap-2 rounded-lg border border-brand-400/30 bg-brand-500/10 px-3 py-1.5 text-xs font-semibold text-brand-200 transition hover:border-brand-400/60 hover:bg-brand-500/20 disabled:opacity-60"
             title="Avvia subito nuovo ciclo di scraping live"
           >
-            {refreshIntervalSec > 0 && !snapshot.stats.isRunning ? (
+            {autoScrapeActive && refreshIntervalSec > 0 && !snapshot.stats.isRunning ? (
               <svg className="h-4 w-4 -rotate-90" viewBox="0 0 20 20">
                 <circle
                   cx="10"
@@ -199,11 +252,50 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({
             <span>
               {snapshot.stats.isRunning
                 ? 'Scansione...'
-                : refreshIntervalSec > 0
+                : autoScrapeActive && refreshIntervalSec > 0
                 ? `Aggiorna (${secondsLeft}s)`
                 : 'Aggiorna Quote'}
             </span>
           </motion.button>
+
+          {/* Stop / Restart Auto-Scraping toggle */}
+          {autoScrapeActive || snapshot.stats.isRunning ? (
+            <motion.button
+              key="titlebar-auto-stop"
+              type="button"
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={onStopAutoScrape}
+              disabled={isTogglingAutoScrape}
+              data-testid="titlebar-auto-scrape-toggle"
+              title={
+                snapshot.stats.isRunning
+                  ? "Ferma la scansione in corso e disattiva l'aggiornamento automatico"
+                  : "Ferma l'aggiornamento automatico dello scraping"
+              }
+              className="flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1.5 text-xs font-semibold text-rose-200 transition hover:border-rose-400/70 hover:bg-rose-500/25 disabled:opacity-60"
+            >
+              <Square className="h-3 w-3 fill-current" />
+              <span>Stop</span>
+            </motion.button>
+          ) : (
+            <motion.button
+              key="titlebar-auto-restart"
+              type="button"
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={onStartAutoScrape}
+              disabled={isTogglingAutoScrape}
+              data-testid="titlebar-auto-scrape-toggle"
+              title={`Riavvia l'aggiornamento automatico dello scraping (ogni ${
+                refreshIntervalSec > 0 ? refreshIntervalSec : 60
+              }s)`}
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-400/45 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-200 transition hover:border-emerald-400/75 hover:bg-emerald-500/25 disabled:opacity-60"
+            >
+              <Play className="h-3 w-3 fill-current" />
+              <span>Riavvia</span>
+            </motion.button>
+          )}
 
           {/* Sound toggle */}
           <button

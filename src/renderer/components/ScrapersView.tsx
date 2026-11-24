@@ -4,9 +4,11 @@ import {
   Activity,
   CheckCircle2,
   KeyRound,
+  Play,
   Radar,
   RefreshCw,
   Settings2,
+  Square,
   Terminal,
   XCircle,
 } from 'lucide-react';
@@ -22,15 +24,23 @@ import { CustomSelect } from './CustomSelect';
 interface ScrapersViewProps {
   snapshot: ScrapeSnapshot;
   settings: AppSettings;
+  autoScrapeActive: boolean;
+  isTogglingAutoScrape?: boolean;
   onUpdateSettings: (patch: Partial<AppSettings>) => void;
   onRunScrape: () => void;
+  onStopAutoScrape: () => void;
+  onStartAutoScrape: () => void;
 }
 
 export const ScrapersView: React.FC<ScrapersViewProps> = ({
   snapshot,
   settings,
+  autoScrapeActive,
+  isTogglingAutoScrape = false,
   onUpdateSettings,
   onRunScrape,
+  onStopAutoScrape,
+  onStartAutoScrape,
 }) => {
   const [apiKeyDraft, setApiKeyDraft] = useState(settings.theOddsApiKey);
 
@@ -52,25 +62,78 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
             <Radar className={`h-5 w-5 ${snapshot.stats.isRunning ? 'animate-spin' : ''}`} />
           </div>
           <div>
-            <h1 className="font-display text-base font-bold text-white">
-              Motore di Scraping Live & Telemetria
-            </h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="font-display text-base font-bold text-white">
+                Motore di Scraping Live & Telemetria
+              </h1>
+              <span
+                data-testid="scrapers-auto-status-badge"
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold ${
+                  autoScrapeActive
+                    ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300'
+                    : 'border-amber-400/40 bg-amber-500/15 text-amber-300'
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    autoScrapeActive ? 'animate-pulse bg-emerald-400' : 'bg-amber-400'
+                  }`}
+                />
+                {autoScrapeActive
+                  ? `AUTO ATTIVO (${settings.refreshIntervalSec}s)`
+                  : 'AUTO FERMO'}
+              </span>
+            </div>
             <p className="text-[11px] text-slate-400">
               Scraping live su Exchange (Betfair.it, Betflag EX, Smarkets) e Bookmaker ADM italiani (Sisal, SNAI, Betflag, Eurobet, GoldBet, 888sport, LeoVegas, Betfair SB) + EU.
             </p>
           </div>
         </div>
 
-        <motion.button
-          whileHover={{ scale: 1.03 }}
-          whileTap={{ scale: 0.96 }}
-          onClick={onRunScrape}
-          disabled={snapshot.stats.isRunning}
-          className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-300 to-accent-400 px-4 py-2 text-xs font-bold text-slate-950 shadow-glow transition hover:brightness-110 disabled:opacity-60"
-        >
-          <RefreshCw className={`h-4 w-4 ${snapshot.stats.isRunning ? 'animate-spin' : ''}`} />
-          {snapshot.stats.isRunning ? 'Scansione Live in corso...' : 'Avvia Scraping Completo'}
-        </motion.button>
+        <div className="flex flex-wrap items-center gap-2">
+          {autoScrapeActive || snapshot.stats.isRunning ? (
+            <motion.button
+              key="scrapers-auto-stop"
+              type="button"
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={onStopAutoScrape}
+              disabled={isTogglingAutoScrape}
+              data-testid="scrapers-auto-scrape-toggle"
+              className="flex items-center gap-2 rounded-xl border border-rose-500/45 bg-rose-500/15 px-3.5 py-2 text-xs font-bold text-rose-200 transition hover:border-rose-400/75 hover:bg-rose-500/25 disabled:opacity-60"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+              Stoppa Auto-Scraping
+            </motion.button>
+          ) : (
+            <motion.button
+              key="scrapers-auto-restart"
+              type="button"
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={onStartAutoScrape}
+              disabled={isTogglingAutoScrape}
+              data-testid="scrapers-auto-scrape-toggle"
+              className="flex items-center gap-2 rounded-xl border border-emerald-400/50 bg-emerald-500/20 px-3.5 py-2 text-xs font-bold text-emerald-200 transition hover:border-emerald-400/80 hover:bg-emerald-500/30 disabled:opacity-60"
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+              Riavvia Auto-Scraping
+            </motion.button>
+          )}
+
+          <motion.button
+            type="button"
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.96 }}
+            onClick={onRunScrape}
+            disabled={snapshot.stats.isRunning}
+            data-testid="scrapers-run-now-btn"
+            className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-300 to-accent-400 px-4 py-2 text-xs font-bold text-slate-950 shadow-glow transition hover:brightness-110 disabled:opacity-60"
+          >
+            <RefreshCw className={`h-4 w-4 ${snapshot.stats.isRunning ? 'animate-spin' : ''}`} />
+            {snapshot.stats.isRunning ? 'Scansione Live in corso...' : 'Avvia Scraping Completo'}
+          </motion.button>
+        </div>
       </div>
 
       {/* Global Settings Row */}
@@ -85,7 +148,12 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
             className="mt-1.5"
             minMenuWidth={220}
             value={settings.refreshIntervalSec}
-            onChange={(val) => onUpdateSettings({ refreshIntervalSec: val })}
+            onChange={(val) =>
+              onUpdateSettings({
+                refreshIntervalSec: val,
+                autoScrapeEnabled: val > 0,
+              })
+            }
             triggerClassName="rounded-xl py-2"
             options={[
               { value: 0, label: 'Manuale (On-Demand)', dotColor: 'bg-slate-400' },
@@ -95,6 +163,11 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
               { value: 300, label: 'Ogni 5 minuti', dotColor: 'bg-slate-400' },
             ]}
           />
+          {!autoScrapeActive && settings.refreshIntervalSec > 0 && (
+            <p className="mt-1 text-[10px] font-medium text-amber-300/90">
+              In pausa (riprenderà ogni {settings.refreshIntervalSec}s al riavvio)
+            </p>
+          )}
         </div>
 
         <div>

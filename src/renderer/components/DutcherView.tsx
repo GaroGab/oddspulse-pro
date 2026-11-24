@@ -12,6 +12,7 @@ import {
   Table2,
   Zap,
 } from 'lucide-react';
+import type { DateRangeValue } from '../../shared/dateRange';
 import { calculateDutcher } from '../../shared/math';
 import type { PuntaPuntaCandidateRow } from '../../shared/puntaPuntaMatcher';
 import type {
@@ -26,6 +27,7 @@ import type {
 import { formatEuro, formatEventTime, formatOdds, formatPct, sportLabel } from '../utils/format';
 import { playCopyTick } from '../utils/sound';
 import { AnimatedNumber } from './AnimatedNumber';
+import { AutoScrapePausedState } from './AutoScrapePausedState';
 import { BookmakerIcon } from './BookmakerIcon';
 import { ConnectionAlert } from './ConnectionAlert';
 import { CustomSelect } from './CustomSelect';
@@ -37,24 +39,33 @@ import { SlidingPillTrack } from './SlidingPillTrack';
 interface DutcherViewProps {
   snapshot: ScrapeSnapshot;
   isBrowserOnline: boolean;
+  autoScrapeActive?: boolean;
   soundEnabled: boolean;
   defaultStake?: number;
   tableDensity?: TableDensity;
   defaultShowKpis?: boolean;
   onSaveTrackedBet: (bet: Omit<TrackedBet, 'id' | 'createdAt'>) => void;
+  onDateRangeFilterChange?: (
+    next: DateRangeValue,
+    opts?: { pendingEnd?: boolean; force?: boolean }
+  ) => void;
   onRetryScrape: () => void;
+  onRestartAutoScrape?: () => void;
   onOpenScrapers: () => void;
 }
 
 export const DutcherView: React.FC<DutcherViewProps> = ({
   snapshot,
   isBrowserOnline,
+  autoScrapeActive = true,
   soundEnabled,
   defaultStake = 100,
   tableDensity = 'comfortable',
   defaultShowKpis = true,
   onSaveTrackedBet,
+  onDateRangeFilterChange,
   onRetryScrape,
+  onRestartAutoScrape,
   onOpenScrapers,
 }) => {
   const [subTab, setSubTab] = useState<'auto' | 'matcher'>('auto');
@@ -321,6 +332,14 @@ export const DutcherView: React.FC<DutcherViewProps> = ({
               onOpenScrapers={onOpenScrapers}
             />
           </div>
+        ) : snapshot.dutcherRows.length === 0 && !autoScrapeActive && !snapshot.stats.isRunning ? (
+          <div className="glass-panel h-full rounded-2xl">
+            <AutoScrapePausedState
+              description="Riavvia l'aggiornamento automatico o esegui una scansione manuale per calcolare gli abbinamenti Dutcher."
+              onRetryScrape={onRetryScrape}
+              onRestartAutoScrape={onRestartAutoScrape}
+            />
+          </div>
         ) : filtered.slice(0, 60).map((row, idx) => {
           const calc = calculateDutcher({ row, stake, anchorMode });
           const isExpanded = expandedId === row.id || (expandedId === null && idx === 0);
@@ -516,6 +535,7 @@ export const DutcherView: React.FC<DutcherViewProps> = ({
           <PuntaPuntaMatcher
             snapshot={snapshot}
             isBrowserOnline={isBrowserOnline}
+            autoScrapeActive={autoScrapeActive}
             mode={matcherMode}
             stake={stake}
             anchorMode={matcherAnchorMode}
@@ -530,7 +550,9 @@ export const DutcherView: React.FC<DutcherViewProps> = ({
             onChangeRefundRetention={setMatcherRefundRetention}
             onSelectRow={setSelectedMatcherRow}
             onToggleKpis={() => setShowMatcherKpis((v) => !v)}
+            onDateRangeFilterChange={onDateRangeFilterChange}
             onRetryScrape={onRetryScrape}
+            onRestartAutoScrape={onRestartAutoScrape}
             onOpenScrapers={onOpenScrapers}
           />
         </div>

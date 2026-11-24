@@ -1,3 +1,4 @@
+import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type {
   MarketType,
   RawScrapedMarket,
@@ -5,13 +6,12 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { DEFAULT_HEADERS } from './httpClient';
+import { fetchText, isAbortError, sleep, throwIfAborted } from './httpClient';
 import { decompressFromBase64 } from './lzString';
 import { matchesEventHints } from './matchLinker';
 
 const MST_DATA_BASE = 'https://fe.mstxchange.com/data';
 const MST_HEADERS: Record<string, string> = {
-  ...DEFAULT_HEADERS,
   Referer: 'https://fe.mstxchange.com/default.aspx?cID=62E01EFF-FD52-4D36-84C1-FF1EF0D413DD',
 };
 
@@ -202,20 +202,6 @@ function mapBetflagSelection(
   return null;
 }
 
-async function fetchText(url: string, timeoutMs = 11000): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { headers: MST_HEADERS, signal: controller.signal });
-    clearTimeout(timer);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  } catch (e) {
-    clearTimeout(timer);
-    throw e;
-  }
-}
-
 interface CandidateMatch {
   matchId: string;
   sport: SportKey;
@@ -231,11 +217,19 @@ let cachedHomePayload: MstHomePayload | null = null;
 let cachedHomeAt = 0;
 const HOME_CACHE_TTL_MS = 3 * 60_000;
 
-async function fetchBetflagHome(allowCache: boolean): Promise<MstHomePayload> {
+async function fetchBetflagHome(
+  allowCache: boolean,
+  signal?: AbortSignal
+): Promise<MstHomePayload> {
+  throwIfAborted(signal);
   if (allowCache && cachedHomePayload && Date.now() - cachedHomeAt < HOME_CACHE_TTL_MS) {
     return cachedHomePayload;
   }
-  const homeRaw = (await fetchText(`${MST_DATA_BASE}/home`, 12000)).trim().replace(/^"|"$/g, '');
+  const homeRaw = (
+    await fetchText(`${MST_DATA_BASE}/home`, { headers: MST_HEADERS, timeoutMs: 12000, signal })
+  )
+    .trim()
+    .replace(/^"|"$/g, '');
   const homeJson = decompressFromBase64(homeRaw);
   if (!homeJson) {
     throw new Error('Risposta LZString Betflag Exchange non valida');
@@ -248,7 +242,8 @@ async function fetchBetflagHome(allowCache: boolean): Promise<MstHomePayload> {
 
 export async function scrapeBetflagExchange(
   includeLive: boolean,
-  filter?: TargetedScrapeFilter
+  filter?: TargetedScrapeFilter,
+  signal?: AbortSignal
 ): Promise<{
   markets: RawScrapedMarket[];
   latencyMs: number;
@@ -257,7 +252,7 @@ export async function scrapeBetflagExchange(
   const markets: RawScrapedMarket[] = [];
   const nowMs = Date.now();
 
-  const home = await fetchBetflagHome(Boolean(filter));
+  const home = await fetchBetflagHome(Boolean(filter), signal);
 
   // Priority boost for top traded / featured / next matches
   const hotIds = new Set<string>();
@@ -315,8 +310,13 @@ export async function scrapeBetflagExchange(
 
           // Filter out started matches unless includeLive is true
           if (!includeLive && startMs < nowMs - 60_000) continue;
-          // Limit horizon to next 5 days for high relevance
-          if (startMs > nowMs + 5 * 24 * 3600_000) continue;
+          if (filter?.dateWindow) {
+            // Honor the requested future date window without the default 5-day horizon cap
+            if (!matchesScrapeDateWindow(startMs, filter.dateWindow)) continue;
+          } else {
+            // Limit default near-term horizon to next 5 days for high relevance
+            if (startMs > nowMs + 5 * 24 * 3600_000) continue;
+          }
 
           seenMatchIds.add(matchId);
           let priority = 0;
@@ -348,10 +348,15 @@ export async function scrapeBetflagExchange(
 
   const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
     while (cursor < targets.length) {
+      throwIfAborted(signal);
       const ev = targets[cursor++];
       try {
-        await new Promise((r) => setTimeout(r, 35));
-        const rawText = await fetchText(`${MST_DATA_BASE}/colloddsbetsevent/${ev.matchId}`, 9000);
+        await sleep(35, signal);
+        const rawText = await fetchText(`${MST_DATA_BASE}/colloddsbetsevent/${ev.matchId}`, {
+          headers: MST_HEADERS,
+          timeoutMs: 9000,
+          signal,
+        });
         const list = JSON.parse(rawText) as Array<{ e?: string }>;
         if (!Array.isArray(list)) continue;
 
@@ -430,7 +435,8 @@ export async function scrapeBetflagExchange(
             });
           }
         }
-      } catch {
+      } catch (err) {
+        if (signal?.aborted || isAbortError(err)) throw err;
         // Ignore single event fetch timeout
       }
     }
