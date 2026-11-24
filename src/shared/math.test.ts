@@ -34,6 +34,7 @@ import {
   evaluateRatingWatch,
   extractMatchEventKey,
   formatFittingListSummary,
+  getTopCompetitionValues,
   isWatchExpired,
   matchesWatchLeague,
   matchesWatchLeagues,
@@ -1131,6 +1132,66 @@ describe('Rating Watch Engine & Adaptive Interval', () => {
     expect(
       formatFittingListSummary(['Serie A', 'Serie B', 'Serie C', 'Premier League'], 26)
     ).toBe('Serie A, Serie B +2');
+  });
+
+  it('builds Top Competizioni preset across football 1st/2nd tiers, tennis ATP/international, and basketball NBA/top', () => {
+    const allTop = getTopCompetitionValues('ALL');
+    const footballTop = getTopCompetitionValues('football');
+    const tennisTop = getTopCompetitionValues('tennis');
+    const basketTop = getTopCompetitionValues('basketball');
+
+    expect(footballTop).toContain('Serie A');
+    expect(footballTop).toContain('Serie B');
+    expect(footballTop).not.toContain('Serie C');
+    expect(footballTop).toContain('Premier League');
+    expect(footballTop).toContain('Championship');
+    expect(footballTop).toContain('LaLiga');
+    expect(footballTop).toContain('LaLiga 2');
+    expect(footballTop).toContain('Bundesliga');
+    expect(footballTop).toContain('2. Bundesliga');
+    expect(footballTop).toContain('Ligue 1');
+    expect(footballTop).toContain('Ligue 2');
+    expect(footballTop).toContain('Eredivisie');
+    expect(footballTop).toContain('Eerste Divisie');
+    expect(footballTop).toContain('Liga Portugal');
+    expect(footballTop).toContain('Liga Portugal 2');
+    expect(footballTop).toContain('Champions League');
+
+    expect(tennisTop).toContain('ATP');
+    expect(tennisTop).toContain('WTA');
+    expect(tennisTop).toContain('Grand Slam');
+    expect(tennisTop).toContain('Tornei Internazionali');
+    expect(tennisTop).not.toContain('Challenger');
+
+    expect(basketTop).toContain('NBA');
+    expect(basketTop).toContain('Eurolega');
+    expect(basketTop).toContain('Serie A Basket');
+
+    expect(allTop.length).toBe(footballTop.length + tennisTop.length + basketTop.length);
+
+    expect(resolveCanonicalCompetition('SPAGNA: LaLiga 2', 'football')).toBe('LaLiga 2');
+    expect(resolveCanonicalCompetition('Spain LaLiga Hypermotion', 'football')).toBe('LaLiga 2');
+    expect(resolveCanonicalCompetition('GERMANIA: 2. Bundesliga', 'football')).toBe('2. Bundesliga');
+    expect(resolveCanonicalCompetition('FRANCIA: Ligue 2', 'football')).toBe('Ligue 2');
+    expect(resolveCanonicalCompetition('OLANDA: Eerste Divisie', 'football')).toBe('Eerste Divisie');
+    expect(resolveCanonicalCompetition('PORTOGALLO: Liga Portugal 2', 'football')).toBe('Liga Portugal 2');
+    expect(resolveCanonicalCompetition('COPPA DAVIS - GRUPPO MONDIALE', 'tennis')).toBe(
+      'Tornei Internazionali'
+    );
+    expect(resolveCanonicalCompetition('United Cup', 'tennis')).toBe('Tornei Internazionali');
+
+    expect(matchesWatchLeagues(allTop, 'ITALIA: Serie B', 'football')).toBe(true);
+    expect(matchesWatchLeagues(allTop, 'SPAGNA: LaLiga 2', 'football')).toBe(true);
+    expect(matchesWatchLeagues(allTop, 'GERMANIA: 2. Bundesliga', 'football')).toBe(true);
+    expect(matchesWatchLeagues(allTop, 'FRANCIA: Ligue 2', 'football')).toBe(true);
+    expect(matchesWatchLeagues(allTop, 'ATP - SINGOLARE: Roma', 'tennis')).toBe(true);
+    expect(matchesWatchLeagues(allTop, 'Davis Cup', 'tennis')).toBe(true);
+    expect(matchesWatchLeagues(allTop, 'USA: NBA', 'basketball')).toBe(true);
+
+    expect(matchesWatchLeagues(allTop, 'ITALIA: Serie C', 'football')).toBe(false);
+    expect(matchesWatchLeagues(allTop, 'BRASILE: Serie A', 'football')).toBe(false);
+    expect(matchesWatchLeagues(allTop, 'ATP Challenger: Milano', 'tennis')).toBe(false);
+    expect(matchesWatchLeagues(allTop, 'USA: WNBA', 'basketball')).toBe(false);
   });
 
   it('filters RatingWatch by calendar dateRange, prioritizes competitions in range, and sets adaptive plan dateWindow', () => {

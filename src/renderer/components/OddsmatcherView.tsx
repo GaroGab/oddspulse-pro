@@ -17,6 +17,7 @@ import {
   Search,
   Sparkles,
   TrendingUp,
+  Trophy,
   X,
 } from 'lucide-react';
 import {
@@ -28,6 +29,7 @@ import { calculateSingleMatch } from '../../shared/math';
 import {
   buildCompetitionOptions,
   formatFittingListSummary,
+  getTopCompetitionValues,
   inferSportFromLeague,
   matchesWatchLeagues,
 } from '../../shared/ratingWatch';
@@ -191,6 +193,15 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     () => buildCompetitionOptions(snapshot.rows, sport === 'ALL' ? undefined : sport, leagues),
     [snapshot.rows, sport, leagues]
   );
+
+  const topCompetitionsForSport = useMemo(() => getTopCompetitionValues(sport), [sport]);
+
+  const isTopCompetitionsActive = useMemo(() => {
+    if (topCompetitionsForSport.length === 0) return false;
+    if (leagues.length !== topCompetitionsForSport.length) return false;
+    const selected = new Set(leagues);
+    return topCompetitionsForSport.every((comp) => selected.has(comp));
+  }, [leagues, topCompetitionsForSport]);
 
   // Prune selected competitions that belong to another sport when switching sport tab
   useEffect(() => {
@@ -860,6 +871,23 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                 className="rounded-lg border border-amber-400/25 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold text-amber-200 transition hover:bg-amber-500/20"
               >
                 Alta Liquidità (&ge;100€)
+              </button>
+              <button
+                type="button"
+                data-testid="om-preset-top-competitions"
+                aria-pressed={isTopCompetitionsActive}
+                title="Seleziona le competizioni principali: top 2 leghe calcio (Serie A/B, Premier/Championship, LaLiga 1/2, Bundesliga 1/2, Ligue 1/2, Eredivisie/Eerste Divisie, Liga Portugal 1/2, coppe UEFA e nazionali), Tennis (ATP, WTA, Grand Slam, Internazionali) e Basket (NBA, Eurolega, Serie A)"
+                onClick={() => {
+                  setLeagues(isTopCompetitionsActive ? [] : topCompetitionsForSport);
+                }}
+                className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[10px] font-semibold transition ${
+                  isTopCompetitionsActive
+                    ? 'border-sky-400/70 bg-sky-500/25 text-white shadow-[0_0_12px_-4px_rgba(56,189,248,0.55)]'
+                    : 'border-sky-400/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20'
+                }`}
+              >
+                <Trophy className="h-3 w-3" />
+                Top Competizioni
               </button>
               <button
                 onClick={resetAllFilters}

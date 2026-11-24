@@ -43,35 +43,54 @@ export interface CompetitionPreset {
   label: string;
   sport: SportKey;
   hint: string;
+  top?: boolean;
 }
 
 export const COMPETITION_PRESETS: CompetitionPreset[] = [
   // Calcio
-  { value: 'Serie A', label: 'Serie A', sport: 'football', hint: 'Italia' },
-  { value: 'Serie B', label: 'Serie B', sport: 'football', hint: 'Italia' },
-  { value: 'Serie C', label: 'Serie C', sport: 'football', hint: 'Italia' },
-  { value: 'Coppa Italia', label: 'Coppa Italia', sport: 'football', hint: 'Italia' },
-  { value: 'Premier League', label: 'Premier League', sport: 'football', hint: 'Inghilterra' },
-  { value: 'Championship', label: 'Championship', sport: 'football', hint: 'Inghilterra' },
-  { value: 'FA Cup', label: 'FA Cup', sport: 'football', hint: 'Inghilterra' },
-  { value: 'LaLiga', label: 'LaLiga', sport: 'football', hint: 'Spagna' },
-  { value: 'Bundesliga', label: 'Bundesliga', sport: 'football', hint: 'Germania' },
-  { value: 'Ligue 1', label: 'Ligue 1', sport: 'football', hint: 'Francia' },
-  { value: 'Champions League', label: 'Champions League', sport: 'football', hint: 'UEFA' },
-  { value: 'Europa League', label: 'Europa League', sport: 'football', hint: 'UEFA' },
-  { value: 'Conference League', label: 'Conference League', sport: 'football', hint: 'UEFA' },
-  { value: 'Eredivisie', label: 'Eredivisie', sport: 'football', hint: 'Olanda' },
-  { value: 'Liga Portugal', label: 'Liga Portugal', sport: 'football', hint: 'Portogallo' },
+  { value: 'Serie A', label: 'Serie A', sport: 'football', hint: 'Italia', top: true },
+  { value: 'Serie B', label: 'Serie B', sport: 'football', hint: 'Italia', top: true },
+  { value: 'Serie C', label: 'Serie C', sport: 'football', hint: 'Italia', top: false },
+  { value: 'Coppa Italia', label: 'Coppa Italia', sport: 'football', hint: 'Italia', top: true },
+  { value: 'Premier League', label: 'Premier League', sport: 'football', hint: 'Inghilterra', top: true },
+  { value: 'Championship', label: 'Championship', sport: 'football', hint: 'Inghilterra', top: true },
+  { value: 'FA Cup', label: 'FA Cup', sport: 'football', hint: 'Inghilterra', top: true },
+  { value: 'LaLiga', label: 'LaLiga', sport: 'football', hint: 'Spagna', top: true },
+  { value: 'LaLiga 2', label: 'LaLiga 2', sport: 'football', hint: 'Spagna', top: true },
+  { value: 'Bundesliga', label: 'Bundesliga', sport: 'football', hint: 'Germania', top: true },
+  { value: '2. Bundesliga', label: '2. Bundesliga', sport: 'football', hint: 'Germania', top: true },
+  { value: 'Ligue 1', label: 'Ligue 1', sport: 'football', hint: 'Francia', top: true },
+  { value: 'Ligue 2', label: 'Ligue 2', sport: 'football', hint: 'Francia', top: true },
+  { value: 'Champions League', label: 'Champions League', sport: 'football', hint: 'UEFA', top: true },
+  { value: 'Europa League', label: 'Europa League', sport: 'football', hint: 'UEFA', top: true },
+  { value: 'Conference League', label: 'Conference League', sport: 'football', hint: 'UEFA', top: true },
+  { value: 'Eredivisie', label: 'Eredivisie', sport: 'football', hint: 'Olanda', top: true },
+  { value: 'Eerste Divisie', label: 'Eerste Divisie', sport: 'football', hint: 'Olanda', top: true },
+  { value: 'Liga Portugal', label: 'Liga Portugal', sport: 'football', hint: 'Portogallo', top: true },
+  { value: 'Liga Portugal 2', label: 'Liga Portugal 2', sport: 'football', hint: 'Portogallo', top: true },
   // Tennis
-  { value: 'ATP', label: 'ATP Tour', sport: 'tennis', hint: 'Tennis Maschile' },
-  { value: 'WTA', label: 'WTA Tour', sport: 'tennis', hint: 'Tennis Femminile' },
-  { value: 'Challenger', label: 'ATP Challenger', sport: 'tennis', hint: 'Tennis' },
-  { value: 'Grand Slam', label: 'Grand Slam', sport: 'tennis', hint: 'Slam' },
+  { value: 'ATP', label: 'ATP Tour', sport: 'tennis', hint: 'Tennis Maschile', top: true },
+  { value: 'WTA', label: 'WTA Tour', sport: 'tennis', hint: 'Tennis Femminile', top: true },
+  { value: 'Challenger', label: 'ATP Challenger', sport: 'tennis', hint: 'Tennis', top: false },
+  { value: 'Grand Slam', label: 'Grand Slam', sport: 'tennis', hint: 'Slam', top: true },
+  {
+    value: 'Tornei Internazionali',
+    label: 'Tornei Internazionali',
+    sport: 'tennis',
+    hint: 'Davis / BJK / United Cup',
+    top: true,
+  },
   // Basket
-  { value: 'NBA', label: 'NBA', sport: 'basketball', hint: 'Basket USA' },
-  { value: 'Eurolega', label: 'Eurolega', sport: 'basketball', hint: 'Basket Europa' },
-  { value: 'Serie A Basket', label: 'Serie A Basket (LBA)', sport: 'basketball', hint: 'Basket Italia' },
+  { value: 'NBA', label: 'NBA', sport: 'basketball', hint: 'Basket USA', top: true },
+  { value: 'Eurolega', label: 'Eurolega', sport: 'basketball', hint: 'Basket Europa', top: true },
+  { value: 'Serie A Basket', label: 'Serie A Basket (LBA)', sport: 'basketball', hint: 'Basket Italia', top: true },
 ];
+
+export function getTopCompetitionValues(sport?: SportKey | 'ALL'): string[] {
+  return COMPETITION_PRESETS.filter(
+    (p) => Boolean(p.top) && (!sport || sport === 'ALL' || p.sport === sport)
+  ).map((p) => p.value);
+}
 
 const GENERIC_SPORT_LEAGUES = new Set([
   'calcio',
@@ -133,7 +152,13 @@ function matchesCanonicalPreset(
 
     case 'Serie B':
       if (isBasket) return false;
-      if (hasPhrase(norm, 'brasile') || hasPhrase(norm, 'brazil') || hasPhrase(norm, 'ecuador')) {
+      if (
+        hasPhrase(norm, 'brasile') ||
+        hasPhrase(norm, 'brazil') ||
+        hasPhrase(norm, 'ecuador') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
         return false;
       }
       return hasPhrase(norm, 'serie b');
@@ -144,6 +169,7 @@ function matchesCanonicalPreset(
 
     case 'Coppa Italia':
       if (isBasket) return false;
+      if (hasPhrase(norm, 'femminile') || hasPhrase(norm, 'women')) return false;
       return hasPhrase(norm, 'coppa italia');
 
     case 'Premier League':
@@ -158,21 +184,39 @@ function matchesCanonicalPreset(
         hasPhrase(norm, 'israele') ||
         hasPhrase(norm, 'kazakistan') ||
         hasPhrase(norm, 'armenia') ||
-        hasPhrase(norm, 'canada')
+        hasPhrase(norm, 'canada') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
       ) {
         return false;
       }
       return hasPhrase(norm, 'premier league');
 
     case 'Championship':
-      if (hasPhrase(norm, 'scozia') || hasPhrase(norm, 'scotland')) return false;
+      if (
+        hasPhrase(norm, 'scozia') ||
+        hasPhrase(norm, 'scotland') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
+        return false;
+      }
       return hasPhrase(norm, 'championship');
 
     case 'FA Cup':
+      if (hasPhrase(norm, 'femminile') || hasPhrase(norm, 'women')) return false;
       return hasPhrase(norm, 'fa cup');
 
     case 'LaLiga':
-      if (hasPhrase(norm, 'laliga 2') || hasPhrase(norm, 'la liga 2') || hasPhrase(norm, 'hypermotion')) {
+      if (
+        hasPhrase(norm, 'laliga 2') ||
+        hasPhrase(norm, 'la liga 2') ||
+        hasPhrase(norm, 'laliga2') ||
+        hasPhrase(norm, 'hypermotion') ||
+        hasPhrase(norm, 'segunda') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
         return false;
       }
       return (
@@ -182,18 +226,69 @@ function matchesCanonicalPreset(
           (hasPhrase(norm, 'spagna') || hasPhrase(norm, 'spain')))
       );
 
+    case 'LaLiga 2':
+      if (hasPhrase(norm, 'femminile') || hasPhrase(norm, 'women') || hasPhrase(norm, 'rfef')) {
+        return false;
+      }
+      return (
+        hasPhrase(norm, 'laliga 2') ||
+        hasPhrase(norm, 'la liga 2') ||
+        hasPhrase(norm, 'laliga2') ||
+        hasPhrase(norm, 'hypermotion') ||
+        (hasPhrase(norm, 'segunda division') && !hasPhrase(norm, 'b'))
+      );
+
     case 'Bundesliga':
       if (
         hasPhrase(norm, '2 bundesliga') ||
         hasPhrase(norm, 'bundesliga 2') ||
-        hasPhrase(norm, 'austria')
+        hasPhrase(norm, 'austria') ||
+        hasPhrase(norm, 'frauen') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
       ) {
         return false;
       }
       return hasPhrase(norm, 'bundesliga');
 
+    case '2. Bundesliga':
+      if (
+        hasPhrase(norm, 'austria') ||
+        hasPhrase(norm, 'frauen') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
+        return false;
+      }
+      return hasPhrase(norm, '2 bundesliga') || hasPhrase(norm, 'bundesliga 2');
+
     case 'Ligue 1':
+      if (
+        hasPhrase(norm, 'algeria') ||
+        hasPhrase(norm, 'tunisia') ||
+        hasPhrase(norm, 'marocco') ||
+        hasPhrase(norm, 'morocco') ||
+        hasPhrase(norm, 'senegal') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
+        return false;
+      }
       return hasPhrase(norm, 'ligue 1');
+
+    case 'Ligue 2':
+      if (
+        hasPhrase(norm, 'algeria') ||
+        hasPhrase(norm, 'tunisia') ||
+        hasPhrase(norm, 'marocco') ||
+        hasPhrase(norm, 'morocco') ||
+        hasPhrase(norm, 'senegal') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
+        return false;
+      }
+      return hasPhrase(norm, 'ligue 2');
 
     case 'Champions League':
       if (
@@ -215,10 +310,33 @@ function matchesCanonicalPreset(
       return hasPhrase(norm, 'conference league');
 
     case 'Eredivisie':
+      if (hasPhrase(norm, 'femminile') || hasPhrase(norm, 'women')) return false;
       return hasPhrase(norm, 'eredivisie');
 
+    case 'Eerste Divisie':
+      return hasPhrase(norm, 'eerste divisie') || hasPhrase(norm, 'keuken kampioen');
+
     case 'Liga Portugal':
+      if (
+        hasPhrase(norm, 'liga portugal 2') ||
+        hasPhrase(norm, 'sabseg') ||
+        hasPhrase(norm, 'meu super') ||
+        hasPhrase(norm, 'segunda liga') ||
+        hasPhrase(norm, 'femminile') ||
+        hasPhrase(norm, 'women')
+      ) {
+        return false;
+      }
       return hasPhrase(norm, 'liga portugal') || hasPhrase(norm, 'primeira liga');
+
+    case 'Liga Portugal 2':
+      return (
+        hasPhrase(norm, 'liga portugal 2') ||
+        hasPhrase(norm, 'sabseg') ||
+        hasPhrase(norm, 'meu super') ||
+        (hasPhrase(norm, 'segunda liga') &&
+          (hasPhrase(norm, 'portogallo') || hasPhrase(norm, 'portugal')))
+      );
 
     case 'ATP':
       if (hasPhrase(norm, 'challenger')) return false;
@@ -238,6 +356,22 @@ function matchesCanonicalPreset(
         hasPhrase(norm, 'french open') ||
         hasPhrase(norm, 'wimbledon') ||
         hasPhrase(norm, 'us open')
+      );
+
+    case 'Tornei Internazionali':
+      return (
+        hasPhrase(norm, 'tornei internazionali') ||
+        hasPhrase(norm, 'davis cup') ||
+        hasPhrase(norm, 'coppa davis') ||
+        hasPhrase(norm, 'billie jean king') ||
+        hasPhrase(norm, 'bjk cup') ||
+        hasPhrase(norm, 'fed cup') ||
+        hasPhrase(norm, 'united cup') ||
+        hasPhrase(norm, 'laver cup') ||
+        hasPhrase(norm, 'hopman cup') ||
+        hasPhrase(norm, 'olimpiadi') ||
+        hasPhrase(norm, 'olympic') ||
+        hasPhrase(norm, 'masters 1000')
       );
 
     case 'NBA':
@@ -306,8 +440,9 @@ export function matchesWatchLeague(
   const canonicalWatch = resolveCanonicalCompetition(trimmed);
   if (!canonicalWatch) return true;
 
-  const isKnownPreset = COMPETITION_PRESETS.some((p) => p.value === canonicalWatch);
-  if (isKnownPreset) {
+  const matchedPreset = COMPETITION_PRESETS.find((p) => p.value === canonicalWatch);
+  if (matchedPreset) {
+    if (rowSport && matchedPreset.sport !== rowSport) return false;
     return matchesCanonicalPreset(canonicalWatch, rowLeague, rowSport);
   }
 
