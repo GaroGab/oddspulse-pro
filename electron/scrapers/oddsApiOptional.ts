@@ -1,6 +1,6 @@
 import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type { RawScrapedMarket, SelectionQuote, TargetedScrapeFilter } from '../../src/shared/types';
-import { fetchJson, isAbortError, throwIfAborted } from './httpClient';
+import { computeEffectiveScrapedAt, fetchJson, isAbortError, throwIfAborted } from './httpClient';
 import { matchesEventHints } from './matchLinker';
 
 interface OddsApiEvent {
@@ -47,7 +47,12 @@ export async function scrapeTheOddsApiOptional(
       const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${encodeURIComponent(
         apiKey.trim()
       )}&regions=eu&markets=h2h&oddsFormat=decimal`;
-      const { data } = await fetchJson<OddsApiEvent[]>(url, { timeoutMs: 10000, retries: 0, signal });
+      const { data, cacheAgeSec } = await fetchJson<OddsApiEvent[]>(url, {
+        timeoutMs: 10000,
+        retries: 0,
+        signal,
+      });
+      const scrapedAt = computeEffectiveScrapedAt(Date.now(), cacheAgeSec);
 
       for (const ev of data ?? []) {
         if (filter?.dateWindow && !matchesScrapeDateWindow(ev.commence_time, filter.dateWindow)) {
@@ -95,7 +100,9 @@ export async function scrapeTheOddsApiOptional(
               marketType: '1X2',
               marketLabel: 'Esito Finale 1X2',
               selections: sels,
-              scrapedAt: Date.now(),
+              scrapedAt,
+              cacheAgeSec,
+              isAggregator: true,
             });
           }
         }

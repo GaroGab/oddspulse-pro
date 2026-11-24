@@ -42,12 +42,31 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+export function parseCacheAgeSec(headers: Headers): number {
+  const raw = headers.get('age');
+  if (!raw) return 0;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.round(parsed);
+}
+
+export function appendCacheBuster(url: string, paramName = '_t'): string {
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}${paramName}=${Date.now()}`;
+}
+
+export function computeEffectiveScrapedAt(nowMs: number, cacheAgeSec = 0): number {
+  const safeAge = Number.isFinite(cacheAgeSec) && cacheAgeSec > 0 ? cacheAgeSec : 0;
+  return Math.max(0, nowMs - safeAge * 1000);
+}
+
 async function fetchWithTimeout(
   url: string,
   options: {
     method?: 'GET' | 'POST';
     body?: unknown;
     headers?: Record<string, string>;
+    noCacheHeaders?: boolean;
     timeoutMs: number;
     signal?: AbortSignal;
   }
@@ -63,6 +82,9 @@ async function fetchWithTimeout(
   try {
     const headers: Record<string, string> = {
       ...DEFAULT_HEADERS,
+      ...(options.noCacheHeaders
+        ? { 'Cache-Control': 'no-cache, no-store, max-age=0', Pragma: 'no-cache' }
+        : {}),
       ...(options.headers ?? {}),
     };
     const init: RequestInit = {
@@ -86,21 +108,39 @@ async function fetchWithTimeout(
   }
 }
 
-export async function fetchText(
+export async function fetchTextWithMeta(
   url: string,
   options?: {
     headers?: Record<string, string>;
+    noCacheHeaders?: boolean;
     timeoutMs?: number;
     signal?: AbortSignal;
   }
-): Promise<string> {
+): Promise<{ text: string; latencyMs: number; cacheAgeSec: number }> {
+  const started = Date.now();
   const res = await fetchWithTimeout(url, {
     headers: options?.headers,
+    noCacheHeaders: options?.noCacheHeaders,
     timeoutMs: options?.timeoutMs ?? 11000,
     signal: options?.signal,
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.text();
+  const cacheAgeSec = parseCacheAgeSec(res.headers);
+  const text = await res.text();
+  return { text, latencyMs: Date.now() - started, cacheAgeSec };
+}
+
+export async function fetchText(
+  url: string,
+  options?: {
+    headers?: Record<string, string>;
+    noCacheHeaders?: boolean;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }
+): Promise<string> {
+  const { text } = await fetchTextWithMeta(url, options);
+  return text;
 }
 
 export async function fetchJson<T>(
@@ -109,11 +149,12 @@ export async function fetchJson<T>(
     method?: 'GET' | 'POST';
     body?: unknown;
     headers?: Record<string, string>;
+    noCacheHeaders?: boolean;
     timeoutMs?: number;
     retries?: number;
     signal?: AbortSignal;
   }
-): Promise<{ data: T; latencyMs: number }> {
+): Promise<{ data: T; latencyMs: number; cacheAgeSec: number }> {
   const timeoutMs = options?.timeoutMs ?? 12000;
   const retries = options?.retries ?? 1;
   const started = Date.now();
@@ -126,6 +167,7 @@ export async function fetchJson<T>(
         method: options?.method,
         body: options?.body,
         headers: options?.headers,
+        noCacheHeaders: options?.noCacheHeaders,
         timeoutMs,
         signal: options?.signal,
       });
@@ -145,8 +187,9 @@ export async function fetchJson<T>(
         throw err;
       }
 
+      const cacheAgeSec = parseCacheAgeSec(res.headers);
       const data = (await res.json()) as T;
-      return { data, latencyMs: Date.now() - started };
+      return { data, latencyMs: Date.now() - started, cacheAgeSec };
     } catch (e) {
       if (options?.signal?.aborted || e instanceof ScrapeAbortedError) {
         throw new ScrapeAbortedError();

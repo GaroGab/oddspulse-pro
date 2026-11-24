@@ -11,6 +11,10 @@ import type {
   ScrapeDateWindow,
   ScrapeSnapshot,
   TrackedBet,
+  VerifyPuntaPuntaRequest,
+  VerifyPuntaPuntaResult,
+  VerifyRowQuotesRequest,
+  VerifyRowQuotesResult,
 } from '../src/shared/types';
 
 export interface OddsPulseAPI {
@@ -36,6 +40,8 @@ export interface OddsPulseAPI {
   runScrapeNow: () => Promise<ScrapeSnapshot>;
   scrapeDateRange: (dateWindow: ScrapeDateWindow) => Promise<ScrapeSnapshot>;
   setActiveDateRange: (dateWindow: ScrapeDateWindow | null) => Promise<void>;
+  verifyRowQuotes: (req: VerifyRowQuotesRequest) => Promise<VerifyRowQuotesResult>;
+  verifyPuntaPunta: (req: VerifyPuntaPuntaRequest) => Promise<VerifyPuntaPuntaResult>;
   stopAutoScrape: () => Promise<{ settings: AppSettings; snapshot: ScrapeSnapshot }>;
   startAutoScrape: () => Promise<{ settings: AppSettings; snapshot: ScrapeSnapshot }>;
   onScrapeUpdate: (cb: (snapshot: ScrapeSnapshot) => void) => () => void;
@@ -104,6 +110,8 @@ const api: OddsPulseAPI = {
   runScrapeNow: () => ipcRenderer.invoke('scraper:runNow'),
   scrapeDateRange: (dateWindow) => ipcRenderer.invoke('scraper:scrapeDateRange', dateWindow),
   setActiveDateRange: (dateWindow) => ipcRenderer.invoke('scraper:setActiveDateRange', dateWindow),
+  verifyRowQuotes: (req) => ipcRenderer.invoke('scraper:verifyRow', req),
+  verifyPuntaPunta: (req) => ipcRenderer.invoke('scraper:verifyPuntaPunta', req),
   stopAutoScrape: () => ipcRenderer.invoke('scraper:stopAuto'),
   startAutoScrape: () => ipcRenderer.invoke('scraper:startAuto'),
   onScrapeUpdate: (cb) => {

@@ -6,8 +6,14 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, isAbortError, sleep, throwIfAborted } from './httpClient';
-import { matchesEventHints } from './matchLinker';
+import {
+  computeEffectiveScrapedAt,
+  fetchJson,
+  isAbortError,
+  sleep,
+  throwIfAborted,
+} from './httpClient';
+import { matchesEventHints, teamSimilarity } from './matchLinker';
 
 const SCAN_URL =
   'https://scan-inbf.betfair.it/www/sports/navigation/facet/v1/search?_ak=nzIFcwyWhrlwYMrh&alt=json';
@@ -48,6 +54,7 @@ interface SbScanResp {
 
 interface SmpPriceRespItem {
   marketId: string;
+  marketStatus?: string;
   inplay?: boolean;
   runnerDetails?: Array<{
     selectionId: number;
@@ -89,24 +96,38 @@ function mapSbMarket(
 }
 
 function mapRunner(
+  sport: SportKey,
   marketType: MarketType,
   runnerName: string,
   idx: number,
   home: string,
   away: string
 ): { key: string; label: string } | null {
-  const low = runnerName.trim().toLowerCase();
+  const rn = runnerName.trim();
+  const low = rn.toLowerCase();
   if (marketType === '1X2') {
     if (low === 'pareggio' || low === 'draw' || low === 'the draw' || low === 'x') {
       return { key: 'DRAW', label: 'Pareggio (X)' };
     }
-    if (low === home.toLowerCase() || idx === 0) return { key: 'HOME', label: `${home} (1)` };
-    if (low === away.toLowerCase() || idx === 1) return { key: 'AWAY', label: `${away} (2)` };
+    if (low === home.toLowerCase()) return { key: 'HOME', label: `${home} (1)` };
+    if (low === away.toLowerCase()) return { key: 'AWAY', label: `${away} (2)` };
+    const simH = teamSimilarity(rn, home, sport);
+    const simA = teamSimilarity(rn, away, sport);
+    if (simH >= 0.65 && simH > simA + 0.08) return { key: 'HOME', label: `${home} (1)` };
+    if (simA >= 0.65 && simA > simH + 0.08) return { key: 'AWAY', label: `${away} (2)` };
+    if (idx === 0) return { key: 'HOME', label: `${home} (1)` };
+    if (idx === 1) return { key: 'AWAY', label: `${away} (2)` };
     return null;
   }
   if (marketType === 'H2H') {
-    if (low === home.toLowerCase() || idx === 0) return { key: 'HOME', label: `${home} (1)` };
-    if (low === away.toLowerCase() || idx === 1) return { key: 'AWAY', label: `${away} (2)` };
+    if (low === home.toLowerCase()) return { key: 'HOME', label: `${home} (1)` };
+    if (low === away.toLowerCase()) return { key: 'AWAY', label: `${away} (2)` };
+    const simH = teamSimilarity(rn, home, sport);
+    const simA = teamSimilarity(rn, away, sport);
+    if (simH >= 0.65 && simH > simA + 0.08) return { key: 'HOME', label: `${home} (1)` };
+    if (simA >= 0.65 && simA > simH + 0.08) return { key: 'AWAY', label: `${away} (2)` };
+    if (idx === 0) return { key: 'HOME', label: `${home} (1)` };
+    if (idx === 1) return { key: 'AWAY', label: `${away} (2)` };
     return null;
   }
   if (marketType === 'OVER_UNDER_25') {
@@ -238,18 +259,18 @@ export async function scrapeBetfairSportsbook(
         .map((m) => m.marketId);
 
       // Fetch fixed-odds prices in chunks of 40
-      const priceMap = new Map<string, SmpPriceRespItem>();
+      const priceMap = new Map<string, { item: SmpPriceRespItem; cacheAgeSec: number }>();
       for (let i = 0; i < marketIds.length; i += 40) {
         throwIfAborted(signal);
         const chunk = marketIds.slice(i, i + 40);
-        const { data: prices } = await fetchJson<SmpPriceRespItem[]>(SMP_URL, {
+        const { data: prices, cacheAgeSec } = await fetchJson<SmpPriceRespItem[]>(SMP_URL, {
           method: 'POST',
           body: { marketIds: chunk, currencyCode: 'EUR' },
           timeoutMs: 12000,
           signal,
         });
         for (const p of prices ?? []) {
-          priceMap.set(p.marketId, p);
+          priceMap.set(p.marketId, { item: p, cacheAgeSec });
         }
         if (i + 40 < marketIds.length) await sleep(100, signal);
       }
@@ -261,16 +282,21 @@ export async function scrapeBetfairSportsbook(
 
         const ev = eventsMap[String(m.eventId)];
         if (!ev) continue;
+        const startTime = m.marketTime ?? ev.openDate;
+        if (!includeLive && new Date(startTime).getTime() < nowMs - 60_000) continue;
         const teams = splitEventTeams(ev.name);
         if (!teams) continue;
         const [homeTeam, awayTeam] = teams;
 
-        const priceObj = priceMap.get(m.marketId);
-        if (!priceObj) continue;
+        const priceEntry = priceMap.get(m.marketId);
+        if (!priceEntry) continue;
+        const priceObj = priceEntry.item;
+        if (priceObj.marketStatus && priceObj.marketStatus !== 'OPEN') continue;
         if (!includeLive && priceObj.inplay) continue;
 
         const oddsBySel = new Map<number, number>();
         for (const rd of priceObj.runnerDetails ?? []) {
+          if (rd.runnerStatus && rd.runnerStatus !== 'ACTIVE') continue;
           const dec =
             rd.runnerOdds?.decimalDisplayOdds?.decimalOdds ??
             rd.runnerOdds?.trueOdds?.decimalOdds?.decimalOdds;
@@ -280,15 +306,26 @@ export async function scrapeBetfairSportsbook(
         }
 
         const selections: SelectionQuote[] = [];
+        const selectionMeta: Record<string, string> = {};
+        const usedKeys = new Set<string>();
         const sortedRunners = [...(m.runners ?? [])].sort(
           (a, b) => (a.sortPriority ?? 0) - (b.sortPriority ?? 0)
         );
         sortedRunners.forEach((rn, idx) => {
-          if (rn.runnerStatus === 'REMOVED') return;
+          if (rn.runnerStatus && rn.runnerStatus !== 'ACTIVE') return;
           const backOdds = oddsBySel.get(rn.selectionId);
           if (!backOdds) return;
-          const mappedRunner = mapRunner(mapped.marketType, rn.runnerName, idx, homeTeam, awayTeam);
-          if (!mappedRunner) return;
+          const mappedRunner = mapRunner(
+            sp.sport,
+            mapped.marketType,
+            rn.runnerName,
+            idx,
+            homeTeam,
+            awayTeam
+          );
+          if (!mappedRunner || usedKeys.has(mappedRunner.key)) return;
+          usedKeys.add(mappedRunner.key);
+          selectionMeta[`sel_${mappedRunner.key}`] = String(rn.selectionId);
           selections.push({
             canonicalKey: mappedRunner.key,
             label: mappedRunner.label,
@@ -308,15 +345,18 @@ export async function scrapeBetfairSportsbook(
             sport: sp.sport,
             league: compName,
             eventId: String(ev.eventId),
+            sourceMarketId: m.marketId,
+            sourceMetadata: selectionMeta,
             eventName: `${homeTeam} - ${awayTeam}`,
             homeTeam,
             awayTeam,
-            startTime: m.marketTime ?? ev.openDate,
+            startTime,
             marketType: mapped.marketType,
             marketLabel: mapped.marketLabel,
             selections,
             eventUrl: `https://www.betfair.it/sport/`,
-            scrapedAt: Date.now(),
+            scrapedAt: computeEffectiveScrapedAt(Date.now(), priceEntry.cacheAgeSec),
+            cacheAgeSec: priceEntry.cacheAgeSec,
           });
         }
       }
@@ -332,4 +372,64 @@ export async function scrapeBetfairSportsbook(
   }
 
   return { markets, latencyMs: Date.now() - started };
+}
+
+/**
+ * Ultra-fast (~150ms) single-market live verification on Betfair Sportsbook SMP.
+ */
+export async function verifyBetfairSportsbookMarket(params: {
+  marketId: string;
+  selectionIdsByKey: Record<string, string>;
+  includeLive: boolean;
+  signal?: AbortSignal;
+}): Promise<{
+  isOpen: boolean;
+  oddsByKey: Record<string, number>;
+  latencyMs: number;
+  cacheAgeSec: number;
+}> {
+  const started = Date.now();
+  const { data: prices, cacheAgeSec } = await fetchJson<SmpPriceRespItem[]>(SMP_URL, {
+    method: 'POST',
+    body: { marketIds: [params.marketId], currencyCode: 'EUR' },
+    timeoutMs: 7000,
+    retries: 0,
+    signal: params.signal,
+  });
+
+  const item = (prices ?? []).find((p) => p.marketId === params.marketId);
+  if (!item) {
+    return { isOpen: false, oddsByKey: {}, latencyMs: Date.now() - started, cacheAgeSec };
+  }
+  if (item.marketStatus && item.marketStatus !== 'OPEN') {
+    return { isOpen: false, oddsByKey: {}, latencyMs: Date.now() - started, cacheAgeSec };
+  }
+  if (!params.includeLive && item.inplay) {
+    return { isOpen: false, oddsByKey: {}, latencyMs: Date.now() - started, cacheAgeSec };
+  }
+
+  const selById = new Map<string, number>();
+  for (const rd of item.runnerDetails ?? []) {
+    if (rd.runnerStatus && rd.runnerStatus !== 'ACTIVE') continue;
+    const dec =
+      rd.runnerOdds?.decimalDisplayOdds?.decimalOdds ??
+      rd.runnerOdds?.trueOdds?.decimalOdds?.decimalOdds;
+    if (dec && dec > 1.005) {
+      selById.set(String(rd.selectionId), Math.round(dec * 100) / 100);
+    }
+  }
+
+  const oddsByKey: Record<string, number> = {};
+  for (const [k, selId] of Object.entries(params.selectionIdsByKey)) {
+    const key = k.startsWith('sel_') ? k.slice(4) : k;
+    const val = selById.get(selId);
+    if (val) oddsByKey[key] = val;
+  }
+
+  return {
+    isOpen: true,
+    oddsByKey,
+    latencyMs: Date.now() - started,
+    cacheAgeSec,
+  };
 }

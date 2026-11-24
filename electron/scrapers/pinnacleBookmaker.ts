@@ -1,11 +1,17 @@
 import { matchesScrapeDateWindow } from '../../src/shared/dateRange';
 import type {
+  MarketType,
   RawScrapedMarket,
   SelectionQuote,
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, isAbortError, throwIfAborted } from './httpClient';
+import {
+  computeEffectiveScrapedAt,
+  fetchJson,
+  isAbortError,
+  throwIfAborted,
+} from './httpClient';
 
 const PIN_BASE = 'https://guest.api.arcadia.pinnacle.com/0.1/sports';
 
@@ -25,9 +31,11 @@ interface PinMatchup {
 interface PinStraightMarket {
   matchupId: number;
   period: number;
-  type: 'moneyline' | 'total' | 'spread';
+  type: 'moneyline' | 'total' | 'spread' | 'team_total';
   status?: string;
   isAlternate?: boolean;
+  side?: string;
+  cutoffAt?: string;
   prices?: Array<{
     designation: 'home' | 'away' | 'draw' | 'over' | 'under';
     price: number; // American odds
@@ -72,13 +80,14 @@ export async function scrapePinnacle(
   for (const sp of targetSports) {
     throwIfAborted(signal);
     try {
-      const [{ data: matchups }, { data: straights }] = await Promise.all([
+      const [{ data: matchups }, { data: straights, cacheAgeSec }] = await Promise.all([
         fetchJson<PinMatchup[]>(`${PIN_BASE}/${sp.sportId}/matchups`, { timeoutMs: 14000, signal }),
         fetchJson<PinStraightMarket[]>(`${PIN_BASE}/${sp.sportId}/markets/straight`, {
           timeoutMs: 14000,
           signal,
         }),
       ]);
+      const scrapedAt = computeEffectiveScrapedAt(Date.now(), cacheAgeSec);
 
       const matchupMap = new Map<number, { home: string; away: string; league: string; start: string }>();
       for (const m of matchups ?? []) {
@@ -126,6 +135,7 @@ export async function scrapePinnacle(
       for (const st of straights ?? []) {
         if (st.period !== 0) continue;
         if (st.status && st.status !== 'open') continue;
+        if (!includeLive && st.cutoffAt && Date.parse(st.cutoffAt) < nowMs) continue;
         const ev = matchupMap.get(st.matchupId);
         if (!ev) continue;
 
@@ -163,10 +173,11 @@ export async function scrapePinnacle(
               marketLabel: sp.sport === 'football' ? 'Esito Finale 1X2' : 'Testa a Testa',
               selections: sels,
               eventUrl: 'https://www.pinnacle.com/',
-              scrapedAt: Date.now(),
+              scrapedAt,
+              cacheAgeSec,
             });
           }
-        } else if (sp.sport === 'football' && st.type === 'total') {
+        } else if (sp.sport === 'football' && st.type === 'total' && !st.side) {
           const has25 = (st.prices ?? []).every((p) => p.points === 2.5);
           if (!has25 || (st.prices?.length ?? 0) !== 2) continue;
 
@@ -200,7 +211,8 @@ export async function scrapePinnacle(
               marketLabel: 'Under/Over 2.5 Gol',
               selections: sels,
               eventUrl: 'https://www.pinnacle.com/',
-              scrapedAt: Date.now(),
+              scrapedAt,
+              cacheAgeSec,
             });
           }
         }
@@ -217,4 +229,80 @@ export async function scrapePinnacle(
   }
 
   return { markets, latencyMs: Date.now() - started };
+}
+
+/**
+ * Verifies a Pinnacle matchup market from the public straight-markets feed,
+ * transparently reporting Cloudflare's HTTP Age header so stale cached feeds are visible.
+ */
+export async function verifyPinnacleMarket(params: {
+  sport: SportKey;
+  matchupId: string;
+  marketType: MarketType;
+  includeLive: boolean;
+  signal?: AbortSignal;
+}): Promise<{
+  oddsByKey: Record<string, number>;
+  isOpen: boolean;
+  latencyMs: number;
+  cacheAgeSec: number;
+}> {
+  const started = Date.now();
+  const spSpec = PIN_SPORTS.find((s) => s.sport === params.sport);
+  const idNum = Number(params.matchupId);
+  if (!spSpec || !Number.isFinite(idNum)) {
+    return { oddsByKey: {}, isOpen: false, latencyMs: 0, cacheAgeSec: 0 };
+  }
+
+  const { data: straights, cacheAgeSec } = await fetchJson<PinStraightMarket[]>(
+    `${PIN_BASE}/${spSpec.sportId}/markets/straight`,
+    { timeoutMs: 10000, retries: 0, signal: params.signal }
+  );
+
+  const nowMs = Date.now();
+  const oddsByKey: Record<string, number> = {};
+  let foundOpen = false;
+
+  for (const st of straights ?? []) {
+    if (st.matchupId !== idNum || st.period !== 0) continue;
+    if (st.status && st.status !== 'open') continue;
+    if (!params.includeLive && st.cutoffAt && Date.parse(st.cutoffAt) < nowMs) continue;
+
+    if (
+      (params.marketType === '1X2' || params.marketType === 'H2H') &&
+      st.type === 'moneyline'
+    ) {
+      for (const pr of st.prices ?? []) {
+        const dec = americanToDecimal(pr.price);
+        if (!dec) continue;
+        if (pr.designation === 'home') oddsByKey.HOME = dec;
+        else if (pr.designation === 'draw') oddsByKey.DRAW = dec;
+        else if (pr.designation === 'away') oddsByKey.AWAY = dec;
+      }
+      foundOpen = Object.keys(oddsByKey).length >= (params.sport === 'football' ? 3 : 2);
+      if (foundOpen) break;
+    } else if (
+      params.marketType === 'OVER_UNDER_25' &&
+      params.sport === 'football' &&
+      st.type === 'total' &&
+      !st.side &&
+      (st.prices ?? []).every((p) => p.points === 2.5)
+    ) {
+      for (const pr of st.prices ?? []) {
+        const dec = americanToDecimal(pr.price);
+        if (!dec) continue;
+        if (pr.designation === 'over') oddsByKey.OVER_25 = dec;
+        else if (pr.designation === 'under') oddsByKey.UNDER_25 = dec;
+      }
+      foundOpen = Object.keys(oddsByKey).length === 2;
+      if (foundOpen) break;
+    }
+  }
+
+  return {
+    oddsByKey,
+    isOpen: foundOpen,
+    latencyMs: Date.now() - started,
+    cacheAgeSec,
+  };
 }

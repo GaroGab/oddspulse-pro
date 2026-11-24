@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Copy,
   ExternalLink,
+  RefreshCw,
   RotateCcw,
   Save,
   ShieldCheck,
@@ -16,7 +17,13 @@ import {
 } from 'lucide-react';
 import { calculatePuntaPunta, round2, type PuntaPuntaCalcInput } from '../../shared/math';
 import type { PuntaPuntaCandidateRow } from '../../shared/puntaPuntaMatcher';
-import type { BetMode, SourceId, TrackedBet } from '../../shared/types';
+import type {
+  BetMode,
+  LiveVerifySideResult,
+  SourceId,
+  TrackedBet,
+  VerifyPuntaPuntaResult,
+} from '../../shared/types';
 import { formatEuro, formatEventTime, formatOdds, formatPct, ratingTone, sportLabel } from '../utils/format';
 import { playCopyTick } from '../utils/sound';
 import { AnimatedNumber } from './AnimatedNumber';
@@ -44,6 +51,10 @@ interface EditableLeg {
   bookmakerName: string;
   odds: number;
   eventUrl?: string;
+  eventId?: string;
+  marketId?: string;
+  sourceMetadata?: Record<string, string>;
+  swapped?: boolean;
 }
 
 const MODE_LABELS: { id: BetMode; label: string; hint: string }[] = [
@@ -74,28 +85,98 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
   const [legs, setLegs] = useState<EditableLeg[]>([]);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [savedBanner, setSavedBanner] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<VerifyPuntaPuntaResult | null>(null);
+  const manualEditedLegRef = useRef<Set<number>>(new Set());
+  const verifySeqRef = useRef(0);
+
+  const runLiveVerifyLegs = useCallback(
+    async (targetRow: PuntaPuntaCandidateRow, targetLegs: EditableLeg[], forceApply = false) => {
+      const api = window.oddspulse?.verifyPuntaPunta;
+      if (!api || targetLegs.length === 0) return;
+      const seq = ++verifySeqRef.current;
+      setVerifying(true);
+      try {
+        const res = await api({
+          groupId: targetRow.groupId,
+          eventKey: targetRow.eventKey,
+          sport: targetRow.sport,
+          eventName: targetRow.eventName,
+          homeTeam: targetRow.homeTeam,
+          awayTeam: targetRow.awayTeam,
+          startTime: targetRow.startTime,
+          marketType: targetRow.marketType,
+          legs: targetLegs.map((l) => ({
+            selectionKey: l.selectionKey,
+            bookmakerId: l.bookmakerId,
+            bookmakerName: l.bookmakerName,
+            eventId: l.eventId,
+            marketId: l.marketId,
+            sourceMetadata: l.sourceMetadata,
+            swapped: l.swapped,
+            previousOdds: l.odds,
+          })),
+        });
+        if (verifySeqRef.current !== seq) return;
+        setVerifyResult(res);
+        setLegs((prev) =>
+          prev.map((leg, idx) => {
+            if (!forceApply && manualEditedLegRef.current.has(idx)) return leg;
+            const matched = res.legs.find(
+              (r) => r.selectionKey === leg.selectionKey && r.bookmakerId === leg.bookmakerId
+            );
+            if (matched?.result.liveOdds && matched.result.liveOdds > 1.005) {
+              return { ...leg, odds: matched.result.liveOdds };
+            }
+            return leg;
+          })
+        );
+        if (forceApply) manualEditedLegRef.current.clear();
+      } catch {
+        // Ignore single verification error
+      } finally {
+        if (verifySeqRef.current === seq) setVerifying(false);
+      }
+    },
+    []
+  );
+
+  const rowKey = row?.id ?? null;
 
   useEffect(() => {
-    if (!row) return;
+    if (!row) {
+      verifySeqRef.current++;
+      setVerifying(false);
+      setVerifyResult(null);
+      return;
+    }
+    manualEditedLegRef.current.clear();
     setMode(initialMode);
     setStake(initialStake);
     setAnchorMode(initialAnchorMode);
     setRefundAmount(initialRefundAmount);
     setRefundRetention(initialRefundRetention);
     setBalanceBias(0);
-    setLegs(
-      row.legs.map((l) => ({
-        selectionKey: l.selectionKey,
-        selectionLabel: l.selectionLabel,
-        bookmakerId: l.bookmakerId,
-        bookmakerName: l.bookmakerName,
-        odds: l.odds,
-        eventUrl: l.eventUrl,
-      }))
-    );
+    const initialLegs: EditableLeg[] = row.legs.map((l) => ({
+      selectionKey: l.selectionKey,
+      selectionLabel: l.selectionLabel,
+      bookmakerId: l.bookmakerId,
+      bookmakerName: l.bookmakerName,
+      odds: l.odds,
+      eventUrl: l.eventUrl,
+      eventId: l.eventId,
+      marketId: l.marketId,
+      sourceMetadata: l.sourceMetadata,
+      swapped: l.swapped,
+    }));
+    setLegs(initialLegs);
     setSavedBanner(false);
     setCopiedIdx(null);
-  }, [row, initialMode, initialStake, initialAnchorMode, initialRefundAmount, initialRefundRetention]);
+    setVerifyResult(null);
+    void runLiveVerifyLegs(row, initialLegs, false);
+    // Reset only when opening a different Punta-Punta row
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowKey]);
 
   useEffect(() => {
     if (!row) return;
@@ -135,6 +216,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
 
   const handleResetLive = () => {
     if (!row) return;
+    manualEditedLegRef.current.clear();
     setLegs(
       row.legs.map((l) => ({
         selectionKey: l.selectionKey,
@@ -143,6 +225,10 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
         bookmakerName: l.bookmakerName,
         odds: l.odds,
         eventUrl: l.eventUrl,
+        eventId: l.eventId,
+        marketId: l.marketId,
+        sourceMetadata: l.sourceMetadata,
+        swapped: l.swapped,
       }))
     );
     setSavedBanner(false);
@@ -154,6 +240,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
     const quotes = row.groupQuotesBySelection[targetLeg.selectionKey] ?? [];
     const matched = quotes.find((q) => q.bookmakerId === bookmakerId);
     if (!matched) return;
+    manualEditedLegRef.current.delete(legIdx);
     setLegs((prev) =>
       prev.map((l, idx) =>
         idx === legIdx
@@ -163,6 +250,10 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
               bookmakerName: matched.bookmakerName,
               odds: matched.odds,
               eventUrl: matched.eventUrl ?? l.eventUrl,
+              eventId: matched.eventId,
+              marketId: matched.marketId,
+              sourceMetadata: matched.sourceMetadata,
+              swapped: matched.swapped,
             }
           : l
       )
@@ -171,6 +262,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
   };
 
   const handleChangeOddsForLeg = (legIdx: number, nextOdds: number) => {
+    manualEditedLegRef.current.add(legIdx);
     setLegs((prev) =>
       prev.map((l, idx) => (idx === legIdx ? { ...l, odds: Math.max(1.01, nextOdds) } : l))
     );
@@ -413,27 +505,43 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
 
               {/* Legs Breakdown & Manual Bookmaker Comparison */}
               <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-300">
                     <ArrowRightLeft className="h-3.5 w-3.5 text-brand-400" />
                     Confronto Bookmaker e Puntate per Esito
                   </div>
-                  {isModifiedFromLive && (
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
-                      onClick={handleResetLive}
-                      data-testid="pp-calc-reset-live"
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-semibold text-slate-300 transition hover:border-brand-400/50 hover:text-brand-200"
+                      disabled={verifying}
+                      data-testid="pp-verify-live-btn"
+                      onClick={() => void runLiveVerifyLegs(row, legs, true)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold text-emerald-200 transition hover:bg-emerald-500/20 disabled:opacity-50"
+                      title="Verifica subito tutte le quote Punta direttamente sui bookmaker"
                     >
-                      <RotateCcw className="h-3 w-3" />
-                      Ripristina quote live
+                      <RefreshCw className={`h-3 w-3 ${verifying ? 'animate-spin' : ''}`} />
+                      {verifying ? 'Verifica live...' : 'Verifica Live'}
                     </button>
-                  )}
+                    {isModifiedFromLive && (
+                      <button
+                        type="button"
+                        onClick={handleResetLive}
+                        data-testid="pp-calc-reset-live"
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-semibold text-slate-300 transition hover:border-brand-400/50 hover:text-brand-200"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        Ripristina quote live
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {legs.map((leg, idx) => {
                   const isPrimary = idx === 0;
                   const quotes = row.groupQuotesBySelection[leg.selectionKey] ?? [];
+                  const legVerify: LiveVerifySideResult | undefined = verifyResult?.legs.find(
+                    (lr) => lr.selectionKey === leg.selectionKey && lr.bookmakerId === leg.bookmakerId
+                  )?.result;
                   const bookieOptions: SelectOption<SourceId>[] = quotes.map((q) => ({
                     value: q.bookmakerId,
                     label: q.bookmakerName,
@@ -475,6 +583,24 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
                             {isPrimary ? 'PUNTA 1 • PRINCIPALE' : `COPERTURA ${idx} • PUNTA`}
                           </span>
                           <span className="text-sm font-bold text-white">{leg.selectionLabel}</span>
+                          {legVerify && legVerify.status === 'confirmed' && (
+                            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-emerald-300">
+                              Live ✓
+                              {legVerify.cacheAgeSec && legVerify.cacheAgeSec >= 60
+                                ? ` (cache ~${Math.round(legVerify.cacheAgeSec / 60)}m)`
+                                : ''}
+                            </span>
+                          )}
+                          {legVerify && legVerify.status === 'changed' && legVerify.liveOdds && (
+                            <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-mono text-[9px] font-bold text-amber-200">
+                              Aggiornata {formatOdds(legVerify.previousOdds)}→{formatOdds(legVerify.liveOdds)}
+                            </span>
+                          )}
+                          {legVerify && legVerify.status === 'suspended' && (
+                            <span className="rounded bg-rose-500/20 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-200">
+                              Sospesa ⚠
+                            </span>
+                          )}
                         </div>
 
                         <div className="flex items-center gap-1.5 text-[11px] text-slate-400">

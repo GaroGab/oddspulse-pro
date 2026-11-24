@@ -81,6 +81,28 @@ export function sportLabel(sport: SportKey): string {
   }
 }
 
+export function formatQuoteAge(
+  updatedAt: number | undefined,
+  nowMs = Date.now()
+): { label: string; ageSec: number; tone: 'fresh' | 'aging' | 'stale' } {
+  if (!updatedAt || !Number.isFinite(updatedAt)) {
+    return { label: '--', ageSec: 0, tone: 'fresh' };
+  }
+  const ageSec = Math.max(0, Math.floor((nowMs - updatedAt) / 1000));
+  const tone: 'fresh' | 'aging' | 'stale' =
+    ageSec < 45 ? 'fresh' : ageSec < 180 ? 'aging' : 'stale';
+
+  if (ageSec < 10) return { label: 'Live', ageSec, tone };
+  if (ageSec < 60) return { label: `${ageSec}s`, ageSec, tone };
+  const mins = Math.floor(ageSec / 60);
+  const secs = ageSec % 60;
+  if (mins < 60) {
+    return { label: secs >= 10 && mins < 5 ? `${mins}m ${secs}s` : `${mins}m`, ageSec, tone };
+  }
+  const hrs = Math.floor(mins / 60);
+  return { label: `${hrs}h`, ageSec, tone };
+}
+
 export function ratingTone(rating: number, mode: 'normal' | 'snr' | 'sr' | 'rf' = 'normal'): string {
   if (mode === 'snr') {
     if (rating >= 75) return 'text-brand-300';

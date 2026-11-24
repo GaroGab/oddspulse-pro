@@ -157,6 +157,7 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
             triggerClassName="rounded-xl py-2"
             options={[
               { value: 0, label: 'Manuale (On-Demand)', dotColor: 'bg-slate-400' },
+              { value: 20, label: 'Ogni 20 secondi', hint: 'Ultra-rapido', dotColor: 'bg-brand-300' },
               { value: 30, label: 'Ogni 30 secondi', hint: 'Veloce', dotColor: 'bg-amber-400' },
               { value: 60, label: 'Ogni 60 secondi', hint: 'Consigliato', dotColor: 'bg-emerald-400' },
               { value: 120, label: 'Ogni 2 minuti', dotColor: 'bg-brand-300' },
@@ -326,6 +327,16 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
                     <>
                       <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
                       <span className="text-emerald-300 font-medium">Connesso</span>
+                      {src.lastCacheAgeSec !== undefined && src.lastCacheAgeSec >= 60 && (
+                        <span
+                          title={`Feed pubblico con cache CDN upstream di circa ${Math.round(
+                            src.lastCacheAgeSec / 60
+                          )} minuti`}
+                          className="rounded border border-amber-400/35 bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-amber-200"
+                        >
+                          Cache ~{Math.round(src.lastCacheAgeSec / 60)}m
+                        </span>
+                      )}
                     </>
                   )}
                   {src.state === 'scraping' && (

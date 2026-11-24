@@ -23,6 +23,8 @@ import {
   type ScrapeDateWindow,
   type ScrapeSnapshot,
   type TrackedBet,
+  type VerifyPuntaPuntaRequest,
+  type VerifyRowQuotesRequest,
 } from '../src/shared/types';
 import { ScraperEngine } from './scrapers/scraperEngine';
 
@@ -678,6 +680,12 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('scraper:setActiveDateRange', (_ev, dateWindow: ScrapeDateWindow | null) => {
     scraperEngine.setActiveDateWindow(dateWindow);
+  });
+  ipcMain.handle('scraper:verifyRow', async (_ev, req: VerifyRowQuotesRequest) => {
+    return await scraperEngine.verifyRowQuotes(currentSettings, req);
+  });
+  ipcMain.handle('scraper:verifyPuntaPunta', async (_ev, req: VerifyPuntaPuntaRequest) => {
+    return await scraperEngine.verifyPuntaPunta(currentSettings, req);
   });
   ipcMain.handle('scraper:stopAuto', async () => {
     const patch = buildAutoScrapeSettingsPatch(currentSettings, false);

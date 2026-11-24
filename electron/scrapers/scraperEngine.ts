@@ -13,6 +13,8 @@ import {
   type BackOutcomeQuote,
   type DutcherLeg,
   type DutcherRow,
+  type LiveVerifySideResult,
+  type MarketType,
   type OddsmatcherRow,
   type OddsDelta,
   type RawScrapedMarket,
@@ -23,24 +25,51 @@ import {
   type SourceStatus,
   type SportKey,
   type TargetedScrapeFilter,
+  type VerifyPuntaPuntaRequest,
+  type VerifyPuntaPuntaResult,
+  type VerifyRowQuotesRequest,
+  type VerifyRowQuotesResult,
 } from '../../src/shared/types';
-import { scrapeBetfairExchange } from './betfairExchange';
-import { scrapeBetfairSportsbook } from './betfairSportsbook';
-import { scrapeBetflagExchange } from './betflagExchange';
-import { isAbortError, sleep } from './httpClient';
+import { refreshBetfairExchangeMarkets, scrapeBetfairExchange } from './betfairExchange';
+import { scrapeBetfairSportsbook, verifyBetfairSportsbookMarket } from './betfairSportsbook';
+import { scrapeBetflagExchange, verifyBetflagExchangeEvent } from './betflagExchange';
+import { computeEffectiveScrapedAt, isAbortError, sleep } from './httpClient';
 import {
   ITALIAN_ADM_BOOKMAKERS,
+  prefetchDirettaSchedules,
   scrapeItalianAdmBookmakers,
+  verifyItalianAdmEvent,
 } from './italianAdmScraper';
-import { KAMBI_BRANDS, scrapeKambiBrand } from './kambiBookmaker';
-import { linkScrapedMarkets, type LinkedEventGroup } from './matchLinker';
+import { KAMBI_BRANDS, scrapeKambiBrand, verifyKambiEvent } from './kambiBookmaker';
+import { linkScrapedMarkets, matchesEventHints, type LinkedEventGroup } from './matchLinker';
 import { scrapeTheOddsApiOptional } from './oddsApiOptional';
-import { scrapePinnacle } from './pinnacleBookmaker';
-import { scrapeSmarketsExchange } from './smarketsExchange';
+import { scrapePinnacle, verifyPinnacleMarket } from './pinnacleBookmaker';
+import {
+  extractBestSmarketsPrices,
+  refreshSmarketsQuotesByMarkets,
+  scrapeSmarketsExchange,
+} from './smarketsExchange';
 
 const SOURCE_META = new Map(SOURCE_CATALOG.map((s) => [s.id, s]));
-const DATE_RANGE_CACHE_TTL_MS = 15 * 60_000;
-const MAX_DATE_RANGE_CACHE_ENTRIES = 4;
+const DATE_RANGE_CACHE_TTL_MS = 3 * 60_000;
+const INACTIVE_DATE_RANGE_CACHE_TTL_MS = 90_000;
+const MAX_DATE_RANGE_CACHE_ENTRIES = 3;
+const EXCHANGE_RESYNC_MIN_AGE_MS = 4_000;
+
+function maxMarketCacheAgeSec(markets: RawScrapedMarket[]): number {
+  let maxAge = 0;
+  for (const m of markets) {
+    if (m.cacheAgeSec && m.cacheAgeSec > maxAge) maxAge = m.cacheAgeSec;
+  }
+  return maxAge;
+}
+
+function unswapSelectionKey(selectionKey: string, swapped?: boolean): string {
+  if (!swapped) return selectionKey;
+  if (selectionKey === 'HOME') return 'AWAY';
+  if (selectionKey === 'AWAY') return 'HOME';
+  return selectionKey;
+}
 
 interface DateRangeCacheEntry {
   window: ScrapeDateWindow;
@@ -277,16 +306,19 @@ export class ScraperEngine {
         return [];
       }
       const uniqueEvents = new Set(markets.map((m) => m.eventId)).size;
+      const cacheAgeSec = maxMarketCacheAgeSec(markets);
       st.state = 'ok';
       st.latencyMs = latencyMs;
       st.eventsCount = uniqueEvents;
       st.marketsCount = markets.length;
       st.lastScrapedAt = Date.now();
+      st.lastCacheAgeSec = cacheAgeSec;
       st.successCount += 1;
+      const cacheNote = cacheAgeSec >= 60 ? ` (cache feed ~${Math.round(cacheAgeSec / 60)}m)` : '';
       this.addLog(
         'success',
         st.shortName,
-        `Recuperati ${markets.length} mercati su ${uniqueEvents} eventi in ${latencyMs}ms`
+        `Recuperati ${markets.length} mercati su ${uniqueEvents} eventi in ${latencyMs}ms${cacheNote}`
       );
       this.emitPartial();
       return markets;
@@ -336,7 +368,8 @@ export class ScraperEngine {
       ? `${this.activeDateWindow.startDate}__${this.activeDateWindow.endDate}`
       : null;
     for (const [k, entry] of this.dateRangeRawByKey) {
-      if (k !== activeKey && nowMs - entry.fetchedAt > DATE_RANGE_CACHE_TTL_MS) {
+      const ttl = k === activeKey ? DATE_RANGE_CACHE_TTL_MS : INACTIVE_DATE_RANGE_CACHE_TTL_MS;
+      if (nowMs - entry.fetchedAt > ttl) {
         this.dateRangeRawByKey.delete(k);
       }
     }
@@ -344,6 +377,10 @@ export class ScraperEngine {
     const dedup = new Map<string, RawScrapedMarket>();
     const addMarket = (m: RawScrapedMarket) => {
       if (settings.enabledSources[m.sourceId] === false) return;
+      if (!settings.includeLiveEvents) {
+        const startMs = Date.parse(m.startTime);
+        if (Number.isFinite(startMs) && startMs < nowMs - 30_000) return;
+      }
       const key = `${m.sourceId}|${m.sourceName}|${m.eventId}|${m.marketType}`;
       const existing = dedup.get(key);
       if (!existing || m.scrapedAt >= existing.scrapedAt) {
@@ -376,6 +413,7 @@ export class ScraperEngine {
         st.marketsCount = markets.length;
       }
       st.lastScrapedAt = Date.now();
+      st.lastCacheAgeSec = maxMarketCacheAgeSec(markets);
       st.successCount += 1;
       return markets;
     } catch (err) {
@@ -388,6 +426,113 @@ export class ScraperEngine {
       st.errorCount += 1;
       this.addLog('warn', st.shortName, `Periodo futuro: ${msg}`);
       return [];
+    }
+  }
+
+  /**
+   * Re-polls live Exchange prices (Betfair EX & Smarkets) at the end of a multi-second cycle
+   * so Exchange quotes are synchronized (<1s skew) with bookmakers that finished last.
+   */
+  private async resyncStaleExchangeQuotes(
+    allRaw: RawScrapedMarket[],
+    includeLive: boolean,
+    signal?: AbortSignal
+  ): Promise<void> {
+    if (signal?.aborted) return;
+    const nowMs = Date.now();
+    const hasBookmakers = allRaw.some((m) => m.sourceKind === 'bookmaker');
+    if (!hasBookmakers) return;
+
+    const staleBfMarkets = allRaw.filter(
+      (m) =>
+        m.sourceId === 'betfair_exchange' &&
+        Boolean(m.sourceMarketId) &&
+        nowMs - m.scrapedAt >= EXCHANGE_RESYNC_MIN_AGE_MS
+    );
+    const staleSmMarkets = allRaw.filter(
+      (m) =>
+        m.sourceId === 'smarkets_exchange' &&
+        Boolean(m.sourceMarketId) &&
+        Boolean(m.sourceMetadata) &&
+        nowMs - m.scrapedAt >= 6_000
+    );
+
+    if (staleBfMarkets.length === 0 && staleSmMarkets.length === 0) return;
+
+    const bfIds = Array.from(
+      new Set(staleBfMarkets.map((m) => m.sourceMarketId!).filter(Boolean))
+    ).slice(0, 80);
+    const smIds = Array.from(
+      new Set(staleSmMarkets.map((m) => m.sourceMarketId!).filter(Boolean))
+    ).slice(0, 30);
+
+    const [bfRes, smRes] = await Promise.allSettled([
+      bfIds.length > 0
+        ? refreshBetfairExchangeMarkets({ marketIds: bfIds, includeLive, signal })
+        : Promise.resolve(null),
+      smIds.length > 0
+        ? refreshSmarketsQuotesByMarkets({ marketIds: smIds, signal })
+        : Promise.resolve(null),
+    ]);
+
+    if (signal?.aborted) return;
+
+    let refreshedCount = 0;
+
+    if (bfRes.status === 'fulfilled' && bfRes.value && bfRes.value.marketsByMarketId.size > 0) {
+      const freshMap = bfRes.value.marketsByMarketId;
+      for (const m of staleBfMarkets) {
+        if (!m.sourceMarketId) continue;
+        const fresh = freshMap.get(m.sourceMarketId);
+        if (fresh) {
+          m.selections = fresh.selections;
+          m.scrapedAt = fresh.scrapedAt;
+          m.cacheAgeSec = fresh.cacheAgeSec;
+          refreshedCount++;
+        }
+      }
+      const bfSt = this.sourceStatuses.get('betfair_exchange');
+      if (bfSt) bfSt.lastScrapedAt = Date.now();
+    }
+
+    if (smRes.status === 'fulfilled' && smRes.value) {
+      const qMap = smRes.value.quotesByContractId;
+      const smScrapedAt = computeEffectiveScrapedAt(Date.now(), smRes.value.cacheAgeSec);
+      for (const m of staleSmMarkets) {
+        if (!m.sourceMetadata) continue;
+        let touched = false;
+        const nextSels = m.selections
+          .map((sel) => {
+            const cid = m.sourceMetadata?.[`cid_${sel.canonicalKey}`];
+            if (!cid || !(cid in qMap)) return sel;
+            const prices = extractBestSmarketsPrices(qMap[cid]);
+            touched = true;
+            return {
+              ...sel,
+              backOdds: prices.backOdds,
+              backLiquidity: prices.backLiquidity,
+              layOdds: prices.layOdds,
+              layLiquidity: prices.layLiquidity,
+            };
+          })
+          .filter((s) => Boolean(s.layOdds || s.backOdds));
+        if (touched) {
+          m.selections = nextSels;
+          m.scrapedAt = smScrapedAt;
+          m.cacheAgeSec = smRes.value.cacheAgeSec;
+          refreshedCount++;
+        }
+      }
+      const smSt = this.sourceStatuses.get('smarkets_exchange');
+      if (smSt) smSt.lastScrapedAt = Date.now();
+    }
+
+    if (refreshedCount > 0) {
+      this.addLog(
+        'info',
+        'SYNC',
+        `Riallineati in tempo reale ${refreshedCount} mercati Exchange a fine ciclo per azzerare lo scarto temporale`
+      );
     }
   }
 
@@ -410,23 +555,32 @@ export class ScraperEngine {
             fn: () => Promise<{ markets: RawScrapedMarket[]; latencyMs: number }>
           ) => this.runDateRangeSource(id, fn, signal);
 
-    // 1. Kick off Exchanges first (we also feed their live events into the Italian ADM scraper!)
-    const exchangeTasks: Array<Promise<RawScrapedMarket[]>> = [];
+    const enabledAdmIds = ITALIAN_ADM_BOOKMAKERS.map((b) => b.sourceId).filter(
+      (id) => settings.enabledSources[id]
+    );
+
+    // 0. Prefetch Diretta schedules immediately at t=0s in parallel with Exchanges
+    const admSchedulePromise =
+      enabledAdmIds.length > 0
+        ? prefetchDirettaSchedules({ includeLive, filter, signal }).catch(() => undefined)
+        : Promise.resolve(undefined);
+
+    // 1. Kick off fast Exchanges (Betfair EX, Smarkets) and slower Betflag EX in parallel
+    const fastExchangeTasks: Array<Promise<RawScrapedMarket[]>> = [];
     if (settings.enabledSources.betfair_exchange) {
-      exchangeTasks.push(
+      fastExchangeTasks.push(
         runSource('betfair_exchange', () => scrapeBetfairExchange(includeLive, filter, signal))
       );
     }
     if (settings.enabledSources.smarkets_exchange) {
-      exchangeTasks.push(
+      fastExchangeTasks.push(
         runSource('smarkets_exchange', () => scrapeSmarketsExchange(includeLive, filter, signal))
       );
     }
-    if (settings.enabledSources.betflag_exchange) {
-      exchangeTasks.push(
-        runSource('betflag_exchange', () => scrapeBetflagExchange(includeLive, filter, signal))
-      );
-    }
+
+    const betflagExchangeTask: Promise<RawScrapedMarket[]> = settings.enabledSources.betflag_exchange
+      ? runSource('betflag_exchange', () => scrapeBetflagExchange(includeLive, filter, signal))
+      : Promise.resolve([]);
 
     // 2. Simultaneously kick off non-ADM bookmakers
     const otherBookieTasks: Array<Promise<RawScrapedMarket[]>> = [];
@@ -462,7 +616,7 @@ export class ScraperEngine {
           results.push(...mkts);
           if (signal.aborted) break;
           try {
-            await sleep(mode === 'date_range' ? 200 : 300, signal);
+            await sleep(mode === 'date_range' ? 180 : 240, signal);
           } catch (err) {
             if (signal.aborted || isAbortError(err)) break;
             throw err;
@@ -474,14 +628,19 @@ export class ScraperEngine {
       []
     );
 
-    // 3. Wait for Exchanges, then immediately launch Italian ADM batch (Sisal, SNAI, Betflag, Eurobet, GoldBet)
-    const exchangeChunks = await Promise.all(exchangeTasks);
-    const exchangeMarkets = exchangeChunks.flat();
-    allRaw.push(...exchangeMarkets);
-
-    const enabledAdmIds = ITALIAN_ADM_BOOKMAKERS.map((b) => b.sourceId).filter(
-      (id) => settings.enabledSources[id]
-    );
+    // 3. Wait only for fast Exchanges (or Betflag EX if neither Betfair nor Smarkets is enabled)
+    //    so ADM scraping starts immediately without stalling on slow/blocked Betflag EX!
+    let fastExchangeMarkets: RawScrapedMarket[] = [];
+    let betflagAlreadyMerged = false;
+    if (fastExchangeTasks.length > 0) {
+      const fastChunks = await Promise.all(fastExchangeTasks);
+      fastExchangeMarkets = fastChunks.flat();
+      allRaw.push(...fastExchangeMarkets);
+    } else if (settings.enabledSources.betflag_exchange) {
+      fastExchangeMarkets = await betflagExchangeTask;
+      allRaw.push(...fastExchangeMarkets);
+      betflagAlreadyMerged = true;
+    }
 
     const admTask = (async (): Promise<RawScrapedMarket[]> => {
       if (enabledAdmIds.length === 0 || signal.aborted) return [];
@@ -497,11 +656,13 @@ export class ScraperEngine {
       }
 
       try {
+        const prefetchedSchedule = await admSchedulePromise;
         const { marketsBySource, latencyMs } = await scrapeItalianAdmBookmakers({
-          exchangeMarkets,
+          exchangeMarkets: fastExchangeMarkets,
           enabledSourceIds: enabledAdmIds,
           includeLive,
           filter,
+          prefetchedSchedule,
           signal,
         });
 
@@ -531,6 +692,7 @@ export class ScraperEngine {
             st.marketsCount = mkts.length;
           }
           st.lastScrapedAt = Date.now();
+          st.lastCacheAgeSec = maxMarketCacheAgeSec(mkts);
           st.successCount += 1;
           if (mode === 'full') {
             this.addLog(
@@ -582,9 +744,23 @@ export class ScraperEngine {
       }
     })();
 
-    const remainingSettled = await Promise.all([...otherBookieTasks, kambiTask, admTask]);
+    const remainingTasks: Array<Promise<RawScrapedMarket[]>> = [
+      ...otherBookieTasks,
+      kambiTask,
+      admTask,
+    ];
+    if (!betflagAlreadyMerged) {
+      remainingTasks.push(betflagExchangeTask);
+    }
+
+    const remainingSettled = await Promise.all(remainingTasks);
     if (signal.aborted) return [];
     for (const chunk of remainingSettled) allRaw.push(...chunk);
+
+    // 4. End-of-cycle fast Exchange re-sync to eliminate intra-cycle skew when cycle took >4s
+    await this.resyncStaleExchangeQuotes(allRaw, includeLive, signal);
+    if (signal.aborted) return [];
+
     return allRaw;
   }
 
@@ -660,7 +836,11 @@ export class ScraperEngine {
 
               const qKey = `${key}|${src.market.sourceId}`;
               const existingQ = dedupQuotes.get(qKey);
-              if (!existingQ || sel.backOdds > existingQ.odds) {
+              if (
+                !existingQ ||
+                src.market.scrapedAt > existingQ.updatedAt ||
+                (src.market.scrapedAt === existingQ.updatedAt && sel.backOdds > existingQ.odds)
+              ) {
                 dedupQuotes.set(qKey, {
                   selectionKey: key,
                   selectionLabel: selLabel,
@@ -668,7 +848,13 @@ export class ScraperEngine {
                   bookmakerName: src.market.sourceName,
                   odds: sel.backOdds,
                   eventUrl,
-                  updatedAt: nowCycle,
+                  eventId: src.market.eventId,
+                  marketId: src.market.sourceMarketId,
+                  sourceMetadata: src.market.sourceMetadata,
+                  swapped: src.swapped,
+                  cacheAgeSec: src.market.cacheAgeSec ?? 0,
+                  isAggregator: Boolean(src.market.isAggregator),
+                  updatedAt: src.market.scrapedAt || nowCycle,
                 });
               }
 
@@ -689,6 +875,10 @@ export class ScraperEngine {
 
           if (coveredKeys.size === requiredKeys.length) {
             groupQuotes.push(...dedupQuotes.values());
+            const groupUpdatedAt =
+              groupQuotes.length > 0
+                ? Math.min(...groupQuotes.map((q) => q.updatedAt))
+                : nowCycle;
             backMarketGroups.push({
               id: `${g.eventKey}|${marketType}`,
               eventKey: g.eventKey,
@@ -705,7 +895,7 @@ export class ScraperEngine {
                 label: formatSelLabel(key, g.homeTeam, g.awayTeam),
               })),
               quotes: groupQuotes,
-              updatedAt: nowCycle,
+              updatedAt: groupUpdatedAt,
             });
           }
 
@@ -713,6 +903,9 @@ export class ScraperEngine {
             const impliedProbSum = bestLegs.reduce((acc, l) => acc + 1 / l.odds, 0);
             const rating = round2((1 / impliedProbSum) * 100);
             if (rating >= 75 && rating <= 118) {
+              const legAges = bestLegs.map(
+                (l) => dedupQuotes.get(`${l.selectionKey}|${l.bookmakerId}`)?.updatedAt ?? nowCycle
+              );
               dutcherRows.push({
                 id: `dutch|${g.eventKey}|${marketType}`,
                 eventKey: g.eventKey,
@@ -726,7 +919,7 @@ export class ScraperEngine {
                 impliedProbSum: Math.round(impliedProbSum * 10000) / 10000,
                 rating,
                 isSurebet: rating >= 100,
-                updatedAt: nowCycle,
+                updatedAt: Math.min(...legAges),
               });
             }
           }
@@ -1132,6 +1325,9 @@ export class ScraperEngine {
                   ? 'NoGoal (No)'
                   : bSel.label;
 
+              const bkScrapedAt = bk.market.scrapedAt || Date.now();
+              const exScrapedAt = ex.market.scrapedAt || Date.now();
+
               oddsmatcherRows.push({
                 id: rowId,
                 eventKey: g.eventKey,
@@ -1149,12 +1345,25 @@ export class ScraperEngine {
                 bookmakerName: bk.market.sourceName,
                 bookmakerColor: bkMeta?.color ?? '#3b82f6',
                 bookmakerUrl: bk.market.eventUrl ?? bkMeta?.url,
+                bookmakerEventId: bk.market.eventId,
+                bookmakerMarketId: bk.market.sourceMarketId,
+                bookmakerMetadata: bk.market.sourceMetadata,
+                bookmakerSwapped: bk.swapped,
+                bookmakerScrapedAt: bkScrapedAt,
+                bookmakerCacheAgeSec: bk.market.cacheAgeSec ?? 0,
+                bookmakerIsAggregator: Boolean(bk.market.isAggregator),
                 backOdds: bSel.backOdds,
                 backDelta,
                 exchangeId: ex.market.sourceId,
                 exchangeName: ex.market.sourceName,
                 exchangeColor: exMeta?.color ?? '#ffb80c',
                 exchangeUrl: ex.market.eventUrl ?? exMeta?.url,
+                exchangeEventId: ex.market.eventId,
+                exchangeMarketId: ex.market.sourceMarketId,
+                exchangeMetadata: ex.market.sourceMetadata,
+                exchangeSwapped: ex.swapped,
+                exchangeScrapedAt: exScrapedAt,
+                exchangeCacheAgeSec: ex.market.cacheAgeSec ?? 0,
                 layOdds: eSel.layOdds,
                 layDelta,
                 liquidity: round2(eSel.layLiquidity ?? 0),
@@ -1163,7 +1372,7 @@ export class ScraperEngine {
                 ratingSnr: ratings.ratingSnr,
                 rawRating: ratings.rawRating,
                 isSurebet: ratings.isSurebet,
-                updatedAt: Date.now(),
+                updatedAt: Math.min(bkScrapedAt, exScrapedAt),
               });
             }
           }
@@ -1215,6 +1424,7 @@ export class ScraperEngine {
     const includeLive = settings.includeLiveEvents;
     let hadRateLimit = false;
     const targetedRaw: RawScrapedMarket[] = [];
+    const succeededSources = new Set<SourceId>();
 
     const runSilent = async (
       id: SourceId,
@@ -1223,10 +1433,12 @@ export class ScraperEngine {
       const st = this.sourceStatuses.get(id);
       try {
         const { markets, latencyMs } = await fn();
+        succeededSources.add(id);
         if (st) {
           st.state = 'ok';
           st.latencyMs = latencyMs;
           st.lastScrapedAt = Date.now();
+          st.lastCacheAgeSec = maxMarketCacheAgeSec(markets);
           st.successCount += 1;
         }
         return markets;
@@ -1310,11 +1522,13 @@ export class ScraperEngine {
             const out: RawScrapedMarket[] = [];
             for (const id of admIds) {
               const mkts = marketsBySource.get(id) ?? [];
+              succeededSources.add(id);
               const st = this.sourceStatuses.get(id);
               if (st) {
                 st.state = 'ok';
                 st.latencyMs = latencyMs;
                 st.lastScrapedAt = Date.now();
+                st.lastCacheAgeSec = maxMarketCacheAgeSec(mkts);
                 st.successCount += 1;
               }
               out.push(...mkts);
@@ -1352,6 +1566,9 @@ export class ScraperEngine {
       const settled = await Promise.all(tasks);
       for (const chunk of settled) targetedRaw.push(...chunk);
 
+      // Re-sync exchange quotes if targeted cycle took >4s
+      await this.resyncStaleExchangeQuotes(targetedRaw, includeLive);
+
       const groups = linkScrapedMarkets(targetedRaw);
       const nextOddsCache = new Map(this.previousOdds);
       const targetedRows = this.buildOddsmatcherRowsFromGroups(groups, settings, nextOddsCache);
@@ -1361,11 +1578,31 @@ export class ScraperEngine {
       const freshTriples = new Set(
         targetedRows.map((r) => `${r.eventKey}|${r.bookmakerId}|${r.exchangeId}`)
       );
-      const preserved = this.lastSnapshot.rows.filter(
-        (r) =>
-          !freshIds.has(r.id) &&
-          !freshTriples.has(`${r.eventKey}|${r.bookmakerId}|${r.exchangeId}`)
-      );
+      const hasEventHints = Boolean(plan.eventHints && plan.eventHints.length > 0);
+      const sportScope =
+        plan.sports && plan.sports.length > 0 ? new Set<SportKey>(plan.sports) : null;
+      const nowMs = Date.now();
+
+      const preserved = this.lastSnapshot.rows.filter((r) => {
+        if (freshIds.has(r.id)) return false;
+        if (freshTriples.has(`${r.eventKey}|${r.bookmakerId}|${r.exchangeId}`)) return false;
+        // Evict already-started matches when live events are disabled
+        if (!includeLive && Date.parse(r.startTime) < nowMs - 30_000) return false;
+        // Evict ghost/suspended rows whose bookmaker+exchange pair was freshly re-scraped in scope
+        if (succeededSources.has(r.bookmakerId) && succeededSources.has(r.exchangeId)) {
+          const inSportScope = !sportScope || sportScope.has(r.sport);
+          const inDateScope = !plan.dateWindow || matchesScrapeDateWindow(r.startTime, plan.dateWindow);
+          if (inSportScope && inDateScope) {
+            if (
+              !hasEventHints ||
+              matchesEventHints(r.eventName, r.homeTeam, r.awayTeam, r.sport, plan.eventHints)
+            ) {
+              return false;
+            }
+          }
+        }
+        return true;
+      });
       const merged = [...preserved, ...targetedRows].sort(
         (a, b) => b.ratingNormal - a.ratingNormal || b.liquidity - a.liquidity
       );
@@ -1409,5 +1646,595 @@ export class ScraperEngine {
     } finally {
       this.isTargetedRunning = false;
     }
+  }
+
+  private async verifyBookmakerQuote(params: {
+    sourceId: SourceId;
+    sport: SportKey;
+    eventId?: string;
+    marketId?: string;
+    metadata?: Record<string, string>;
+    swapped?: boolean;
+    homeTeam: string;
+    awayTeam: string;
+    startTime: string;
+    marketType: MarketType;
+    selectionKey: string;
+    previousOdds: number;
+    includeLive: boolean;
+  }): Promise<LiveVerifySideResult> {
+    const started = Date.now();
+    const rawKey = unswapSelectionKey(params.selectionKey, params.swapped);
+
+    if (params.sourceId === 'the_odds_api') {
+      return {
+        status: 'skipped',
+        previousOdds: params.previousOdds,
+        checkedAt: Date.now(),
+        latencyMs: 0,
+        isAggregator: true,
+      };
+    }
+
+    try {
+      // 1. Kambi brands (888sport, LeoVegas, Unibet, Paf) — ~50-150ms single event
+      const kambiSpec = KAMBI_BRANDS[params.sourceId];
+      if (kambiSpec) {
+        if (!params.eventId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { market, latencyMs, cacheAgeSec } = await verifyKambiEvent({
+          spec: kambiSpec,
+          eventId: params.eventId,
+          sport: params.sport,
+          marketType: params.marketType,
+          includeLive: params.includeLive,
+        });
+        const sel = market?.selections.find((s) => s.canonicalKey === rawKey);
+        if (!sel?.backOdds || sel.backOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const changed = Math.abs(sel.backOdds - params.previousOdds) >= 0.005;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: sel.backOdds,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      // 2. Betfair Sportsbook IT — ~150ms single market
+      if (params.sourceId === 'betfair_sportsbook') {
+        if (!params.marketId || !params.metadata) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { isOpen, oddsByKey, latencyMs, cacheAgeSec } = await verifyBetfairSportsbookMarket({
+          marketId: params.marketId,
+          selectionIdsByKey: params.metadata,
+          includeLive: params.includeLive,
+        });
+        const liveOdds = oddsByKey[rawKey];
+        if (!isOpen || !liveOdds || liveOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const changed = Math.abs(liveOdds - params.previousOdds) >= 0.005;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      // 3. Italian ADM bookmakers (Sisal, SNAI, Betflag, Eurobet, GoldBet) — ~180ms cache-busted GraphQL
+      if (ADM_BATCH_SOURCES.has(params.sourceId)) {
+        if (!params.eventId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+            isAggregator: true,
+          };
+        }
+        const { market, latencyMs, cacheAgeSec } = await verifyItalianAdmEvent({
+          sourceId: params.sourceId,
+          eventId: params.eventId,
+          sport: params.sport,
+          marketType: params.marketType,
+          homeTeam: params.homeTeam,
+          awayTeam: params.awayTeam,
+          startTime: params.startTime,
+          homeParticipantId: params.metadata?.homeParticipantId,
+          awayParticipantId: params.metadata?.awayParticipantId,
+        });
+        const sel = market?.selections.find((s) => s.canonicalKey === rawKey);
+        if (!sel?.backOdds || sel.backOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+            isAggregator: true,
+          };
+        }
+        const changed = Math.abs(sel.backOdds - params.previousOdds) >= 0.005;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: sel.backOdds,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+          isAggregator: true,
+        };
+      }
+
+      // 4. Pinnacle — public feed with transparent Cloudflare Age reporting
+      if (params.sourceId === 'pinnacle') {
+        if (!params.eventId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { isOpen, oddsByKey, latencyMs, cacheAgeSec } = await verifyPinnacleMarket({
+          sport: params.sport,
+          matchupId: params.eventId,
+          marketType: params.marketType,
+          includeLive: params.includeLive,
+        });
+        const liveOdds = oddsByKey[rawKey];
+        if (!isOpen || !liveOdds || liveOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const changed = Math.abs(liveOdds - params.previousOdds) >= 0.005;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      return {
+        status: 'skipped',
+        previousOdds: params.previousOdds,
+        checkedAt: Date.now(),
+        latencyMs: Date.now() - started,
+      };
+    } catch (err) {
+      return {
+        status: 'error',
+        previousOdds: params.previousOdds,
+        checkedAt: Date.now(),
+        latencyMs: Date.now() - started,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  private async verifyExchangeQuote(params: {
+    sourceId: SourceId;
+    sport: SportKey;
+    eventId?: string;
+    marketId?: string;
+    metadata?: Record<string, string>;
+    swapped?: boolean;
+    homeTeam: string;
+    awayTeam: string;
+    startTime: string;
+    marketType: MarketType;
+    selectionKey: string;
+    previousOdds: number;
+    previousLiquidity: number;
+    includeLive: boolean;
+  }): Promise<LiveVerifySideResult> {
+    const started = Date.now();
+    const rawKey = unswapSelectionKey(params.selectionKey, params.swapped);
+
+    try {
+      // 1. Betfair Exchange IT — ~150ms direct ERO bymarket
+      if (params.sourceId === 'betfair_exchange') {
+        if (!params.marketId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            previousLiquidity: params.previousLiquidity,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { marketsByMarketId, latencyMs, cacheAgeSec } = await refreshBetfairExchangeMarkets({
+          marketIds: [params.marketId],
+          includeLive: params.includeLive,
+        });
+        const market = marketsByMarketId.get(params.marketId);
+        const sel = market?.selections.find((s) => s.canonicalKey === rawKey);
+        if (!sel?.layOdds || sel.layOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            previousLiquidity: params.previousLiquidity,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const liveLiq = round2(sel.layLiquidity ?? 0);
+        const changed =
+          Math.abs(sel.layOdds - params.previousOdds) >= 0.005 ||
+          Math.abs(liveLiq - params.previousLiquidity) >= 1;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: sel.layOdds,
+          previousLiquidity: params.previousLiquidity,
+          liveLiquidity: liveLiq,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      // 2. Smarkets Exchange — ~130ms direct /markets/{id}/quotes/
+      if (params.sourceId === 'smarkets_exchange') {
+        const contractId = params.metadata?.[`cid_${rawKey}`];
+        if (!params.marketId || !contractId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            previousLiquidity: params.previousLiquidity,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { quotesByContractId, latencyMs, cacheAgeSec } = await refreshSmarketsQuotesByMarkets(
+          { marketIds: [params.marketId] }
+        );
+        const prices = extractBestSmarketsPrices(quotesByContractId[contractId]);
+        if (!prices.layOdds || prices.layOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            previousLiquidity: params.previousLiquidity,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const liveLiq = round2(prices.layLiquidity ?? 0);
+        const changed =
+          Math.abs(prices.layOdds - params.previousOdds) >= 0.005 ||
+          Math.abs(liveLiq - params.previousLiquidity) >= 1;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: prices.layOdds,
+          previousLiquidity: params.previousLiquidity,
+          liveLiquidity: liveLiq,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      // 3. Betflag Exchange IT — ~180ms direct colloddsbetsevent
+      if (params.sourceId === 'betflag_exchange') {
+        if (!params.eventId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            previousLiquidity: params.previousLiquidity,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { market, latencyMs, cacheAgeSec } = await verifyBetflagExchangeEvent({
+          matchId: params.eventId,
+          sport: params.sport,
+          marketType: params.marketType,
+          homeTeam: params.homeTeam,
+          awayTeam: params.awayTeam,
+          startTime: params.startTime,
+        });
+        const sel = market?.selections.find((s) => s.canonicalKey === rawKey);
+        if (!sel?.layOdds || sel.layOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            previousLiquidity: params.previousLiquidity,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const liveLiq = round2(sel.layLiquidity ?? 0);
+        const changed =
+          Math.abs(sel.layOdds - params.previousOdds) >= 0.005 ||
+          Math.abs(liveLiq - params.previousLiquidity) >= 1;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: sel.layOdds,
+          previousLiquidity: params.previousLiquidity,
+          liveLiquidity: liveLiq,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      return {
+        status: 'skipped',
+        previousOdds: params.previousOdds,
+        previousLiquidity: params.previousLiquidity,
+        checkedAt: Date.now(),
+        latencyMs: Date.now() - started,
+      };
+    } catch (err) {
+      return {
+        status: 'error',
+        previousOdds: params.previousOdds,
+        previousLiquidity: params.previousLiquidity,
+        checkedAt: Date.now(),
+        latencyMs: Date.now() - started,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * Instant (~150-450ms) parallel live verification for a single Oddsmatcher row
+   * (bookmaker + exchange simultaneously) and live patch back into the snapshot.
+   */
+  public async verifyRowQuotes(
+    settings: AppSettings,
+    req: VerifyRowQuotesRequest
+  ): Promise<VerifyRowQuotesResult> {
+    const started = Date.now();
+    const existingRow = this.lastSnapshot.rows.find((r) => r.id === req.rowId);
+
+    const [bookmaker, exchange] = await Promise.all([
+      this.verifyBookmakerQuote({
+        sourceId: req.bookmakerId,
+        sport: req.sport,
+        eventId: req.bookmakerEventId ?? existingRow?.bookmakerEventId,
+        marketId: req.bookmakerMarketId ?? existingRow?.bookmakerMarketId,
+        metadata: req.bookmakerMetadata ?? existingRow?.bookmakerMetadata,
+        swapped: req.bookmakerSwapped ?? existingRow?.bookmakerSwapped,
+        homeTeam: req.homeTeam,
+        awayTeam: req.awayTeam,
+        startTime: req.startTime,
+        marketType: req.marketType,
+        selectionKey: req.selectionKey,
+        previousOdds: req.previousBackOdds,
+        includeLive: settings.includeLiveEvents,
+      }),
+      this.verifyExchangeQuote({
+        sourceId: req.exchangeId,
+        sport: req.sport,
+        eventId: req.exchangeEventId ?? existingRow?.exchangeEventId,
+        marketId: req.exchangeMarketId ?? existingRow?.exchangeMarketId,
+        metadata: req.exchangeMetadata ?? existingRow?.exchangeMetadata,
+        swapped: req.exchangeSwapped ?? existingRow?.exchangeSwapped,
+        homeTeam: req.homeTeam,
+        awayTeam: req.awayTeam,
+        startTime: req.startTime,
+        marketType: req.marketType,
+        selectionKey: req.selectionKey,
+        previousOdds: req.previousLayOdds,
+        previousLiquidity: req.previousLiquidity,
+        includeLive: settings.includeLiveEvents,
+      }),
+    ]);
+
+    const verifiedAt = Date.now();
+    let updatedRow: OddsmatcherRow | undefined;
+
+    if (existingRow) {
+      if (bookmaker.status === 'suspended' || exchange.status === 'suspended') {
+        const nextRows = this.lastSnapshot.rows.filter((r) => r.id !== req.rowId);
+        this.lastSnapshot = {
+          ...this.lastSnapshot,
+          rows: nextRows,
+          stats: {
+            ...this.lastSnapshot.stats,
+            totalMatchesCount: nextRows.length,
+            surebetsCount: nextRows.filter((r) => r.isSurebet).length,
+          },
+        };
+        this.onUpdate?.(this.lastSnapshot);
+      } else if (bookmaker.liveOdds || exchange.liveOdds) {
+        const nextBack = bookmaker.liveOdds ?? existingRow.backOdds;
+        const nextLay = exchange.liveOdds ?? existingRow.layOdds;
+        const nextLiq =
+          exchange.liveLiquidity !== undefined ? exchange.liveLiquidity : existingRow.liquidity;
+        const nextBkAt =
+          bookmaker.status === 'confirmed' || bookmaker.status === 'changed'
+            ? bookmaker.checkedAt
+            : existingRow.bookmakerScrapedAt ?? existingRow.updatedAt;
+        const nextExAt =
+          exchange.status === 'confirmed' || exchange.status === 'changed'
+            ? exchange.checkedAt
+            : existingRow.exchangeScrapedAt ?? existingRow.updatedAt;
+
+        const ratings = quickRatings(nextBack, nextLay, existingRow.commission);
+        const backDelta: OddsDelta =
+          nextBack > existingRow.backOdds + 0.001
+            ? 'up'
+            : nextBack < existingRow.backOdds - 0.001
+            ? 'down'
+            : 'same';
+        const layDelta: OddsDelta =
+          nextLay > existingRow.layOdds + 0.001
+            ? 'up'
+            : nextLay < existingRow.layOdds - 0.001
+            ? 'down'
+            : 'same';
+
+        updatedRow = {
+          ...existingRow,
+          backOdds: nextBack,
+          backDelta,
+          layOdds: nextLay,
+          layDelta,
+          liquidity: nextLiq,
+          ratingNormal: ratings.ratingNormal,
+          ratingSnr: ratings.ratingSnr,
+          rawRating: ratings.rawRating,
+          isSurebet: ratings.isSurebet,
+          bookmakerScrapedAt: nextBkAt,
+          bookmakerCacheAgeSec: bookmaker.cacheAgeSec ?? existingRow.bookmakerCacheAgeSec,
+          exchangeScrapedAt: nextExAt,
+          exchangeCacheAgeSec: exchange.cacheAgeSec ?? existingRow.exchangeCacheAgeSec,
+          updatedAt: Math.min(nextBkAt, nextExAt),
+        };
+
+        this.previousOdds.set(existingRow.id, { back: nextBack, lay: nextLay });
+        const nextRows = this.lastSnapshot.rows.map((r) =>
+          r.id === existingRow.id ? updatedRow! : r
+        );
+        this.lastSnapshot = {
+          ...this.lastSnapshot,
+          rows: nextRows,
+          stats: {
+            ...this.lastSnapshot.stats,
+            surebetsCount: nextRows.filter((r) => r.isSurebet).length,
+          },
+        };
+        this.onUpdate?.(this.lastSnapshot);
+      }
+    }
+
+    return {
+      rowId: req.rowId,
+      verifiedAt,
+      durationMs: verifiedAt - started,
+      bookmaker,
+      exchange,
+      updatedRow,
+    };
+  }
+
+  /**
+   * Instant (~150-450ms) parallel live verification for all legs of a Punta-Punta matchup.
+   */
+  public async verifyPuntaPunta(
+    settings: AppSettings,
+    req: VerifyPuntaPuntaRequest
+  ): Promise<VerifyPuntaPuntaResult> {
+    const started = Date.now();
+    const existingGroup = (this.lastSnapshot.backMarketGroups ?? []).find(
+      (g) => g.id === req.groupId
+    );
+
+    const legResults = await Promise.all(
+      req.legs.map(async (leg) => {
+        const existingQuote = existingGroup?.quotes.find(
+          (q) => q.selectionKey === leg.selectionKey && q.bookmakerId === leg.bookmakerId
+        );
+        const result = await this.verifyBookmakerQuote({
+          sourceId: leg.bookmakerId,
+          sport: req.sport,
+          eventId: leg.eventId ?? existingQuote?.eventId,
+          marketId: leg.marketId ?? existingQuote?.marketId,
+          metadata: leg.sourceMetadata ?? existingQuote?.sourceMetadata,
+          swapped: leg.swapped ?? existingQuote?.swapped,
+          homeTeam: req.homeTeam,
+          awayTeam: req.awayTeam,
+          startTime: req.startTime,
+          marketType: req.marketType,
+          selectionKey: leg.selectionKey,
+          previousOdds: leg.previousOdds,
+          includeLive: settings.includeLiveEvents,
+        });
+        return {
+          selectionKey: leg.selectionKey,
+          bookmakerId: leg.bookmakerId,
+          result,
+        };
+      })
+    );
+
+    if (existingGroup && this.lastSnapshot.backMarketGroups) {
+      let mutated = false;
+      const nextQuotes = existingGroup.quotes.map((q) => {
+        const matched = legResults.find(
+          (lr) => lr.selectionKey === q.selectionKey && lr.bookmakerId === q.bookmakerId
+        );
+        if (matched?.result.liveOdds) {
+          mutated = true;
+          return {
+            ...q,
+            odds: matched.result.liveOdds,
+            cacheAgeSec: matched.result.cacheAgeSec ?? q.cacheAgeSec,
+            updatedAt: matched.result.checkedAt,
+          };
+        }
+        return q;
+      });
+      if (mutated) {
+        const nextGroups = this.lastSnapshot.backMarketGroups.map((g) =>
+          g.id === existingGroup.id
+            ? {
+                ...g,
+                quotes: nextQuotes,
+                updatedAt: Math.min(...nextQuotes.map((q) => q.updatedAt)),
+              }
+            : g
+        );
+        this.lastSnapshot = {
+          ...this.lastSnapshot,
+          backMarketGroups: nextGroups,
+        };
+        this.onUpdate?.(this.lastSnapshot);
+      }
+    }
+
+    const verifiedAt = Date.now();
+    return {
+      groupId: req.groupId,
+      verifiedAt,
+      durationMs: verifiedAt - started,
+      legs: legResults,
+    };
   }
 }

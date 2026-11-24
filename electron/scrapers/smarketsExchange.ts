@@ -6,8 +6,14 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, isAbortError, sleep, throwIfAborted } from './httpClient';
-import { matchesEventHints } from './matchLinker';
+import {
+  computeEffectiveScrapedAt,
+  fetchJson,
+  isAbortError,
+  sleep,
+  throwIfAborted,
+} from './httpClient';
+import { matchesEventHints, teamSimilarity } from './matchLinker';
 
 const SM_BASE = 'https://api.smarkets.com/v3';
 
@@ -33,16 +39,55 @@ interface SmContract {
   market_id: string;
   name: string;
   slug?: string;
+  display_order?: number;
+  hidden?: boolean;
+  state_or_outcome?: string;
+  contract_type?: { name?: string };
 }
 
-interface SmQuoteSide {
+export interface SmQuoteSide {
   price: number; // basis points 1..9999 -> decimal odds = 10000 / price
   quantity: number; // payout in 1/10000 of currency
 }
 
-interface SmQuote {
+export interface SmQuote {
   bids?: SmQuoteSide[]; // user can LAY against bids
   offers?: SmQuoteSide[]; // user can BACK against offers
+}
+
+export function extractBestSmarketsPrices(q: SmQuote | undefined): {
+  backOdds?: number;
+  backLiquidity?: number;
+  layOdds?: number;
+  layLiquidity?: number;
+} {
+  if (!q) return {};
+  // Best bid (user lays against it) = HIGHEST price (bps) => LOWEST decimal lay odds
+  let bestBid: SmQuoteSide | undefined;
+  for (const b of q.bids ?? []) {
+    if (!Number.isFinite(b.price) || b.price <= 0 || b.price >= 10000) continue;
+    if (!Number.isFinite(b.quantity) || b.quantity <= 0) continue;
+    if (!bestBid || b.price > bestBid.price) bestBid = b;
+  }
+
+  // Best offer (user backs against it) = LOWEST price (bps) => HIGHEST decimal back odds
+  let bestOffer: SmQuoteSide | undefined;
+  for (const o of q.offers ?? []) {
+    if (!Number.isFinite(o.price) || o.price <= 0 || o.price >= 10000) continue;
+    if (!Number.isFinite(o.quantity) || o.quantity <= 0) continue;
+    if (!bestOffer || o.price < bestOffer.price) bestOffer = o;
+  }
+
+  const layOdds = bestBid ? Math.round((10000 / bestBid.price) * 100) / 100 : undefined;
+  const layLiquidity = bestBid
+    ? Math.round((bestBid.quantity / 10000) * (bestBid.price / 10000) * 100) / 100
+    : undefined;
+  const backOdds = bestOffer ? Math.round((10000 / bestOffer.price) * 100) / 100 : undefined;
+  const backLiquidity = bestOffer
+    ? Math.round((bestOffer.quantity / 10000) * (bestOffer.price / 10000) * 100) / 100
+    : undefined;
+
+  return { backOdds, backLiquidity, layOdds, layLiquidity };
 }
 
 function splitTeams(name: string): [string, string] | null {
@@ -80,30 +125,57 @@ function parseSmMarketType(
 }
 
 function mapContract(
+  sport: SportKey,
   marketType: MarketType,
-  cName: string,
+  c: SmContract,
   idx: number,
   home: string,
   away: string
 ): { key: string; label: string } | null {
-  const low = cName.trim().toLowerCase();
+  const cType = (c.contract_type?.name ?? '').trim().toUpperCase();
+  const slug = (c.slug ?? '').trim().toLowerCase();
+  const cName = c.name.trim();
+  const low = cName.toLowerCase();
+
   if (marketType === '1X2') {
-    if (low === 'draw' || low === 'pareggio') return { key: 'DRAW', label: 'Pareggio (X)' };
-    if (low === home.toLowerCase() || idx === 0) return { key: 'HOME', label: `${home} (1)` };
+    if (cType === 'DRAW' || slug === 'draw' || low === 'draw' || low === 'pareggio') {
+      return { key: 'DRAW', label: 'Pareggio (X)' };
+    }
+    if (cType === 'HOME' || slug === 'home') return { key: 'HOME', label: `${home} (1)` };
+    if (cType === 'AWAY' || slug === 'away') return { key: 'AWAY', label: `${away} (2)` };
+    if (low === home.toLowerCase()) return { key: 'HOME', label: `${home} (1)` };
+    if (low === away.toLowerCase()) return { key: 'AWAY', label: `${away} (2)` };
+    const simH = teamSimilarity(cName, home, sport);
+    const simA = teamSimilarity(cName, away, sport);
+    if (simH >= 0.65 && simH > simA + 0.08) return { key: 'HOME', label: `${home} (1)` };
+    if (simA >= 0.65 && simA > simH + 0.08) return { key: 'AWAY', label: `${away} (2)` };
+    if (idx === 0) return { key: 'HOME', label: `${home} (1)` };
     return { key: 'AWAY', label: `${away} (2)` };
   }
   if (marketType === 'H2H') {
-    if (low === home.toLowerCase() || idx === 0) return { key: 'HOME', label: `${home} (1)` };
+    if (cType === 'HOME' || slug === 'home') return { key: 'HOME', label: `${home} (1)` };
+    if (cType === 'AWAY' || slug === 'away') return { key: 'AWAY', label: `${away} (2)` };
+    if (low === home.toLowerCase()) return { key: 'HOME', label: `${home} (1)` };
+    if (low === away.toLowerCase()) return { key: 'AWAY', label: `${away} (2)` };
+    const simH = teamSimilarity(cName, home, sport);
+    const simA = teamSimilarity(cName, away, sport);
+    if (simH >= 0.65 && simH > simA + 0.08) return { key: 'HOME', label: `${home} (1)` };
+    if (simA >= 0.65 && simA > simH + 0.08) return { key: 'AWAY', label: `${away} (2)` };
+    if (cType === 'PLAYER_A' || idx === 0) return { key: 'HOME', label: `${home} (1)` };
     return { key: 'AWAY', label: `${away} (2)` };
   }
   if (marketType === 'OVER_UNDER_25') {
-    if (low.includes('over')) return { key: 'OVER_25', label: 'Over 2.5' };
-    if (low.includes('under')) return { key: 'UNDER_25', label: 'Under 2.5' };
+    if (cType === 'OVER' || slug === 'over' || low.includes('over'))
+      return { key: 'OVER_25', label: 'Over 2.5' };
+    if (cType === 'UNDER' || slug === 'under' || low.includes('under'))
+      return { key: 'UNDER_25', label: 'Under 2.5' };
     return null;
   }
   if (marketType === 'BTTS') {
-    if (low === 'yes') return { key: 'BTTS_YES', label: 'Goal (Sì)' };
-    if (low === 'no') return { key: 'BTTS_NO', label: 'NoGoal (No)' };
+    if (cType === 'YES' || slug === 'yes' || low === 'yes')
+      return { key: 'BTTS_YES', label: 'Goal (Sì)' };
+    if (cType === 'NO' || slug === 'no' || low === 'no')
+      return { key: 'BTTS_NO', label: 'NoGoal (No)' };
     return null;
   }
   return null;
@@ -207,6 +279,7 @@ export async function scrapeSmarketsExchange(
 
       const events = rawEvents.filter((e) => {
         if (!e.start_datetime) return false;
+        if (!includeLive && new Date(e.start_datetime).getTime() < nowMs - 60_000) return false;
         if (dateWindow && !matchesScrapeDateWindow(e.start_datetime, dateWindow)) return false;
         const teams = splitTeams(e.name);
         if (!teams) return false;
@@ -256,7 +329,7 @@ export async function scrapeSmarketsExchange(
         const slice = selectedMarkets.slice(i, i + 30);
         const mIds = slice.map((s) => s.market.id).join(',');
 
-        const [{ data: cResp }, { data: qResp }] = await Promise.all([
+        const [{ data: cResp }, { data: qResp, cacheAgeSec }] = await Promise.all([
           fetchJson<{ contracts?: SmContract[] }>(`${SM_BASE}/markets/${mIds}/contracts/`, {
             timeoutMs: 12000,
             signal,
@@ -269,51 +342,59 @@ export async function scrapeSmarketsExchange(
 
         const contractsByMarket = new Map<string, SmContract[]>();
         for (const c of cResp.contracts ?? []) {
+          if (c.hidden) continue;
+          if (c.state_or_outcome && c.state_or_outcome !== 'open') continue;
           const arr = contractsByMarket.get(String(c.market_id)) ?? [];
           arr.push(c);
           contractsByMarket.set(String(c.market_id), arr);
         }
+
+        const scrapedAt = computeEffectiveScrapedAt(Date.now(), cacheAgeSec);
 
         for (const { market, mapped } of slice) {
           const ev = eventById.get(String(market.event_id));
           if (!ev) continue;
           const teams = splitTeams(ev.name);
           if (!teams) continue;
-          const [homeTeam, awayTeam] = teams;
+          let [homeTeam, awayTeam] = teams;
 
-          const contracts = contractsByMarket.get(String(market.id)) ?? [];
+          const contracts = [...(contractsByMarket.get(String(market.id)) ?? [])].sort(
+            (a, b) => (a.display_order ?? 0) - (b.display_order ?? 0)
+          );
+
+          // On US sports (NBA/NCAA), Smarkets lists "Away vs Home" with AWAY at display_order=0 and HOME at 100.
+          // Align homeTeam/awayTeam directly to explicit HOME/AWAY contract names so keys & team names always match!
+          if (mapped.marketType === '1X2' || mapped.marketType === 'H2H') {
+            const cHome = contracts.find(
+              (c) =>
+                (c.contract_type?.name ?? '').toUpperCase() === 'HOME' ||
+                (c.slug ?? '').toLowerCase() === 'home'
+            );
+            const cAway = contracts.find(
+              (c) =>
+                (c.contract_type?.name ?? '').toUpperCase() === 'AWAY' ||
+                (c.slug ?? '').toLowerCase() === 'away'
+            );
+            if (cHome?.name?.trim() && cAway?.name?.trim()) {
+              homeTeam = cHome.name.trim();
+              awayTeam = cAway.name.trim();
+            }
+          }
+
           const selections: SelectionQuote[] = [];
+          const contractMeta: Record<string, string> = {};
+          const usedKeys = new Set<string>();
 
           contracts.forEach((c, idx) => {
             const q = qResp[String(c.id)];
-            if (!q) return;
-
-            const bestBid = q.bids?.[0]; // User lays against bids
-            const bestOffer = q.offers?.[0]; // User backs against offers
-
-            const layOdds =
-              bestBid && bestBid.price > 0
-                ? Math.round((10000 / bestBid.price) * 100) / 100
-                : undefined;
-            const layLiquidity =
-              bestBid && bestBid.price > 0
-                ? Math.round(((bestBid.quantity / 10000) * (bestBid.price / 10000)) * 100) / 100
-                : undefined;
-
-            const backOdds =
-              bestOffer && bestOffer.price > 0
-                ? Math.round((10000 / bestOffer.price) * 100) / 100
-                : undefined;
-            const backLiquidity =
-              bestOffer && bestOffer.price > 0
-                ? Math.round(((bestOffer.quantity / 10000) * (bestOffer.price / 10000)) * 100) /
-                  100
-                : undefined;
-
+            const { backOdds, backLiquidity, layOdds, layLiquidity } = extractBestSmarketsPrices(q);
             if (!layOdds && !backOdds) return;
-            const cInfo = mapContract(mapped.marketType, c.name, idx, homeTeam, awayTeam);
-            if (!cInfo) return;
 
+            const cInfo = mapContract(cfg.sport, mapped.marketType, c, idx, homeTeam, awayTeam);
+            if (!cInfo || usedKeys.has(cInfo.key)) return;
+
+            usedKeys.add(cInfo.key);
+            contractMeta[`cid_${cInfo.key}`] = String(c.id);
             selections.push({
               canonicalKey: cInfo.key,
               label: cInfo.label,
@@ -332,6 +413,8 @@ export async function scrapeSmarketsExchange(
               sport: cfg.sport,
               league: leagueFromSlug(ev.full_slug, cfg.sport),
               eventId: String(ev.id),
+              sourceMarketId: String(market.id),
+              sourceMetadata: contractMeta,
               eventName: `${homeTeam} - ${awayTeam}`,
               homeTeam,
               awayTeam,
@@ -342,11 +425,12 @@ export async function scrapeSmarketsExchange(
               eventUrl: ev.full_slug
                 ? `https://smarkets.com/event/${ev.id}${ev.full_slug}`
                 : 'https://smarkets.com/',
-              scrapedAt: Date.now(),
+              scrapedAt,
+              cacheAgeSec,
             });
           }
         }
-        if (i + 30 < selectedMarkets.length) await sleep(120, signal);
+        if (i + 30 < selectedMarkets.length) await sleep(160, signal);
       }
       succeededSports++;
     } catch (err) {
@@ -360,4 +444,61 @@ export async function scrapeSmarketsExchange(
   }
 
   return { markets, latencyMs: Date.now() - started };
+}
+
+/**
+ * Ultra-fast (~130-250ms) live quotes refresh for known Smarkets market IDs.
+ * Used for both end-of-cycle freshness sync and single-row live verification.
+ * Paced sequentially across batches so Smarkets API v3 never triggers HTTP 429.
+ */
+export async function refreshSmarketsQuotesByMarkets(params: {
+  marketIds: string[];
+  signal?: AbortSignal;
+}): Promise<{
+  quotesByContractId: Record<string, SmQuote>;
+  latencyMs: number;
+  cacheAgeSec: number;
+}> {
+  const started = Date.now();
+  const uniqueIds = Array.from(new Set(params.marketIds.filter(Boolean)));
+  const quotesByContractId: Record<string, SmQuote> = {};
+  if (uniqueIds.length === 0) {
+    return { quotesByContractId, latencyMs: 0, cacheAgeSec: 0 };
+  }
+
+  let maxCacheAgeSec = 0;
+  const batches: string[][] = [];
+  for (let i = 0; i < uniqueIds.length; i += 30) {
+    batches.push(uniqueIds.slice(i, i + 30));
+  }
+
+  for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+    const batch = batches[bIdx];
+    throwIfAborted(params.signal);
+    try {
+      const { data, cacheAgeSec } = await fetchJson<Record<string, SmQuote>>(
+        `${SM_BASE}/markets/${batch.join(',')}/quotes/`,
+        {
+          timeoutMs: 7000,
+          retries: 0,
+          signal: params.signal,
+        }
+      );
+      maxCacheAgeSec = Math.max(maxCacheAgeSec, cacheAgeSec);
+      if (data) Object.assign(quotesByContractId, data);
+    } catch (err) {
+      if (params.signal?.aborted || isAbortError(err)) throw err;
+      // Stop further resync batches immediately on 429 or transient error
+      break;
+    }
+    if (bIdx < batches.length - 1) {
+      await sleep(180, params.signal);
+    }
+  }
+
+  return {
+    quotesByContractId,
+    latencyMs: Date.now() - started,
+    cacheAgeSec: maxCacheAgeSec,
+  };
 }

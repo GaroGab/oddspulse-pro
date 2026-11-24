@@ -54,6 +54,10 @@ export interface RawScrapedMarket {
   sport: SportKey;
   league: string;
   eventId: string;
+  /** Optional provider-specific market identifier for ultra-fast direct live verification */
+  sourceMarketId?: string;
+  /** Optional provider-specific metadata (e.g. participant IDs) for direct verification */
+  sourceMetadata?: Record<string, string>;
   eventName: string;
   homeTeam: string;
   awayTeam: string;
@@ -62,7 +66,12 @@ export interface RawScrapedMarket {
   marketLabel: string;
   selections: SelectionQuote[];
   eventUrl?: string;
+  /** Effective data freshness timestamp (adjusted backwards by upstream HTTP Age header if cached) */
   scrapedAt: number;
+  /** Upstream CDN/proxy cache age in seconds reported via HTTP Age header (0 = real-time) */
+  cacheAgeSec?: number;
+  /** True when sourced through an odds aggregator (e.g. Diretta/Flashscore, Odds API) rather than the bookmaker directly */
+  isAggregator?: boolean;
 }
 
 export type OddsDelta = 'up' | 'down' | 'same';
@@ -84,12 +93,25 @@ export interface OddsmatcherRow {
   bookmakerName: string;
   bookmakerColor: string;
   bookmakerUrl?: string;
+  bookmakerEventId?: string;
+  bookmakerMarketId?: string;
+  bookmakerMetadata?: Record<string, string>;
+  bookmakerSwapped?: boolean;
+  bookmakerScrapedAt?: number;
+  bookmakerCacheAgeSec?: number;
+  bookmakerIsAggregator?: boolean;
   backOdds: number;
   backDelta: OddsDelta;
   exchangeId: SourceId;
   exchangeName: string;
   exchangeColor: string;
   exchangeUrl?: string;
+  exchangeEventId?: string;
+  exchangeMarketId?: string;
+  exchangeMetadata?: Record<string, string>;
+  exchangeSwapped?: boolean;
+  exchangeScrapedAt?: number;
+  exchangeCacheAgeSec?: number;
   layOdds: number;
   layDelta: OddsDelta;
   liquidity: number;
@@ -101,6 +123,7 @@ export interface OddsmatcherRow {
   /** Raw back/lay ratio % */
   rawRating: number;
   isSurebet: boolean;
+  /** Conservative freshness timestamp: oldest of bookmaker & exchange quotes */
   updatedAt: number;
 }
 
@@ -137,6 +160,12 @@ export interface BackOutcomeQuote {
   bookmakerName: string;
   odds: number;
   eventUrl?: string;
+  eventId?: string;
+  marketId?: string;
+  sourceMetadata?: Record<string, string>;
+  swapped?: boolean;
+  cacheAgeSec?: number;
+  isAggregator?: boolean;
   updatedAt: number;
 }
 
@@ -156,6 +185,91 @@ export interface BackMarketGroup {
   updatedAt: number;
 }
 
+export type LiveVerifySideStatus = 'confirmed' | 'changed' | 'suspended' | 'error' | 'skipped';
+
+export interface LiveVerifySideResult {
+  status: LiveVerifySideStatus;
+  previousOdds: number;
+  liveOdds?: number;
+  previousLiquidity?: number;
+  liveLiquidity?: number;
+  checkedAt: number;
+  latencyMs: number;
+  cacheAgeSec?: number;
+  isAggregator?: boolean;
+  error?: string;
+}
+
+export interface VerifyRowQuotesRequest {
+  rowId: string;
+  eventKey: string;
+  sport: SportKey;
+  eventName: string;
+  homeTeam: string;
+  awayTeam: string;
+  startTime: string;
+  marketType: MarketType;
+  selectionKey: string;
+  bookmakerId: SourceId;
+  bookmakerName: string;
+  bookmakerEventId?: string;
+  bookmakerMarketId?: string;
+  bookmakerMetadata?: Record<string, string>;
+  bookmakerSwapped?: boolean;
+  previousBackOdds: number;
+  exchangeId: SourceId;
+  exchangeName: string;
+  exchangeEventId?: string;
+  exchangeMarketId?: string;
+  exchangeMetadata?: Record<string, string>;
+  exchangeSwapped?: boolean;
+  previousLayOdds: number;
+  previousLiquidity: number;
+}
+
+export interface VerifyRowQuotesResult {
+  rowId: string;
+  verifiedAt: number;
+  durationMs: number;
+  bookmaker: LiveVerifySideResult;
+  exchange: LiveVerifySideResult;
+  updatedRow?: OddsmatcherRow;
+}
+
+export interface VerifyPuntaPuntaLegRequest {
+  selectionKey: string;
+  bookmakerId: SourceId;
+  bookmakerName: string;
+  eventId?: string;
+  marketId?: string;
+  sourceMetadata?: Record<string, string>;
+  swapped?: boolean;
+  previousOdds: number;
+}
+
+export interface VerifyPuntaPuntaRequest {
+  groupId: string;
+  eventKey: string;
+  sport: SportKey;
+  eventName: string;
+  homeTeam: string;
+  awayTeam: string;
+  startTime: string;
+  marketType: MarketType;
+  legs: VerifyPuntaPuntaLegRequest[];
+}
+
+export interface VerifyPuntaPuntaResult {
+  groupId: string;
+  verifiedAt: number;
+  durationMs: number;
+  legs: Array<{
+    selectionKey: string;
+    bookmakerId: SourceId;
+    result: LiveVerifySideResult;
+  }>;
+}
+
 export interface SourceStatus {
   id: SourceId;
   name: string;
@@ -168,6 +282,7 @@ export interface SourceStatus {
   eventsCount: number;
   marketsCount: number;
   lastScrapedAt: number | null;
+  lastCacheAgeSec?: number;
   lastError: string | null;
   successCount: number;
   errorCount: number;

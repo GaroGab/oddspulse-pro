@@ -45,13 +45,26 @@ const TEAM_ALIASES: Record<string, string> = {
   augusta: 'augsburg',
   'st pauli': 'st pauli',
   siviglia: 'sevilla',
+  'real madrid': 'real madrid',
+  'real madrid cf': 'real madrid',
   'atletico madrid': 'atletico madrid',
+  'atletico de madrid': 'atletico madrid',
+  'club atletico madrid': 'atletico madrid',
+  'club atletico de madrid': 'atletico madrid',
   'atl madrid': 'atletico madrid',
   'real betis': 'betis',
+  'real betis balompie': 'betis',
   'betis siviglia': 'betis',
+  'real valladolid': 'valladolid',
+  'real mallorca': 'mallorca',
+  'real oviedo': 'oviedo',
+  'real zaragoza': 'zaragoza',
+  'barcellona': 'barcelona',
+  'fc barcelona': 'barcelona',
   'athletic bilbao': 'athletic club',
   bilbao: 'athletic club',
   'celta vigo': 'celta',
+  'celta de vigo': 'celta',
   maiorka: 'mallorca',
   maiorca: 'mallorca',
   marsiglia: 'marseille',
@@ -115,10 +128,64 @@ const TEAM_ALIASES: Record<string, string> = {
 const NOISE_TOKENS = new Set([
   'fc', 'cf', 'sc', 'ac', 'as', 'us', 'ss', 'ssc', 'afc', 'bc', 'bk', 'fk', 'sk',
   'sv', 'tsv', 'vfb', 'vfl', 'fsv', 'bsc', 'tsg', 'cd', 'rc', 'rcd', 'sd', 'ud',
-  'ca', 'de', 'la', 'el', 'the', 'calcio', 'club', 'sporting', 'atletico', 'real',
+  'ca', 'de', 'la', 'el', 'the', 'calcio', 'club', 'sporting',
   'asd', 'ssd', 'uc', '1', '04', '05', '09', '1899', '1900', '1907', '1909', '1912',
-  '1929', 'ii', 'b',
+  '1929',
 ]);
+
+interface TeamCategory {
+  isWomen: boolean;
+  youthTag: string; // e.g. 'u19' | 'u21' | 'u23' | 'youth' | ''
+  isReserve: boolean;
+  key: string;
+}
+
+function extractTeamCategory(raw: string): TeamCategory {
+  const clean = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+
+  const isWomen =
+    /\b(women|woman|femminile|femminili|femenino|femenina|frauen|ladies|damen|feminines|femmes)\b/i.test(
+      clean
+    ) ||
+    /\([dwf]\)\s*$/i.test(clean) ||
+    /\s+[dwf]\s*$/i.test(clean);
+
+  let youthTag = '';
+  const uMatch = clean.match(/\b(?:u|under\s*[- ]?)(17|18|19|20|21|22|23)\b/i);
+  if (uMatch) {
+    youthTag = `u${uMatch[1]}`;
+  } else if (/\b(primavera|youth|juniores)\b/i.test(clean)) {
+    youthTag = 'youth';
+  }
+
+  const isReserve =
+    /\b(reserves|reserve|riserve|futuro|next\s*gen|jong|castilla)\b/i.test(clean) ||
+    /\s+(?:ii|iii|b)\s*$/i.test(clean);
+
+  const key = `${isWomen ? 'W' : 'M'}:${youthTag || 'S'}:${isReserve ? 'R' : '1'}`;
+  return { isWomen, youthTag, isReserve, key };
+}
+
+function areCategoriesCompatible(a: TeamCategory, b: TeamCategory, sport: SportKey): boolean {
+  if (sport === 'tennis') return true;
+  if (a.isWomen !== b.isWomen) return false;
+  if (a.isReserve !== b.isReserve) return false;
+  if (Boolean(a.youthTag) !== Boolean(b.youthTag)) return false;
+  if (
+    a.youthTag &&
+    b.youthTag &&
+    a.youthTag !== 'youth' &&
+    b.youthTag !== 'youth' &&
+    a.youthTag !== b.youthTag
+  ) {
+    return false;
+  }
+  return true;
+}
 
 export function normalizeTeamName(raw: string): string {
   let base = raw;
@@ -151,6 +218,7 @@ export function normalizeTeamName(raw: string): string {
 
 interface TeamProfile {
   norm: string;
+  category: TeamCategory;
   tokens: string[];
   tokenSet: Set<string>;
   lastToken: string;
@@ -162,6 +230,7 @@ interface TeamProfile {
 
 function buildTeamProfile(raw: string): TeamProfile {
   const norm = normalizeTeamName(raw);
+  const category = extractTeamCategory(raw);
   const tokens = norm.split(' ').filter(Boolean);
   const tokenSet = new Set(tokens);
   const clean = norm.replace(/\s+/g, '');
@@ -194,6 +263,7 @@ function buildTeamProfile(raw: string): TeamProfile {
 
   return {
     norm,
+    category,
     tokens,
     tokenSet,
     lastToken: tokens[tokens.length - 1] ?? '',
@@ -206,6 +276,7 @@ function buildTeamProfile(raw: string): TeamProfile {
 
 function profileSimilarity(a: TeamProfile, b: TeamProfile, sport: SportKey): number {
   if (!a.norm || !b.norm) return 0;
+  if (!areCategoriesCompatible(a.category, b.category, sport)) return 0;
   if (a.norm === b.norm) return 1;
   if (a.norm.length >= 4 && b.norm.length >= 4 && (a.norm.includes(b.norm) || b.norm.includes(a.norm))) {
     return 0.92;
@@ -349,7 +420,7 @@ export function linkScrapedMarkets(rawMarkets: RawScrapedMarket[]): LinkedEventG
         : m.sourceId === '888sport_it'
         ? 2
         : 3;
-    return score(a) - score(b);
+    return score(a) - score(b) || b.scrapedAt - a.scrapedAt;
   });
 
   // Cache team profiles across duplicate markets of the same match
@@ -374,12 +445,16 @@ export function linkScrapedMarkets(rawMarkets: RawScrapedMarket[]): LinkedEventG
     let bestGroup: InternalGroup | null = null;
     let bestSwapped = false;
 
-    // Stage 1: Exact normalized O(1) lookup (direct, then swapped)
+    // Stage 1: Exact normalized O(1) lookup (direct, then swapped), enforcing category compatibility
     const directKey = `${m.sport}:${hProf.norm}__${aProf.norm}`;
     const directHits = exactIndex.get(directKey);
     if (directHits) {
       for (const g of directHits) {
-        if (Math.abs(g.startMs - startMs) <= TIME_WINDOW_MS) {
+        if (
+          Math.abs(g.startMs - startMs) <= TIME_WINDOW_MS &&
+          areCategoriesCompatible(g.homeProf.category, hProf.category, m.sport) &&
+          areCategoriesCompatible(g.awayProf.category, aProf.category, m.sport)
+        ) {
           bestGroup = g;
           bestSwapped = false;
           break;
@@ -392,7 +467,11 @@ export function linkScrapedMarkets(rawMarkets: RawScrapedMarket[]): LinkedEventG
       const swapHits = exactIndex.get(swapKey);
       if (swapHits) {
         for (const g of swapHits) {
-          if (Math.abs(g.startMs - startMs) <= TIME_WINDOW_MS) {
+          if (
+            Math.abs(g.startMs - startMs) <= TIME_WINDOW_MS &&
+            areCategoriesCompatible(g.homeProf.category, aProf.category, m.sport) &&
+            areCategoriesCompatible(g.awayProf.category, hProf.category, m.sport)
+          ) {
             bestGroup = g;
             bestSwapped = true;
             break;
@@ -486,9 +565,14 @@ export function linkScrapedMarkets(rawMarkets: RawScrapedMarket[]): LinkedEventG
 
     const alignedSelections = bestSwapped ? swapHomeAway(m.selections) : m.selections;
     const list = bestGroup.marketsByType.get(m.marketType) ?? [];
-    if (!list.some((x) => x.market.sourceId === m.sourceId && x.market.sourceName === m.sourceName)) {
+    const existingIdx = list.findIndex(
+      (x) => x.market.sourceId === m.sourceId && x.market.sourceName === m.sourceName
+    );
+    if (existingIdx < 0) {
       list.push({ market: m, swapped: bestSwapped, selections: alignedSelections });
       bestGroup.marketsByType.set(m.marketType, list);
+    } else if (m.scrapedAt > list[existingIdx].market.scrapedAt) {
+      list[existingIdx] = { market: m, swapped: bestSwapped, selections: alignedSelections };
     }
   }
 

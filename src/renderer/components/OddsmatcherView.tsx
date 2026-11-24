@@ -44,6 +44,7 @@ import {
   formatEventTime,
   formatOdds,
   formatPct,
+  formatQuoteAge,
   ratingTone,
   sportLabel,
 } from '../utils/format';
@@ -134,6 +135,55 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   const [sortBy, setSortBy] = useState<SortKey>('rating');
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
   const [pageSize, setPageSize] = useState(60);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [verifyingRowIds, setVerifyingRowIds] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const handleQuickVerifyRow = async (row: OddsmatcherRow) => {
+    const api = window.oddspulse?.verifyRowQuotes;
+    if (!api || verifyingRowIds[row.id]) return;
+    setVerifyingRowIds((prev) => ({ ...prev, [row.id]: true }));
+    try {
+      await api({
+        rowId: row.id,
+        eventKey: row.eventKey,
+        sport: row.sport,
+        eventName: row.eventName,
+        homeTeam: row.homeTeam,
+        awayTeam: row.awayTeam,
+        startTime: row.startTime,
+        marketType: row.marketType,
+        selectionKey: row.selectionKey,
+        bookmakerId: row.bookmakerId,
+        bookmakerName: row.bookmakerName,
+        bookmakerEventId: row.bookmakerEventId,
+        bookmakerMarketId: row.bookmakerMarketId,
+        bookmakerMetadata: row.bookmakerMetadata,
+        bookmakerSwapped: row.bookmakerSwapped,
+        previousBackOdds: row.backOdds,
+        exchangeId: row.exchangeId,
+        exchangeName: row.exchangeName,
+        exchangeEventId: row.exchangeEventId,
+        exchangeMarketId: row.exchangeMarketId,
+        exchangeMetadata: row.exchangeMetadata,
+        exchangeSwapped: row.exchangeSwapped,
+        previousLayOdds: row.layOdds,
+        previousLiquidity: row.liquidity,
+      });
+    } catch {
+      // Ignore single-row quick verify network errors
+    } finally {
+      setVerifyingRowIds((prev) => {
+        const next = { ...prev };
+        delete next[row.id];
+        return next;
+      });
+    }
+  };
 
   const lockedSet = useMemo(() => new Set(lockedRowIds), [lockedRowIds]);
 
@@ -1136,59 +1186,94 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
             <table className="w-full min-w-[1040px] border-collapse text-left text-xs">
               <thead className="sticky top-0 z-20 border-b border-slate-800 bg-[var(--bg-modal-solid)]">
                 <tr className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                  <th className="cursor-pointer whitespace-nowrap px-3.5 py-3 hover:text-brand-300" onClick={() => toggleSort('startTime')}>
+                  <th className="cursor-pointer whitespace-nowrap px-2.5 py-3 hover:text-brand-300" onClick={() => toggleSort('startTime')}>
                     <span className="inline-flex items-center gap-1">
                       Data/Ora <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="whitespace-nowrap px-3.5 py-3">Evento & Campionato</th>
-                  <th className="whitespace-nowrap px-3.5 py-3">Mercato / Esito</th>
-                  <th className="cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('rating')}>
+                  <th className="whitespace-nowrap px-2.5 py-3">Evento & Campionato</th>
+                  <th className="whitespace-nowrap px-2.5 py-3">Mercato / Esito</th>
+                  <th className="cursor-pointer whitespace-nowrap px-2.5 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('rating')}>
                     <span className="inline-flex items-center gap-1">
                       Rating <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="min-w-[144px] cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('backOdds')}>
+                  <th className="min-w-[132px] cursor-pointer whitespace-nowrap px-2.5 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('backOdds')}>
                     <span className="inline-flex items-center gap-1">
                       Punta (Book) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="min-w-[176px] cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('layOdds')}>
+                  <th className="min-w-[162px] cursor-pointer whitespace-nowrap px-2.5 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('layOdds')}>
                     <span className="inline-flex items-center gap-1">
                       Banca (Exch) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('liquidity')}>
+                  <th className="cursor-pointer whitespace-nowrap px-2.5 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('liquidity')}>
                     <span className="inline-flex items-center gap-1">
                       Liquidità <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="cursor-pointer whitespace-nowrap px-3 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('profit')}>
+                  <th className="cursor-pointer whitespace-nowrap px-2.5 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('profit')}>
                     <span className="inline-flex items-center gap-1">
                       Esito (€) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="whitespace-nowrap px-3.5 py-3 text-center">Azioni</th>
+                  <th className="whitespace-nowrap px-2.5 py-3 text-center">Azioni</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/55">
                 {visibleRows.map(({ row, rating, profit }) => {
                   const tm = formatEventTime(row.startTime);
                   const isLocked = lockedSet.has(row.id);
+                  const freshness = formatQuoteAge(row.updatedAt, nowTick);
+                  const bkAge = formatQuoteAge(row.bookmakerScrapedAt ?? row.updatedAt, nowTick);
+                  const exAge = formatQuoteAge(row.exchangeScrapedAt ?? row.updatedAt, nowTick);
+                  const isRowVerifying = Boolean(verifyingRowIds[row.id]);
+                  const freshnessTitle = `${row.bookmakerName}: ${bkAge.label}${
+                    row.bookmakerCacheAgeSec && row.bookmakerCacheAgeSec >= 60
+                      ? ` (cache feed ~${Math.round(row.bookmakerCacheAgeSec / 60)}m)`
+                      : row.bookmakerIsAggregator
+                      ? ' (feed ADM)'
+                      : ' (diretto)'
+                  } • ${row.exchangeName}: ${exAge.label}`;
                   return (
                     <tr
                       key={row.id}
                       onClick={() => onSelectRow(row)}
                       className="oddsmatcher-row group cursor-pointer transition-colors hover:bg-brand-500/[0.06]"
                     >
-                      <td className={`whitespace-nowrap px-3.5 ${rowPad}`}>
+                      <td className={`whitespace-nowrap px-2.5 ${rowPad}`}>
                         <div className="font-mono text-xs font-semibold text-slate-200">
                           {tm.date} <span className="text-brand-300">{tm.time}</span>
                         </div>
-                        <div className="text-[10px] text-slate-500">{tm.relative}</div>
+                        <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-500">
+                          <span>{tm.relative}</span>
+                          <span
+                            title={freshnessTitle}
+                            data-testid="om-row-freshness"
+                            className={`inline-flex items-center gap-1 rounded px-1 py-px font-mono text-[9px] font-semibold ${
+                              freshness.tone === 'fresh'
+                                ? 'bg-emerald-500/10 text-emerald-300'
+                                : freshness.tone === 'aging'
+                                ? 'bg-amber-500/15 text-amber-300'
+                                : 'bg-rose-500/15 text-rose-300'
+                            }`}
+                          >
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${
+                                freshness.tone === 'fresh'
+                                  ? 'bg-emerald-400'
+                                  : freshness.tone === 'aging'
+                                  ? 'bg-amber-400'
+                                  : 'bg-rose-400'
+                              }`}
+                            />
+                            {freshness.label}
+                          </span>
+                        </div>
                       </td>
 
-                      <td className={`max-w-[240px] px-3.5 ${rowPad}`}>
+                      <td className={`max-w-[205px] px-2.5 ${rowPad}`}>
                         <div className="truncate font-semibold text-slate-100 group-hover:text-brand-200">
                           {row.eventName}
                         </div>
@@ -1200,12 +1285,12 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                         </div>
                       </td>
 
-                      <td className={`px-3.5 ${rowPad}`}>
-                        <div className="font-semibold text-white">{row.selectionLabel}</div>
-                        <div className="text-[10px] text-slate-400">{row.marketLabel}</div>
+                      <td className={`max-w-[160px] px-2.5 ${rowPad}`}>
+                        <div className="truncate font-semibold text-white">{row.selectionLabel}</div>
+                        <div className="truncate text-[10px] text-slate-400">{row.marketLabel}</div>
                       </td>
 
-                      <td className={`whitespace-nowrap px-3 ${rowPad} text-right`}>
+                      <td className={`whitespace-nowrap px-2.5 ${rowPad} text-right`}>
                         {row.isSurebet && mode === 'normal' ? (
                           <span className="surebet-badge inline-flex items-center gap-1 rounded-lg px-2 py-1 font-mono text-xs font-extrabold text-brand-100">
                             {formatPct(rating)}
@@ -1299,17 +1384,27 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                       </td>
 
                       <td
-                        className={`whitespace-nowrap px-3.5 ${rowPad} text-center`}
+                        className={`whitespace-nowrap px-2.5 ${rowPad} text-center`}
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <div className="inline-flex items-center gap-1.5">
+                        <div className="inline-flex items-center gap-1">
                           <button
                             onClick={() => onSelectRow(row)}
-                            className="flex items-center gap-1 rounded-lg border border-brand-400/35 bg-brand-500/15 px-2.5 py-1 text-[11px] font-semibold text-brand-200 transition hover:bg-brand-400 hover:text-slate-950"
-                            title="Apri Calcolatore Punta-Banca"
+                            className="flex items-center gap-1 rounded-lg border border-brand-400/35 bg-brand-500/15 px-2 py-1 text-[11px] font-semibold text-brand-200 transition hover:bg-brand-400 hover:text-slate-950"
+                            title="Apri Calcolatore Punta-Banca (verifica live automatica)"
                           >
                             <Calculator className="h-3 w-3" />
                             Calcola
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="om-verify-row-btn"
+                            disabled={isRowVerifying}
+                            onClick={() => void handleQuickVerifyRow(row)}
+                            className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/80 bg-slate-900/80 text-slate-400 transition hover:border-emerald-400/50 hover:text-emerald-300 disabled:opacity-50"
+                            title="Verifica subito le quote live di questa riga su bookmaker ed exchange"
+                          >
+                            <RefreshCw className={`h-3 w-3 ${isRowVerifying ? 'animate-spin text-brand-300' : ''}`} />
                           </button>
                           {onCreateRatingWatch && (
                             <button

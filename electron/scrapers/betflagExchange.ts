@@ -6,7 +6,15 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchText, isAbortError, sleep, throwIfAborted } from './httpClient';
+import {
+  appendCacheBuster,
+  computeEffectiveScrapedAt,
+  fetchText,
+  fetchTextWithMeta,
+  isAbortError,
+  sleep,
+  throwIfAborted,
+} from './httpClient';
 import { decompressFromBase64 } from './lzString';
 import { matchesEventHints } from './matchLinker';
 
@@ -132,16 +140,27 @@ function splitTeams(da: string): [string, string] | null {
   return null;
 }
 
-function topOffer(off: MstOfferLevel | MstOfferLevel[] | undefined): { odds: number; liq: number } | null {
-  const levels = asArray(off);
+function topOffer(
+  off: MstOfferLevel | MstOfferLevel[] | undefined,
+  side: 'lay' | 'back'
+): { odds: number; liq: number } | null {
+  const levels = asArray(off)
+    .map((l) => ({
+      p: l.p,
+      q: Number(l.q),
+      i: Number(l.i),
+    }))
+    .filter((l) => Number.isFinite(l.q) && l.q > 100 && Number.isFinite(l.i) && l.i > 0);
   if (levels.length === 0) return null;
-  const best = levels.find((l) => l.p === '1') ?? levels[0];
-  const q = Number(best.q);
-  const i = Number(best.i);
-  if (!Number.isFinite(q) || q <= 100) return null;
+  const p1 = levels.find((l) => l.p === '1');
+  const best =
+    p1 ??
+    levels.reduce((acc, cur) =>
+      side === 'lay' ? (cur.q < acc.q ? cur : acc) : cur.q > acc.q ? cur : acc
+    );
   return {
-    odds: Math.round(q) / 100,
-    liq: Number.isFinite(i) && i > 0 ? Math.round(i) / 100 : 0,
+    odds: Math.round(best.q) / 100,
+    liq: Math.round(best.i) / 100,
   };
 }
 
@@ -215,7 +234,7 @@ interface CandidateMatch {
 
 let cachedHomePayload: MstHomePayload | null = null;
 let cachedHomeAt = 0;
-const HOME_CACHE_TTL_MS = 3 * 60_000;
+const HOME_CACHE_TTL_MS = 90_000;
 
 async function fetchBetflagHome(
   allowCache: boolean,
@@ -226,7 +245,12 @@ async function fetchBetflagHome(
     return cachedHomePayload;
   }
   const homeRaw = (
-    await fetchText(`${MST_DATA_BASE}/home`, { headers: MST_HEADERS, timeoutMs: 12000, signal })
+    await fetchText(appendCacheBuster(`${MST_DATA_BASE}/home`), {
+      headers: MST_HEADERS,
+      noCacheHeaders: true,
+      timeoutMs: 12000,
+      signal,
+    })
   )
     .trim()
     .replace(/^"|"$/g, '');
@@ -352,13 +376,18 @@ export async function scrapeBetflagExchange(
       const ev = targets[cursor++];
       try {
         await sleep(35, signal);
-        const rawText = await fetchText(`${MST_DATA_BASE}/colloddsbetsevent/${ev.matchId}`, {
-          headers: MST_HEADERS,
-          timeoutMs: 9000,
-          signal,
-        });
+        const { text: rawText, cacheAgeSec } = await fetchTextWithMeta(
+          appendCacheBuster(`${MST_DATA_BASE}/colloddsbetsevent/${ev.matchId}`),
+          {
+            headers: MST_HEADERS,
+            noCacheHeaders: true,
+            timeoutMs: 9000,
+            signal,
+          }
+        );
         const list = JSON.parse(rawText) as Array<{ e?: string }>;
         if (!Array.isArray(list)) continue;
+        const scrapedAt = computeEffectiveScrapedAt(Date.now(), cacheAgeSec);
 
         for (const item of list) {
           if (!item?.e) continue;
@@ -385,13 +414,13 @@ export async function scrapeBetflagExchange(
           // - offerte.banca = existing Lay orders on book => User can BACK against them!
           const layMap = new Map<string, { odds: number; liq: number }>();
           for (const rn of asArray(d.offerte.punta?.esi)) {
-            const top = topOffer(rn.off);
+            const top = topOffer(rn.off, 'lay');
             if (top) layMap.set(rn.d.trim().toUpperCase(), top);
           }
 
           const backMap = new Map<string, { odds: number; liq: number }>();
           for (const rn of asArray(d.offerte.banca?.esi)) {
-            const top = topOffer(rn.off);
+            const top = topOffer(rn.off, 'back');
             if (top) backMap.set(rn.d.trim().toUpperCase(), top);
           }
 
@@ -423,6 +452,7 @@ export async function scrapeBetflagExchange(
               sport: ev.sport,
               league: ev.league,
               eventId: ev.matchId,
+              sourceMarketId: d.idmarket ? String(d.idmarket) : undefined,
               eventName: `${ev.homeTeam} - ${ev.awayTeam}`,
               homeTeam: ev.homeTeam,
               awayTeam: ev.awayTeam,
@@ -431,7 +461,8 @@ export async function scrapeBetflagExchange(
               marketLabel: mapped.marketLabel,
               selections,
               eventUrl: `https://www.betflag.it/exchange`,
-              scrapedAt: Date.now(),
+              scrapedAt,
+              cacheAgeSec,
             });
           }
         }
@@ -445,4 +476,118 @@ export async function scrapeBetflagExchange(
   await Promise.all(workers);
 
   return { markets, latencyMs: Date.now() - started };
+}
+
+/**
+ * Single-event live verification for Betflag Exchange IT (~150-300ms).
+ */
+export async function verifyBetflagExchangeEvent(params: {
+  matchId: string;
+  sport: SportKey;
+  marketType: MarketType;
+  homeTeam: string;
+  awayTeam: string;
+  startTime: string;
+  signal?: AbortSignal;
+}): Promise<{
+  market: RawScrapedMarket | null;
+  latencyMs: number;
+  cacheAgeSec: number;
+}> {
+  const started = Date.now();
+  const { text: rawText, cacheAgeSec } = await fetchTextWithMeta(
+    appendCacheBuster(`${MST_DATA_BASE}/colloddsbetsevent/${encodeURIComponent(params.matchId)}`),
+    {
+      headers: MST_HEADERS,
+      noCacheHeaders: true,
+      timeoutMs: 7000,
+      signal: params.signal,
+    }
+  );
+  const list = JSON.parse(rawText) as Array<{ e?: string }>;
+  if (!Array.isArray(list)) {
+    return { market: null, latencyMs: Date.now() - started, cacheAgeSec };
+  }
+
+  const scrapedAt = computeEffectiveScrapedAt(Date.now(), cacheAgeSec);
+  for (const item of list) {
+    if (!item?.e) continue;
+    const jsonStr = decompressFromBase64(item.e);
+    if (!jsonStr) continue;
+    const parsed = JSON.parse(jsonStr) as MstMarketData;
+    const d = parsed.data;
+    if (!d?.offerte || !d.sco) continue;
+    if (d.offerte.stato_sogei && d.offerte.stato_sogei !== '2') continue;
+    if (d.offerte.stato_betflag && d.offerte.stato_betflag !== '2') continue;
+
+    const mapped = mapBetflagMarket(
+      params.sport,
+      String(d.sco.cod ?? d.cod ?? ''),
+      d.sco.des ?? '',
+      d.sco.iad ?? ''
+    );
+    if (!mapped || mapped.marketType !== params.marketType) continue;
+
+    const layMap = new Map<string, { odds: number; liq: number }>();
+    for (const rn of asArray(d.offerte.punta?.esi)) {
+      const top = topOffer(rn.off, 'lay');
+      if (top) layMap.set(rn.d.trim().toUpperCase(), top);
+    }
+    const backMap = new Map<string, { odds: number; liq: number }>();
+    for (const rn of asArray(d.offerte.banca?.esi)) {
+      const top = topOffer(rn.off, 'back');
+      if (top) backMap.set(rn.d.trim().toUpperCase(), top);
+    }
+
+    const allDes = new Set([...layMap.keys(), ...backMap.keys()]);
+    const selections: SelectionQuote[] = [];
+    for (const desKey of allDes) {
+      const selInfo = mapBetflagSelection(
+        mapped.marketType,
+        desKey,
+        params.homeTeam,
+        params.awayTeam
+      );
+      if (!selInfo) continue;
+      const lay = layMap.get(desKey);
+      const back = backMap.get(desKey);
+      if (!lay && !back) continue;
+      selections.push({
+        canonicalKey: selInfo.key,
+        label: selInfo.label,
+        backOdds: back?.odds,
+        backLiquidity: back?.liq,
+        layOdds: lay?.odds,
+        layLiquidity: lay?.liq,
+      });
+    }
+
+    if (selections.length >= 2) {
+      return {
+        market: {
+          sourceId: 'betflag_exchange',
+          sourceName: 'Betflag Exchange IT',
+          sourceKind: 'exchange',
+          sport: params.sport,
+          league: '',
+          eventId: params.matchId,
+          sourceMarketId: d.idmarket ? String(d.idmarket) : undefined,
+          eventName: `${params.homeTeam} - ${params.awayTeam}`,
+          homeTeam: params.homeTeam,
+          awayTeam: params.awayTeam,
+          startTime: params.startTime,
+          marketType: mapped.marketType,
+          marketLabel: mapped.marketLabel,
+          selections,
+          eventUrl: 'https://www.betflag.it/exchange',
+          scrapedAt,
+          cacheAgeSec,
+        },
+        latencyMs: Date.now() - started,
+        cacheAgeSec,
+      };
+    }
+  }
+
+  return { market: null, latencyMs: Date.now() - started, cacheAgeSec };
 }

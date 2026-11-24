@@ -6,13 +6,19 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { fetchJson, isAbortError, sleep, throwIfAborted } from './httpClient';
-import { matchesEventHints } from './matchLinker';
+import {
+  computeEffectiveScrapedAt,
+  fetchJson,
+  isAbortError,
+  sleep,
+  throwIfAborted,
+} from './httpClient';
+import { matchesEventHints, teamSimilarity } from './matchLinker';
 
 const SCAN_URL =
   'https://scan-inbf.betfair.it/www/sports/navigation/facet/v1/search?_ak=nzIFcwyWhrlwYMrh&alt=json';
 const ERO_BASE =
-  'https://ero.betfair.it/www/sports/exchange/readonly/v1/bymarket?_ak=nzIFcwyWhrlwYMrh&currencyCode=EUR&locale=it&rollupLimit=2&rollupModel=STAKE&types=MARKET_STATE,MARKET_DESCRIPTION,EVENT,RUNNER_DESCRIPTION,RUNNER_EXCHANGE_PRICES_BEST';
+  'https://ero.betfair.it/www/sports/exchange/readonly/v1/bymarket?_ak=nzIFcwyWhrlwYMrh&alt=json&currencyCode=EUR&locale=it&rollupLimit=2&rollupModel=STAKE&virtualise=true&types=MARKET_STATE,MARKET_DESCRIPTION,EVENT,RUNNER_DESCRIPTION,RUNNER_STATE,RUNNER_EXCHANGE_PRICES_BEST';
 
 interface BetfairScanResult {
   eventId?: number;
@@ -55,6 +61,11 @@ interface BetfairEroResponse {
           selectionId: number;
           description?: {
             runnerName?: string;
+            sortPriority?: number;
+          };
+          state?: {
+            sortPriority?: number;
+            status?: string;
           };
           exchange?: {
             availableToBack?: Array<{ price: number; size: number }>;
@@ -96,6 +107,7 @@ function mapBetfairMarket(
 }
 
 function mapRunnerCanonicalKey(
+  sport: SportKey,
   marketType: MarketType,
   runnerName: string,
   runnerIdx: number,
@@ -109,22 +121,42 @@ function mapRunnerCanonicalKey(
     if (rnLow === 'pareggio' || rnLow === 'the draw' || rnLow === 'draw' || rnLow === 'x') {
       return { key: 'DRAW', label: 'Pareggio (X)' };
     }
-    if (rnLow === homeTeam.toLowerCase() || runnerIdx === 0) {
+    if (rnLow === homeTeam.toLowerCase()) {
       return { key: 'HOME', label: `${homeTeam} (1)` };
     }
-    if (rnLow === awayTeam.toLowerCase() || runnerIdx === 1) {
+    if (rnLow === awayTeam.toLowerCase()) {
       return { key: 'AWAY', label: `${awayTeam} (2)` };
     }
+    const simH = teamSimilarity(rn, homeTeam, sport);
+    const simA = teamSimilarity(rn, awayTeam, sport);
+    if (simH >= 0.65 && simH > simA + 0.08) {
+      return { key: 'HOME', label: `${homeTeam} (1)` };
+    }
+    if (simA >= 0.65 && simA > simH + 0.08) {
+      return { key: 'AWAY', label: `${awayTeam} (2)` };
+    }
+    if (runnerIdx === 0) return { key: 'HOME', label: `${homeTeam} (1)` };
+    if (runnerIdx === 1) return { key: 'AWAY', label: `${awayTeam} (2)` };
     return null;
   }
 
   if (marketType === 'H2H') {
-    if (rnLow === homeTeam.toLowerCase() || runnerIdx === 0) {
+    if (rnLow === homeTeam.toLowerCase()) {
       return { key: 'HOME', label: `${homeTeam} (1)` };
     }
-    if (rnLow === awayTeam.toLowerCase() || runnerIdx === 1) {
+    if (rnLow === awayTeam.toLowerCase()) {
       return { key: 'AWAY', label: `${awayTeam} (2)` };
     }
+    const simH = teamSimilarity(rn, homeTeam, sport);
+    const simA = teamSimilarity(rn, awayTeam, sport);
+    if (simH >= 0.65 && simH > simA + 0.08) {
+      return { key: 'HOME', label: `${homeTeam} (1)` };
+    }
+    if (simA >= 0.65 && simA > simH + 0.08) {
+      return { key: 'AWAY', label: `${awayTeam} (2)` };
+    }
+    if (runnerIdx === 0) return { key: 'HOME', label: `${homeTeam} (1)` };
+    if (runnerIdx === 1) return { key: 'AWAY', label: `${awayTeam} (2)` };
     return null;
   }
 
@@ -149,6 +181,140 @@ function mapRunnerCanonicalKey(
   }
 
   return null;
+}
+
+function pickBestBack(levels?: Array<{ price: number; size: number }>): { price: number; size: number } | undefined {
+  if (!levels || levels.length === 0) return undefined;
+  let best: { price: number; size: number } | undefined;
+  for (const lvl of levels) {
+    if (!Number.isFinite(lvl.price) || lvl.price <= 1.005) continue;
+    if (!Number.isFinite(lvl.size) || lvl.size <= 0) continue;
+    if (!best || lvl.price > best.price) best = lvl;
+  }
+  return best;
+}
+
+function pickBestLay(levels?: Array<{ price: number; size: number }>): { price: number; size: number } | undefined {
+  if (!levels || levels.length === 0) return undefined;
+  let best: { price: number; size: number } | undefined;
+  for (const lvl of levels) {
+    if (!Number.isFinite(lvl.price) || lvl.price <= 1.005) continue;
+    if (!Number.isFinite(lvl.size) || lvl.size <= 0) continue;
+    if (!best || lvl.price < best.price) best = lvl;
+  }
+  return best;
+}
+
+function sportFromEventTypeId(eventTypeId: number): SportKey | null {
+  if (eventTypeId === 1) return 'football';
+  if (eventTypeId === 2) return 'tennis';
+  if (eventTypeId === 7522) return 'basketball';
+  return null;
+}
+
+function parseBetfairEroMarkets(params: {
+  ero: BetfairEroResponse;
+  includeLive: boolean;
+  nowMs: number;
+  cacheAgeSec: number;
+  eventCompMap?: Map<number, string>;
+  dateWindow?: TargetedScrapeFilter['dateWindow'];
+  forcedSport?: SportKey;
+}): RawScrapedMarket[] {
+  const { ero, includeLive, nowMs, cacheAgeSec, eventCompMap, dateWindow, forcedSport } = params;
+  const markets: RawScrapedMarket[] = [];
+  const scrapedAt = computeEffectiveScrapedAt(Date.now(), cacheAgeSec);
+
+  for (const et of ero.eventTypes ?? []) {
+    const sport = forcedSport ?? sportFromEventTypeId(et.eventTypeId);
+    if (!sport) continue;
+
+    for (const evNode of et.eventNodes ?? []) {
+      const evName = evNode.event?.eventName ?? '';
+      const teams = splitEventTeams(evName);
+      if (!teams) continue;
+      const [homeTeam, awayTeam] = teams;
+      const league =
+        eventCompMap?.get(evNode.eventId) ??
+        (sport === 'football'
+          ? 'Calcio'
+          : sport === 'tennis'
+          ? 'Tennis ATP/WTA'
+          : 'Basket');
+
+      for (const mn of evNode.marketNodes ?? []) {
+        if (mn.state?.status && mn.state.status !== 'OPEN') continue;
+        if (!includeLive && mn.state?.inplay) continue;
+
+        const startTime = mn.description?.marketTime ?? evNode.event.openDate;
+        if (!includeLive && new Date(startTime).getTime() < nowMs - 60_000) continue;
+        if (dateWindow && !matchesScrapeDateWindow(startTime, dateWindow)) continue;
+
+        const mapped = mapBetfairMarket(sport, mn.description?.marketType ?? '');
+        if (!mapped) continue;
+
+        const sortedRunners = [...(mn.runners ?? [])].sort((a, b) => {
+          const pa = a.state?.sortPriority ?? a.description?.sortPriority ?? 999;
+          const pb = b.state?.sortPriority ?? b.description?.sortPriority ?? 999;
+          return pa - pb;
+        });
+
+        const selections: SelectionQuote[] = [];
+        const usedKeys = new Set<string>();
+        sortedRunners.forEach((rn, idx) => {
+          if (rn.state?.status && rn.state.status !== 'ACTIVE') return;
+          const name = rn.description?.runnerName ?? '';
+          const keyInfo = mapRunnerCanonicalKey(
+            sport,
+            mapped.marketType,
+            name,
+            idx,
+            homeTeam,
+            awayTeam
+          );
+          if (!keyInfo || usedKeys.has(keyInfo.key)) return;
+
+          const bestBack = pickBestBack(rn.exchange?.availableToBack);
+          const bestLay = pickBestLay(rn.exchange?.availableToLay);
+          if (!bestLay && !bestBack) return;
+
+          usedKeys.add(keyInfo.key);
+          selections.push({
+            canonicalKey: keyInfo.key,
+            label: keyInfo.label,
+            backOdds: bestBack?.price,
+            backLiquidity: bestBack?.size,
+            layOdds: bestLay?.price,
+            layLiquidity: bestLay?.size,
+          });
+        });
+
+        if (selections.length >= 2) {
+          markets.push({
+            sourceId: 'betfair_exchange',
+            sourceName: 'Betfair Exchange IT',
+            sourceKind: 'exchange',
+            sport,
+            league,
+            eventId: String(evNode.eventId),
+            sourceMarketId: mn.marketId,
+            eventName: `${homeTeam} - ${awayTeam}`,
+            homeTeam,
+            awayTeam,
+            startTime,
+            marketType: mapped.marketType,
+            marketLabel: mapped.marketLabel,
+            selections,
+            eventUrl: `https://www.betfair.it/exchange/plus/it/market/${mn.marketId}`,
+            scrapedAt,
+            cacheAgeSec,
+          });
+        }
+      }
+    }
+  }
+
+  return markets;
 }
 
 const SPORT_CONFIGS: Array<{
@@ -221,7 +387,9 @@ export async function scrapeBetfairExchange(
                 marketStartingAfter: new Date(windowAfterMs).toISOString(),
                 marketStartingBefore: new Date(dateWindow.endMs).toISOString(),
               }
-            : {}),
+            : includeLive
+            ? {}
+            : { marketStartingAfter: new Date(nowMs).toISOString() }),
           maxResults: sc.maxResults,
           eventTypeIds: [sc.eventTypeId],
         },
@@ -274,89 +442,30 @@ export async function scrapeBetfairExchange(
         }
       }
 
-      // Fetch ERO prices in batches of 30
-      const batchSize = 30;
+      // Fetch ERO prices in batches of 20 (stays safely under Betfair ERO TOO_MUCH_DATA weight limit with RUNNER_STATE)
+      const batchSize = 20;
       for (let i = 0; i < marketIds.length; i += batchSize) {
         throwIfAborted(signal);
         const batch = marketIds.slice(i, i + batchSize);
         const eroUrl = `${ERO_BASE}&marketIds=${batch.join(',')}`;
-        const { data: ero } = await fetchJson<BetfairEroResponse>(eroUrl, { timeoutMs: 12000, signal });
+        const { data: ero, cacheAgeSec } = await fetchJson<BetfairEroResponse>(eroUrl, {
+          timeoutMs: 12000,
+          signal,
+        });
 
-        for (const et of ero.eventTypes ?? []) {
-          for (const evNode of et.eventNodes ?? []) {
-            const evName = evNode.event?.eventName ?? '';
-            const teams = splitEventTeams(evName);
-            if (!teams) continue;
-            const [homeTeam, awayTeam] = teams;
-            const league =
-              eventCompMap.get(evNode.eventId) ??
-              (sc.sport === 'football'
-                ? 'Calcio'
-                : sc.sport === 'tennis'
-                ? 'Tennis ATP/WTA'
-                : 'Basket');
-
-            for (const mn of evNode.marketNodes ?? []) {
-              if (mn.state?.status && mn.state.status !== 'OPEN') continue;
-              if (!includeLive && mn.state?.inplay) continue;
-
-              const startTime = mn.description?.marketTime ?? evNode.event.openDate;
-              if (!includeLive && new Date(startTime).getTime() < nowMs - 60_000) continue;
-              if (dateWindow && !matchesScrapeDateWindow(startTime, dateWindow)) continue;
-
-              const mapped = mapBetfairMarket(sc.sport, mn.description?.marketType ?? '');
-              if (!mapped) continue;
-
-              const selections: SelectionQuote[] = [];
-              (mn.runners ?? []).forEach((rn, idx) => {
-                const name = rn.description?.runnerName ?? '';
-                const keyInfo = mapRunnerCanonicalKey(
-                  mapped.marketType,
-                  name,
-                  idx,
-                  homeTeam,
-                  awayTeam
-                );
-                if (!keyInfo) return;
-
-                const bestBack = rn.exchange?.availableToBack?.[0];
-                const bestLay = rn.exchange?.availableToLay?.[0];
-                if (!bestLay && !bestBack) return;
-
-                selections.push({
-                  canonicalKey: keyInfo.key,
-                  label: keyInfo.label,
-                  backOdds: bestBack?.price,
-                  backLiquidity: bestBack?.size,
-                  layOdds: bestLay?.price,
-                  layLiquidity: bestLay?.size,
-                });
-              });
-
-              if (selections.length >= 2) {
-                markets.push({
-                  sourceId: 'betfair_exchange',
-                  sourceName: 'Betfair Exchange IT',
-                  sourceKind: 'exchange',
-                  sport: sc.sport,
-                  league,
-                  eventId: String(evNode.eventId),
-                  eventName: `${homeTeam} - ${awayTeam}`,
-                  homeTeam,
-                  awayTeam,
-                  startTime,
-                  marketType: mapped.marketType,
-                  marketLabel: mapped.marketLabel,
-                  selections,
-                  eventUrl: `https://www.betfair.it/exchange/plus/it/market/${mn.marketId}`,
-                  scrapedAt: Date.now(),
-                });
-              }
-            }
-          }
-        }
+        markets.push(
+          ...parseBetfairEroMarkets({
+            ero,
+            includeLive,
+            nowMs,
+            cacheAgeSec,
+            eventCompMap,
+            dateWindow,
+            forcedSport: sc.sport,
+          })
+        );
         if (i + batchSize < marketIds.length) {
-          await sleep(120, signal);
+          await sleep(60, signal);
         }
       }
       succeededSports++;
@@ -371,4 +480,69 @@ export async function scrapeBetfairExchange(
   }
 
   return { markets, latencyMs: Date.now() - started };
+}
+
+/**
+ * Ultra-fast batch or single-market live price refresh on Betfair Exchange ERO (~150-300ms).
+ * Used both for end-of-cycle freshness resync and on-demand single-row live verification.
+ */
+export async function refreshBetfairExchangeMarkets(params: {
+  marketIds: string[];
+  includeLive: boolean;
+  signal?: AbortSignal;
+}): Promise<{
+  marketsByMarketId: Map<string, RawScrapedMarket>;
+  latencyMs: number;
+  cacheAgeSec: number;
+}> {
+  const started = Date.now();
+  const uniqueIds = Array.from(new Set(params.marketIds.filter(Boolean)));
+  const marketsByMarketId = new Map<string, RawScrapedMarket>();
+  if (uniqueIds.length === 0) {
+    return { marketsByMarketId, latencyMs: 0, cacheAgeSec: 0 };
+  }
+
+  const nowMs = Date.now();
+  let maxCacheAgeSec = 0;
+  const batches: string[][] = [];
+  for (let i = 0; i < uniqueIds.length; i += 20) {
+    batches.push(uniqueIds.slice(i, i + 20));
+  }
+
+  const results = await Promise.allSettled(
+    batches.map(async (batch) => {
+      throwIfAborted(params.signal);
+      const eroUrl = `${ERO_BASE}&marketIds=${batch.join(',')}`;
+      const { data: ero, cacheAgeSec } = await fetchJson<BetfairEroResponse>(eroUrl, {
+        timeoutMs: 7000,
+        retries: 0,
+        signal: params.signal,
+      });
+      maxCacheAgeSec = Math.max(maxCacheAgeSec, cacheAgeSec);
+      return parseBetfairEroMarkets({
+        ero,
+        includeLive: params.includeLive,
+        nowMs,
+        cacheAgeSec,
+      });
+    })
+  );
+
+  for (const res of results) {
+    if (res.status === 'fulfilled') {
+      for (const m of res.value) {
+        if (m.sourceMarketId) {
+          marketsByMarketId.set(m.sourceMarketId, m);
+        }
+      }
+    } else if (params.signal?.aborted || isAbortError(res.reason)) {
+      throw res.reason;
+    }
+  }
+
+  return {
+    marketsByMarketId,
+    latencyMs: Date.now() - started,
+    cacheAgeSec: maxCacheAgeSec,
+  };
 }

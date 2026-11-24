@@ -10,7 +10,15 @@ import type {
   SportKey,
   TargetedScrapeFilter,
 } from '../../src/shared/types';
-import { DEFAULT_HEADERS, fetchJson, fetchText, isAbortError, throwIfAborted } from './httpClient';
+import {
+  appendCacheBuster,
+  computeEffectiveScrapedAt,
+  DEFAULT_HEADERS,
+  fetchJson,
+  fetchText,
+  isAbortError,
+  throwIfAborted,
+} from './httpClient';
 import { matchesEventHints, teamSimilarity } from './matchLinker';
 
 const FEED_BASE = 'https://400.flashscore.ninja/400/x/feed';
@@ -83,6 +91,7 @@ interface DirettaOddsItem {
   handicap: { value: string } | null;
   selection: string | null;
   bothTeamsToScore: boolean | null;
+  result?: string | null;
 }
 
 interface DirettaEventOddsBlock {
@@ -101,7 +110,12 @@ interface DirettaGraphQLResp {
 }
 
 async function fetchFeedText(url: string, signal?: AbortSignal): Promise<string> {
-  return fetchText(url, { headers: DIRETTA_HEADERS, timeoutMs: 11000, signal });
+  return fetchText(appendCacheBuster(url), {
+    headers: DIRETTA_HEADERS,
+    noCacheHeaders: true,
+    timeoutMs: 11000,
+    signal,
+  });
 }
 
 function parseDirettaSchedule(
@@ -257,13 +271,32 @@ function extractMarketsFromOddsResponse(
   ev: ScheduledDirettaEvent,
   blocks: DirettaEventOddsBlock[],
   activeSpecsByBookmakerId: Map<number, AdmBookmakerSpec>,
-  outBySource: Map<SourceId, RawScrapedMarket[]>
+  outBySource: Map<SourceId, RawScrapedMarket[]>,
+  cacheAgeSec = 0
 ) {
-  for (const blk of blocks) {
+  // Prioritize FULL_TIME_OVER_TIME / FULL_TIME_INCLUDING_OVERTIME over FULL_TIME for basketball H2H
+  const orderedBlocks =
+    ev.sport === 'basketball'
+      ? [...blocks].sort((a, b) => {
+          const rank = (scope: string) =>
+            scope === 'FULL_TIME_OVER_TIME' || scope === 'FULL_TIME_INCLUDING_OVERTIME'
+              ? 0
+              : scope === 'FULL_TIME'
+              ? 1
+              : 2;
+          return rank(a.bettingScope) - rank(b.bettingScope);
+        })
+      : blocks;
+
+  const effectiveScrapedAt = computeEffectiveScrapedAt(Date.now(), cacheAgeSec);
+
+  for (const blk of orderedBlocks) {
     const spec = activeSpecsByBookmakerId.get(blk.bookmakerId);
     if (!spec) continue;
 
-    const activeItems = (blk.odds ?? []).filter((o) => o.active !== false);
+    const activeItems = (blk.odds ?? []).filter(
+      (o) => o.active !== false && (!o.result || o.result === 'NONE')
+    );
     if (activeItems.length < 2) continue;
 
     let marketType: MarketType | null = null;
@@ -297,7 +330,8 @@ function extractMarketsFromOddsResponse(
       marketType = 'OVER_UNDER_25';
       marketLabel = 'Under/Over 2.5 Gol';
       for (const item of activeItems) {
-        if (item.handicap?.value !== '2.5') continue;
+        const hVal = Number.parseFloat(item.handicap?.value ?? '');
+        if (!Number.isFinite(hVal) || Math.abs(hVal - 2.5) > 0.001) continue;
         const dec = parseOddNum(item.value);
         if (!dec) continue;
         if (item.selection === 'OVER') {
@@ -327,7 +361,9 @@ function extractMarketsFromOddsResponse(
     } else if (
       (ev.sport === 'tennis' || ev.sport === 'basketball') &&
       blk.bettingType === 'HOME_AWAY' &&
-      (blk.bettingScope === 'FULL_TIME' || blk.bettingScope === 'FULL_TIME_INCLUDING_OVERTIME')
+      (blk.bettingScope === 'FULL_TIME_OVER_TIME' ||
+        blk.bettingScope === 'FULL_TIME_INCLUDING_OVERTIME' ||
+        blk.bettingScope === 'FULL_TIME')
     ) {
       marketType = 'H2H';
       marketLabel = 'Testa a Testa';
@@ -346,7 +382,7 @@ function extractMarketsFromOddsResponse(
     if (!marketType) continue;
 
     const bucket = outBySource.get(spec.sourceId)!;
-    // Prevent duplicate market type for same event+bookie (e.g., FULL_TIME vs FULL_TIME_INCLUDING_OVERTIME)
+    // Prevent duplicate market type for same event+bookie (e.g., FULL_TIME_OVER_TIME vs FULL_TIME)
     if (bucket.some((m) => m.eventId === ev.eventId && m.marketType === marketType)) continue;
 
     bucket.push({
@@ -356,6 +392,10 @@ function extractMarketsFromOddsResponse(
       sport: ev.sport,
       league: ev.league,
       eventId: ev.eventId,
+      sourceMetadata: {
+        homeParticipantId: ev.homeParticipantId,
+        awayParticipantId: ev.awayParticipantId,
+      },
       eventName: `${ev.homeTeam} - ${ev.awayTeam}`,
       homeTeam: ev.homeTeam,
       awayTeam: ev.awayTeam,
@@ -364,45 +404,26 @@ function extractMarketsFromOddsResponse(
       marketLabel,
       selections,
       eventUrl: spec.url,
-      scrapedAt: Date.now(),
+      scrapedAt: effectiveScrapedAt,
+      cacheAgeSec,
+      isAggregator: true,
     });
   }
 }
 
 const scheduleCache = new Map<string, { fetchedAt: number; events: ScheduledDirettaEvent[] }>();
-const SCHEDULE_CACHE_TTL_MS = 4 * 60_000;
+const SCHEDULE_CACHE_TTL_MS = 90_000;
 
-export async function scrapeItalianAdmBookmakers(params: {
-  exchangeMarkets: RawScrapedMarket[];
-  enabledSourceIds: SourceId[];
+export async function prefetchDirettaSchedules(params: {
   includeLive: boolean;
   filter?: TargetedScrapeFilter;
   signal?: AbortSignal;
-}): Promise<{
-  marketsBySource: Map<SourceId, RawScrapedMarket[]>;
-  latencyMs: number;
-  scannedEvents: number;
-}> {
-  const started = Date.now();
-  const { exchangeMarkets, enabledSourceIds, includeLive, filter, signal } = params;
+}): Promise<ScheduledDirettaEvent[]> {
+  const { includeLive, filter, signal } = params;
   throwIfAborted(signal);
 
-  const enabledSet = new Set(enabledSourceIds);
-  const activeSpecs = ITALIAN_ADM_BOOKMAKERS.filter((s) => enabledSet.has(s.sourceId));
-  const marketsBySource = new Map<SourceId, RawScrapedMarket[]>();
-  for (const s of activeSpecs) marketsBySource.set(s.sourceId, []);
-
-  if (activeSpecs.length === 0) {
-    return { marketsBySource, latencyMs: 0, scannedEvents: 0 };
-  }
-
-  const activeSpecsByBkId = new Map(activeSpecs.map((s) => [s.bookmakerId, s]));
-
-  // 1. Fetch Diretta/Flashscore schedules across requested sports & day offsets (default: today=0, tomorrow=1; dateWindow: up to +7 days)
   const dayOffsets = getDirettaDayOffsetsForWindow(filter?.dateWindow);
-  if (dayOffsets.length === 0) {
-    return { marketsBySource, latencyMs: Date.now() - started, scannedEvents: 0 };
-  }
+  if (dayOffsets.length === 0) return [];
 
   const sportFeeds: Array<{ sport: SportKey; sportCode: number }> = [
     { sport: 'football', sportCode: 1 },
@@ -443,6 +464,7 @@ export async function scrapeItalianAdmBookmakers(params: {
 
   throwIfAborted(signal);
 
+  const nowMs = Date.now();
   const allScheduled: ScheduledDirettaEvent[] = [];
   const seenEvIds = new Set<string>();
   let fulfilledFeeds = 0;
@@ -451,6 +473,7 @@ export async function scrapeItalianAdmBookmakers(params: {
     if (r.status === 'fulfilled') {
       fulfilledFeeds++;
       for (const ev of r.value) {
+        if (!includeLive && ev.startMs < nowMs - 60_000) continue;
         if (filter?.dateWindow && !matchesScrapeDateWindow(ev.startMs, filter.dateWindow)) {
           continue;
         }
@@ -466,6 +489,44 @@ export async function scrapeItalianAdmBookmakers(params: {
 
   if (fulfilledFeeds === 0 && firstFeedErr) {
     throw firstFeedErr instanceof Error ? firstFeedErr : new Error(String(firstFeedErr));
+  }
+
+  return allScheduled;
+}
+
+export async function scrapeItalianAdmBookmakers(params: {
+  exchangeMarkets: RawScrapedMarket[];
+  enabledSourceIds: SourceId[];
+  includeLive: boolean;
+  filter?: TargetedScrapeFilter;
+  prefetchedSchedule?: ScheduledDirettaEvent[];
+  signal?: AbortSignal;
+}): Promise<{
+  marketsBySource: Map<SourceId, RawScrapedMarket[]>;
+  latencyMs: number;
+  scannedEvents: number;
+}> {
+  const started = Date.now();
+  const { exchangeMarkets, enabledSourceIds, includeLive, filter, prefetchedSchedule, signal } =
+    params;
+  throwIfAborted(signal);
+
+  const enabledSet = new Set(enabledSourceIds);
+  const activeSpecs = ITALIAN_ADM_BOOKMAKERS.filter((s) => enabledSet.has(s.sourceId));
+  const marketsBySource = new Map<SourceId, RawScrapedMarket[]>();
+  for (const s of activeSpecs) marketsBySource.set(s.sourceId, []);
+
+  if (activeSpecs.length === 0) {
+    return { marketsBySource, latencyMs: 0, scannedEvents: 0 };
+  }
+
+  const activeSpecsByBkId = new Map(activeSpecs.map((s) => [s.bookmakerId, s]));
+
+  // 1. Use prefetched Diretta schedules (started in parallel with Exchanges) or fetch now
+  const allScheduled =
+    prefetchedSchedule ?? (await prefetchDirettaSchedules({ includeLive, filter, signal }));
+  if (allScheduled.length === 0) {
+    return { marketsBySource, latencyMs: Date.now() - started, scannedEvents: 0 };
   }
 
   // 2. Filter directly by tracked event hints when targeted, otherwise match against Exchange events
@@ -488,8 +549,8 @@ export async function scrapeItalianAdmBookmakers(params: {
           filter?.dateWindow ? 150 : 140
         );
 
-  // 3. Fetch GraphQL odds with clean bounded concurrency (14 parallel workers)
-  const CONCURRENCY = 14;
+  // 3. Fetch GraphQL odds with cache-busting (_t) so edge CDN never serves stale multi-minute caches
+  const CONCURRENCY = 16;
   let cursor = 0;
 
   const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
@@ -498,18 +559,27 @@ export async function scrapeItalianAdmBookmakers(params: {
       const idx = cursor++;
       const ev = targets[idx];
       try {
-        const url = `${GQL_BASE}?_hash=oce&eventId=${encodeURIComponent(
-          ev.eventId
-        )}&projectId=400&geoIpCode=IT&geoIpSubdivisionCode=IT`;
-        const { data } = await fetchJson<DirettaGraphQLResp>(url, {
+        const url = appendCacheBuster(
+          `${GQL_BASE}?_hash=oce&eventId=${encodeURIComponent(
+            ev.eventId
+          )}&projectId=400&geoIpCode=IT&geoIpSubdivisionCode=IT`
+        );
+        const { data, cacheAgeSec } = await fetchJson<DirettaGraphQLResp>(url, {
           headers: DIRETTA_HEADERS,
+          noCacheHeaders: true,
           timeoutMs: 9000,
           retries: 0,
           signal,
         });
         const oddsBlocks = data?.data?.findOddsByEventId?.odds ?? [];
         if (oddsBlocks.length > 0) {
-          extractMarketsFromOddsResponse(ev, oddsBlocks, activeSpecsByBkId, marketsBySource);
+          extractMarketsFromOddsResponse(
+            ev,
+            oddsBlocks,
+            activeSpecsByBkId,
+            marketsBySource,
+            cacheAgeSec
+          );
         }
       } catch (err) {
         if (signal?.aborted || isAbortError(err)) throw err;
@@ -525,5 +595,86 @@ export async function scrapeItalianAdmBookmakers(params: {
     marketsBySource,
     latencyMs: Date.now() - started,
     scannedEvents: targets.length,
+  };
+}
+
+/**
+ * Ultra-fast (~150-250ms) single-event live verification for an Italian ADM bookmaker
+ * via cache-busted Diretta GraphQL.
+ */
+export async function verifyItalianAdmEvent(params: {
+  sourceId: SourceId;
+  eventId: string;
+  sport: SportKey;
+  marketType: MarketType;
+  homeTeam: string;
+  awayTeam: string;
+  startTime: string;
+  homeParticipantId?: string;
+  awayParticipantId?: string;
+  signal?: AbortSignal;
+}): Promise<{
+  market: RawScrapedMarket | null;
+  latencyMs: number;
+  cacheAgeSec: number;
+}> {
+  const started = Date.now();
+  const spec = ITALIAN_ADM_BOOKMAKERS.find((s) => s.sourceId === params.sourceId);
+  if (!spec || !params.eventId) {
+    return { market: null, latencyMs: 0, cacheAgeSec: 0 };
+  }
+
+  let homeParticipantId = params.homeParticipantId ?? '';
+  let awayParticipantId = params.awayParticipantId ?? '';
+
+  // Recover participant IDs from recent schedule cache if missing (e.g. legacy row)
+  if (!homeParticipantId || !awayParticipantId) {
+    for (const entry of scheduleCache.values()) {
+      const found = entry.events.find((e) => e.eventId === params.eventId);
+      if (found) {
+        homeParticipantId = found.homeParticipantId;
+        awayParticipantId = found.awayParticipantId;
+        break;
+      }
+    }
+  }
+
+  const url = appendCacheBuster(
+    `${GQL_BASE}?_hash=oce&eventId=${encodeURIComponent(
+      params.eventId
+    )}&projectId=400&geoIpCode=IT&geoIpSubdivisionCode=IT`
+  );
+  const { data, cacheAgeSec } = await fetchJson<DirettaGraphQLResp>(url, {
+    headers: DIRETTA_HEADERS,
+    noCacheHeaders: true,
+    timeoutMs: 7000,
+    retries: 0,
+    signal: params.signal,
+  });
+
+  const blocks = data?.data?.findOddsByEventId?.odds ?? [];
+  const outBySource = new Map<SourceId, RawScrapedMarket[]>([[spec.sourceId, []]]);
+  const activeSpecsByBkId = new Map<number, AdmBookmakerSpec>([[spec.bookmakerId, spec]]);
+  const ev: ScheduledDirettaEvent = {
+    eventId: params.eventId,
+    sport: params.sport,
+    league: '',
+    homeTeam: params.homeTeam,
+    awayTeam: params.awayTeam,
+    homeParticipantId,
+    awayParticipantId,
+    startMs: Date.parse(params.startTime) || Date.now(),
+    startTime: params.startTime,
+    isLive: false,
+  };
+
+  extractMarketsFromOddsResponse(ev, blocks, activeSpecsByBkId, outBySource, cacheAgeSec);
+  const market =
+    (outBySource.get(spec.sourceId) ?? []).find((m) => m.marketType === params.marketType) ?? null;
+
+  return {
+    market,
+    latencyMs: Date.now() - started,
+    cacheAgeSec,
   };
 }

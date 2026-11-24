@@ -57,6 +57,13 @@ export interface PuntaPuntaLeg {
   stake: number;
   potentialReturn: number;
   eventUrl?: string;
+  eventId?: string;
+  marketId?: string;
+  sourceMetadata?: Record<string, string>;
+  swapped?: boolean;
+  cacheAgeSec?: number;
+  isAggregator?: boolean;
+  updatedAt?: number;
 }
 
 export interface PuntaPuntaCandidateRow {
@@ -408,6 +415,13 @@ export function findPuntaPuntaMatches(
           stake: calc.stakes[0] ?? safeStake,
           potentialReturn: calc.returns[0] ?? 0,
           eventUrl: primaryQuote.eventUrl,
+          eventId: primaryQuote.eventId,
+          marketId: primaryQuote.marketId,
+          sourceMetadata: primaryQuote.sourceMetadata,
+          swapped: primaryQuote.swapped,
+          cacheAgeSec: primaryQuote.cacheAgeSec,
+          isAggregator: primaryQuote.isAggregator,
+          updatedAt: primaryQuote.updatedAt,
         };
 
         const hedgeLegs: PuntaPuntaLeg[] = hedgeQuotes.map((hq, idx) => ({
@@ -420,6 +434,13 @@ export function findPuntaPuntaMatches(
           stake: calc.stakes[idx + 1] ?? 0,
           potentialReturn: calc.returns[idx + 1] ?? 0,
           eventUrl: hq.eventUrl,
+          eventId: hq.eventId,
+          marketId: hq.marketId,
+          sourceMetadata: hq.sourceMetadata,
+          swapped: hq.swapped,
+          cacheAgeSec: hq.cacheAgeSec,
+          isAggregator: hq.isAggregator,
+          updatedAt: hq.updatedAt,
         }));
 
         const hedgeSig = hedgeLegs.map((h) => `${h.selectionKey}:${h.bookmakerId}`).join('+');
