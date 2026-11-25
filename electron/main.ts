@@ -25,6 +25,8 @@ import {
   type TrackedBet,
   type VerifyPuntaPuntaRequest,
   type VerifyRowQuotesRequest,
+  type WelcomeBonusProgressEntry,
+  type WelcomeBonusProgressMap,
 } from '../src/shared/types';
 import { ScraperEngine } from './scrapers/scraperEngine';
 
@@ -37,6 +39,7 @@ let currentSettings: AppSettings = { ...DEFAULT_SETTINGS };
 let trackedBets: TrackedBet[] = [];
 let savedMultiples: SavedMultiplePlan[] = [];
 let ratingWatches: RatingWatch[] = [];
+let welcomeBonusProgress: WelcomeBonusProgressMap = {};
 let watchBackoffMultiplier = 1;
 let lastEvaluatedFullCycleAt: number | null = null;
 let watchStatus: RatingWatchEngineStatus = {
@@ -152,6 +155,30 @@ function saveRatingWatches(watches: RatingWatch[]): void {
   try {
     const filePath = getStorePath('oddspulse-watches.json');
     fs.writeFileSync(filePath, JSON.stringify(watches, null, 2), 'utf-8');
+  } catch {
+    // Ignore
+  }
+}
+
+function loadWelcomeBonusProgress(): WelcomeBonusProgressMap {
+  try {
+    const filePath = getStorePath('oddspulse-welcome-bonuses.json');
+    if (fs.existsSync(filePath)) {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as WelcomeBonusProgressMap;
+      }
+    }
+  } catch {
+    // Fallback to empty map
+  }
+  return {};
+}
+
+function saveWelcomeBonusProgress(progress: WelcomeBonusProgressMap): void {
+  try {
+    const filePath = getStorePath('oddspulse-welcome-bonuses.json');
+    fs.writeFileSync(filePath, JSON.stringify(progress, null, 2), 'utf-8');
   } catch {
     // Ignore
   }
@@ -571,6 +598,7 @@ app.whenReady().then(() => {
   trackedBets = loadTrackedBets();
   savedMultiples = loadSavedMultiples();
   ratingWatches = loadRatingWatches();
+  welcomeBonusProgress = loadWelcomeBonusProgress();
 
   scraperEngine = new ScraperEngine(
     (snapshot) => {
@@ -822,6 +850,30 @@ app.whenReady().then(() => {
     savedMultiples = savedMultiples.filter((p) => p.id !== id);
     saveSavedMultiples(savedMultiples);
     return savedMultiples;
+  });
+
+  // Welcome Bonuses Progress IPC
+  ipcMain.handle('bonuses:getProgress', () => welcomeBonusProgress);
+  ipcMain.handle('bonuses:saveProgress', (_ev, entry: WelcomeBonusProgressEntry) => {
+    if (!entry || typeof entry.guideId !== 'string' || !entry.guideId.trim()) {
+      return welcomeBonusProgress;
+    }
+    welcomeBonusProgress = {
+      ...welcomeBonusProgress,
+      [entry.guideId]: {
+        guideId: entry.guideId,
+        status: entry.status,
+        completedStepIds: Array.isArray(entry.completedStepIds) ? entry.completedStepIds : [],
+        actualProfit:
+          typeof entry.actualProfit === 'number' && Number.isFinite(entry.actualProfit)
+            ? entry.actualProfit
+            : null,
+        notes: typeof entry.notes === 'string' ? entry.notes : undefined,
+        updatedAt: Date.now(),
+      },
+    };
+    saveWelcomeBonusProgress(welcomeBonusProgress);
+    return welcomeBonusProgress;
   });
 
   function normalizeWatchDateRange(raw: DateRangeValue | undefined): DateRangeValue | undefined {

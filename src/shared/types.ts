@@ -538,6 +538,19 @@ export interface TrackedBet {
   notes?: string;
 }
 
+export type WelcomeBonusProgressStatus = 'todo' | 'in_progress' | 'completed';
+
+export interface WelcomeBonusProgressEntry {
+  guideId: string;
+  status: WelcomeBonusProgressStatus;
+  completedStepIds: string[];
+  actualProfit: number | null;
+  notes?: string;
+  updatedAt: number;
+}
+
+export type WelcomeBonusProgressMap = Record<string, WelcomeBonusProgressEntry>;
+
 export interface TargetedScrapeFilter {
   sports?: SportKey[];
   dateWindow?: ScrapeDateWindow;

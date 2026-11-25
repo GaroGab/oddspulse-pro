@@ -52,6 +52,9 @@ oddspulse-pro/
 │   │   ├── multioddsValidation.ts  # Validazione e ordinamento sequenziale gambe multipla
 │   │   ├── networkHealth.ts        # Diagnostica rete/errori HTTP e formattazione messaggi amichevoli
 │   │   ├── dateRange.ts            # Filtro calendario date condiviso tra UI e matcher
+│   │   ├── welcomeBonusSimulator.ts # Motore simulazione profittabilità bonus benvenuto (Sport/Rollover/Casinò)
+│   │   ├── welcomeBonuses.ts       # Catalogo guide step-by-step Bonus Benvenuto e siti esclusi
+│   │   ├── welcomeBonuses.test.ts  # Verifica copertura SOURCE_CATALOG e profittabilità bonus
 │   │   └── math.test.ts            # Suite Vitest principale
 │   └── renderer/
 │       ├── App.tsx                 # Shell principale, navigazione sezioni, banner alert Radar Rating
@@ -65,6 +68,7 @@ oddspulse-pro/
 │           ├── DutcherView.tsx             # Sottosezioni `Scanner Automatico` + `Oddsmatcher Punta-Punta` (`PuntaPuntaMatcher` + `PuntaPuntaDrawer`)
 │           ├── CalculatorView.tsx          # Calcolatore standalone Punta-Banca e Punta-Punta
 │           ├── CalculatorDrawer.tsx        # Modale calcolo Punta-Banca da riga Oddsmatcher
+│           ├── WelcomeBonusesView.tsx      # Sezione Bonus Benvenuto: guide step-by-step, checklist e simulatore live
 │           ├── RatingWatchView.tsx         # Configurazione e gestione Radar Rating
 │           ├── RatingAlertBanner.tsx       # Banner floating persistente per alert Rating raggiunti
 │           ├── ScrapersView.tsx            # Stato fonti live, latenze, log e toggle fonti

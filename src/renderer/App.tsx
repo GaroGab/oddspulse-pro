@@ -26,7 +26,10 @@ import {
   type SavedMultiplePlanInput,
   type ScrapeSnapshot,
   type TrackedBet,
+  type WelcomeBonusProgressEntry,
+  type WelcomeBonusProgressMap,
 } from '../shared/types';
+import { WELCOME_BONUS_GUIDES } from '../shared/welcomeBonuses';
 import { CalculatorDrawer } from './components/CalculatorDrawer';
 import { CalculatorView } from './components/CalculatorView';
 import { ConnectionAlert } from './components/ConnectionAlert';
@@ -45,6 +48,7 @@ import { Sidebar, type NavTab } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { TrackerView } from './components/TrackerView';
 import { ViewErrorBoundary } from './components/ViewErrorBoundary';
+import { WelcomeBonusesView } from './components/WelcomeBonusesView';
 import {
   playSurebetChime,
   startPersistentRatingAlarm,
@@ -133,6 +137,20 @@ export const App: React.FC = () => {
     }
     return [];
   });
+  const [welcomeBonusProgress, setWelcomeBonusProgress] = useState<WelcomeBonusProgressMap>(() => {
+    try {
+      const raw = localStorage.getItem('oddspulse_welcome_bonuses_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as WelcomeBonusProgressMap;
+        }
+      }
+    } catch {
+      // Ignore storage fallback error
+    }
+    return {};
+  });
 
   const [mode, setMode] = useState<BetMode>('normal');
   const [stake, setStake] = useState<number>(50);
@@ -214,6 +232,7 @@ export const App: React.FC = () => {
 
     api.listTrackedBets().then(setTrackedBets).catch(() => {});
     api.listSavedMultiples?.().then(setSavedMultiples).catch(() => {});
+    api.getWelcomeBonusProgress?.().then(setWelcomeBonusProgress).catch(() => {});
     api.getSnapshot().then(setSnapshot).catch(() => {});
     api.listWatches?.().then(setRatingWatches).catch(() => {});
     api.getWatchStatus?.().then(setWatchStatus).catch(() => {});
@@ -548,6 +567,32 @@ export const App: React.FC = () => {
     [pushToast]
   );
 
+  const handleSaveWelcomeBonusProgress = useCallback(
+    async (entry: WelcomeBonusProgressEntry) => {
+      setWelcomeBonusProgress((prev) => {
+        const next = { ...prev, [entry.guideId]: entry };
+        try {
+          localStorage.setItem('oddspulse_welcome_bonuses_v1', JSON.stringify(next));
+        } catch {
+          // Ignore storage fallback error
+        }
+        return next;
+      });
+      const updated = await window.oddspulse?.saveWelcomeBonusProgress?.(entry);
+      if (updated) setWelcomeBonusProgress(updated);
+    },
+    []
+  );
+
+  const handleOpenToolFromBonus = useCallback(
+    (target: 'oddsmatcher' | 'multiodds' | 'calculator', opts?: { mode?: BetMode }) => {
+      if (opts?.mode) setMode(opts.mode);
+      setSelectedRow(null);
+      setActiveTab(target);
+    },
+    []
+  );
+
   const handleToggleLockMulti = useCallback(
     (row: OddsmatcherRow) => {
       setLockedRowIds((prev) => {
@@ -827,6 +872,12 @@ export const App: React.FC = () => {
   }, [rawBannerKind, suppressedByViewEmptyState, snapshot.stats.lastCompletedAt]);
 
   const autoScrapeActive = isAutoScrapeActive(settings);
+  const welcomeBonusesCompleted = useMemo(
+    () =>
+      WELCOME_BONUS_GUIDES.filter((g) => welcomeBonusProgress[g.id]?.status === 'completed')
+        .length,
+    [welcomeBonusProgress]
+  );
 
   return (
     <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg-base)] text-slate-100">
@@ -867,6 +918,8 @@ export const App: React.FC = () => {
           lockedMultiCount={lockedRows.length}
           activeWatchesCount={watchStatus.activeCount}
           activeAlertsCount={activeWatchAlerts.length}
+          welcomeBonusesCompleted={welcomeBonusesCompleted}
+          welcomeBonusesTotal={WELCOME_BONUS_GUIDES.length}
         />
 
         <main className="relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden p-4">
@@ -967,6 +1020,17 @@ export const App: React.FC = () => {
                   soundEnabled={settings.soundEnabled}
                   snapshot={snapshot}
                   onSaveTrackedBet={(bet) => void handleSaveBet(bet)}
+                />
+              )}
+
+              {activeTab === 'bonuses' && (
+                <WelcomeBonusesView
+                  progressMap={welcomeBonusProgress}
+                  soundEnabled={settings.soundEnabled}
+                  defaultExchangeCommission={settings.betfairCommission}
+                  onSaveProgress={(entry) => void handleSaveWelcomeBonusProgress(entry)}
+                  onOpenTool={handleOpenToolFromBonus}
+                  onNotify={(title, body) => pushToast(title, body, 'info')}
                 />
               )}
 

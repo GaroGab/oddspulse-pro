@@ -15,6 +15,8 @@ import type {
   VerifyPuntaPuntaResult,
   VerifyRowQuotesRequest,
   VerifyRowQuotesResult,
+  WelcomeBonusProgressEntry,
+  WelcomeBonusProgressMap,
 } from '../src/shared/types';
 
 export interface OddsPulseAPI {
@@ -63,6 +65,9 @@ export interface OddsPulseAPI {
     plan: SavedMultiplePlan | SavedMultiplePlanInput
   ) => Promise<SavedMultiplePlan[]>;
   deleteSavedMultiple: (id: string) => Promise<SavedMultiplePlan[]>;
+
+  getWelcomeBonusProgress: () => Promise<WelcomeBonusProgressMap>;
+  saveWelcomeBonusProgress: (entry: WelcomeBonusProgressEntry) => Promise<WelcomeBonusProgressMap>;
 
   listWatches: () => Promise<RatingWatch[]>;
   getWatchStatus: () => Promise<RatingWatchEngineStatus>;
@@ -131,6 +136,9 @@ const api: OddsPulseAPI = {
   listSavedMultiples: () => ipcRenderer.invoke('multiples:list'),
   saveMultiplePlan: (plan) => ipcRenderer.invoke('multiples:save', plan),
   deleteSavedMultiple: (id) => ipcRenderer.invoke('multiples:delete', id),
+
+  getWelcomeBonusProgress: () => ipcRenderer.invoke('bonuses:getProgress'),
+  saveWelcomeBonusProgress: (entry) => ipcRenderer.invoke('bonuses:saveProgress', entry),
 
   listWatches: () => ipcRenderer.invoke('watches:list'),
   getWatchStatus: () => ipcRenderer.invoke('watches:getStatus'),

@@ -4,6 +4,7 @@ import {
   BellRing,
   Calculator,
   ChevronLeft,
+  Gift,
   Layers,
   Radar,
   Scale,
@@ -19,6 +20,7 @@ export type NavTab =
   | 'multiodds'
   | 'dutcher'
   | 'calculator'
+  | 'bonuses'
   | 'watches'
   | 'scrapers'
   | 'tracker'
@@ -34,6 +36,8 @@ interface SidebarProps {
   lockedMultiCount: number;
   activeWatchesCount?: number;
   activeAlertsCount?: number;
+  welcomeBonusesCompleted?: number;
+  welcomeBonusesTotal?: number;
 }
 
 const SIDEBAR_OPEN_WIDTH = 244;
@@ -53,6 +57,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
     lockedMultiCount,
     activeWatchesCount = 0,
     activeAlertsCount = 0,
+    welcomeBonusesCompleted = 0,
+    welcomeBonusesTotal = 0,
   }) => {
     const totalProfit = trackedBets.reduce(
       (sum, b) => sum + (b.status === 'pending' ? 0 : b.realizedProfit),
@@ -137,6 +143,32 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(
             PRO
           </span>
         ),
+      },
+      {
+        id: 'bonuses',
+        label: 'Bonus Benvenuto',
+        subtitle: 'Guide & Simulatore',
+        icon: <Gift className="h-4 w-4" />,
+        badgeText:
+          welcomeBonusesTotal > 0
+            ? `${welcomeBonusesCompleted}/${welcomeBonusesTotal}`
+            : undefined,
+        dotColor:
+          welcomeBonusesTotal > 0 && welcomeBonusesCompleted === welcomeBonusesTotal
+            ? 'bg-emerald-400'
+            : 'bg-brand-400',
+        badge:
+          welcomeBonusesTotal > 0 ? (
+            <span
+              className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                welcomeBonusesCompleted === welcomeBonusesTotal
+                  ? 'bg-emerald-500/20 text-emerald-300'
+                  : 'bg-brand-400/15 text-brand-300'
+              }`}
+            >
+              {welcomeBonusesCompleted}/{welcomeBonusesTotal}
+            </span>
+          ) : undefined,
       },
       {
         id: 'watches',
