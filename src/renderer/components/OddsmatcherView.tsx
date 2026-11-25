@@ -43,6 +43,7 @@ import {
   type MarketType,
   type OddsmatcherRow,
   type ScrapeSnapshot,
+  type SourceId,
   type SportKey,
   type TableDensity,
 } from '../../shared/types';
@@ -80,6 +81,7 @@ import {
 
 interface OddsmatcherViewProps {
   snapshot: ScrapeSnapshot;
+  enabledSources?: Partial<Record<SourceId, boolean>>;
   isBrowserOnline: boolean;
   autoScrapeActive?: boolean;
   mode: BetMode;
@@ -106,6 +108,7 @@ type SortKey = 'rating' | 'profit' | 'backOdds' | 'layOdds' | 'liquidity' | 'sta
 
 export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   snapshot,
+  enabledSources,
   isBrowserOnline,
   autoScrapeActive = true,
   mode,
@@ -224,13 +227,13 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   }, [sport]);
 
   const bookmakerOptions = useMemo<SourceOption[]>(
-    () => buildBookmakerSourceOptions(snapshot),
-    [snapshot]
+    () => buildBookmakerSourceOptions(snapshot, enabledSources),
+    [snapshot, enabledSources]
   );
 
   const exchangeOptions = useMemo<SourceOption[]>(
-    () => buildExchangeSourceOptions(snapshot),
-    [snapshot]
+    () => buildExchangeSourceOptions(snapshot, enabledSources),
+    [snapshot, enabledSources]
   );
 
   // Prune any previously selected bookmaker/exchange if it later enters error state
@@ -1168,14 +1171,9 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                   <Radar className="h-6 w-6 animate-spin" />
                 </div>
               </div>
-              <div>
-                <h3 className="font-display text-base font-bold text-white">
-                  Scraping Quote Live in Corso...
-                </h3>
-                <p className="mt-1 max-w-lg text-xs text-slate-400">
-                  Connessione simultanea a Betfair Exchange IT, Betflag Exchange, Smarkets e 20+ Bookmaker ADM/EU (Sisal, SNAI, Betflag, Eurobet, GoldBet, Lottomatica, Planetwin365, bet365, Betsson, DomusBet, DAZN Bet, WilliamHill, Gioco Digitale, PokerStars, NetBet, Stanleybet, 888sport, LeoVegas, Betfair SB, Unibet, Paf e Pinnacle).
-                </p>
-              </div>
+              <h3 className="font-display text-base font-bold text-white">
+                Scraping Quote Live in Corso...
+              </h3>
               <div className="flex flex-wrap justify-center gap-2">
                 {snapshot.sources
                   .filter((s) => s.enabled)

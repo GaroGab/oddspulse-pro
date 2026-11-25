@@ -53,6 +53,7 @@ import {
   type SavedMultiplePlan,
   type SavedMultiplePlanInput,
   type ScrapeSnapshot,
+  type SourceId,
   type SportKey,
   type TrackedBet,
 } from '../../shared/types';
@@ -68,7 +69,10 @@ import {
   toLocalDateKey,
   type DateRangeValue,
 } from './DateRangeCalendar';
-import { ManualMultioddsBuilder } from './ManualMultioddsBuilder';
+import {
+  ManualMultioddsBuilder,
+  type ManualMultioddsState,
+} from './ManualMultioddsBuilder';
 import { NumericInput } from './NumericInput';
 import { QuickPresetsMenu, type QuickPresetItem } from './QuickPresetsMenu';
 import { RolloverParamsPanel } from './RolloverParamsPanel';
@@ -83,11 +87,14 @@ import {
 
 interface MultioddsViewProps {
   snapshot: ScrapeSnapshot;
+  enabledSources?: Partial<Record<SourceId, boolean>>;
   isBrowserOnline: boolean;
   autoScrapeActive?: boolean;
   lockedRows: OddsmatcherRow[];
   savedMultiples?: SavedMultiplePlan[];
   soundEnabled: boolean;
+  manualState?: ManualMultioddsState;
+  onChangeManualState?: React.Dispatch<React.SetStateAction<ManualMultioddsState>>;
   onUnlockRow: (rowId: string) => void;
   onClearLocks: () => void;
   onSaveTrackedBet: (bet: Omit<TrackedBet, 'id' | 'createdAt'>) => void;
@@ -121,11 +128,14 @@ const SPORT_LABELS: Record<SportKey | 'ALL', string> = {
 
 export const MultioddsView: React.FC<MultioddsViewProps> = ({
   snapshot,
+  enabledSources,
   isBrowserOnline,
   autoScrapeActive = true,
   lockedRows,
   savedMultiples = [],
   soundEnabled,
+  manualState,
+  onChangeManualState,
   onUnlockRow,
   onClearLocks,
   onSaveTrackedBet,
@@ -244,13 +254,13 @@ export const MultioddsView: React.FC<MultioddsViewProps> = ({
   }, [sport]);
 
   const bookmakerOptions = useMemo<SourceOption[]>(
-    () => buildBookmakerSourceOptions(snapshot),
-    [snapshot]
+    () => buildBookmakerSourceOptions(snapshot, enabledSources),
+    [snapshot, enabledSources]
   );
 
   const exchangeOptions = useMemo<SourceOption[]>(
-    () => buildExchangeSourceOptions(snapshot),
-    [snapshot]
+    () => buildExchangeSourceOptions(snapshot, enabledSources),
+    [snapshot, enabledSources]
   );
 
   // Prune previously selected bookmakers/exchanges if they enter error state
@@ -614,11 +624,14 @@ export const MultioddsView: React.FC<MultioddsViewProps> = ({
       {activeSubTab === 'manual' ? (
         <ManualMultioddsBuilder
           snapshot={snapshot}
+          enabledSources={enabledSources}
           isBrowserOnline={isBrowserOnline}
           autoScrapeActive={autoScrapeActive}
           lockedRows={lockedRows}
           soundEnabled={soundEnabled}
           savedCount={savedMultiples.length}
+          persistedState={manualState}
+          onChangePersistedState={onChangeManualState}
           onSaveTrackedBet={onSaveTrackedBet}
           onSaveMultiplePlan={onSaveMultiplePlan}
           onOpenSavedList={handleOpenSavedPlan}

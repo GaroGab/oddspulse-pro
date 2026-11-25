@@ -31,6 +31,10 @@ import { CalculatorDrawer } from './components/CalculatorDrawer';
 import { CalculatorView } from './components/CalculatorView';
 import { ConnectionAlert } from './components/ConnectionAlert';
 import { DutcherView } from './components/DutcherView';
+import {
+  createDefaultManualMultioddsState,
+  type ManualMultioddsState,
+} from './components/ManualMultioddsBuilder';
 import { MultioddsView } from './components/MultioddsView';
 import { OddsmatcherView } from './components/OddsmatcherView';
 import { RatingAlertBanner } from './components/RatingAlertBanner';
@@ -134,6 +138,9 @@ export const App: React.FC = () => {
   const [stake, setStake] = useState<number>(50);
   const [selectedRow, setSelectedRow] = useState<OddsmatcherRow | null>(null);
   const [lockedRowIds, setLockedRowIds] = useState<string[]>([]);
+  const [manualMultioddsState, setManualMultioddsState] = useState<ManualMultioddsState>(() =>
+    createDefaultManualMultioddsState()
+  );
   const [ratingWatches, setRatingWatches] = useState<RatingWatch[]>([]);
   const [watchStatus, setWatchStatus] = useState<RatingWatchEngineStatus>(INITIAL_WATCH_STATUS);
   const [activeWatchAlerts, setActiveWatchAlerts] = useState<RatingWatchTriggerEvent[]>([]);
@@ -891,6 +898,7 @@ export const App: React.FC = () => {
               {activeTab === 'oddsmatcher' && (
                 <OddsmatcherView
                   snapshot={snapshot}
+                  enabledSources={settings.enabledSources}
                   isBrowserOnline={isBrowserOnline}
                   autoScrapeActive={autoScrapeActive}
                   mode={mode}
@@ -914,11 +922,14 @@ export const App: React.FC = () => {
               {activeTab === 'multiodds' && (
                 <MultioddsView
                   snapshot={snapshot}
+                  enabledSources={settings.enabledSources}
                   isBrowserOnline={isBrowserOnline}
                   autoScrapeActive={autoScrapeActive}
                   lockedRows={lockedRows}
                   savedMultiples={savedMultiples}
                   soundEnabled={settings.soundEnabled}
+                  manualState={manualMultioddsState}
+                  onChangeManualState={setManualMultioddsState}
                   onUnlockRow={(id) => setLockedRowIds((prev) => prev.filter((x) => x !== id))}
                   onClearLocks={() => setLockedRowIds([])}
                   onSaveTrackedBet={(bet) => void handleSaveBet(bet)}
@@ -934,6 +945,7 @@ export const App: React.FC = () => {
               {activeTab === 'dutcher' && (
                 <DutcherView
                   snapshot={snapshot}
+                  enabledSources={settings.enabledSources}
                   isBrowserOnline={isBrowserOnline}
                   autoScrapeActive={autoScrapeActive}
                   soundEnabled={settings.soundEnabled}

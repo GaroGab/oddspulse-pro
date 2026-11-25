@@ -1,142 +1,120 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertCircle, AlertTriangle, Check, ChevronDown, Globe, Search, X } from 'lucide-react';
-import { formatFriendlyNetworkError } from '../../shared/networkHealth';
 import {
-  SOURCE_CATALOG,
-  type ScrapeSnapshot,
-  type SourceStatus,
-} from '../../shared/types';
+  AlertCircle,
+  AlertTriangle,
+  Ban,
+  Check,
+  ChevronDown,
+  Globe,
+  PowerOff,
+  Search,
+  X,
+} from 'lucide-react';
+import {
+  buildBookmakerSourceOptions,
+  buildExchangeSourceOptions,
+  formatSourceErrorReason,
+  SCRAPER_DISABLED_BOOKMAKER_REASON,
+  SCRAPER_DISABLED_EXCHANGE_REASON,
+  type SourceDisabledReasonKind,
+  type SourceOption,
+} from '../../shared/sourceOptions';
 import { BookmakerIcon } from './BookmakerIcon';
 import { getDropdownMotionProps, useDropdownPortal } from './CustomSelect';
 
-export interface SourceOption {
-  id: string;
-  name: string;
-  disabled?: boolean;
-  disabledReason?: string;
-}
-
-export function formatSourceErrorReason(src: SourceStatus): string {
-  const raw = src.lastError?.trim() || '';
-  if (!raw) {
-    return 'Errore nel recupero delle quote dal sito. Controlla Motore Scraping o riprova più tardi.';
-  }
-  const friendly = formatFriendlyNetworkError(raw);
-  if (friendly.toLowerCase() === raw.toLowerCase() || friendly.includes(raw)) {
-    return `Impossibile recuperare le quote: ${friendly}.`;
-  }
-  return `Impossibile recuperare le quote: ${friendly} (${raw}).`;
-}
-
-/**
- * Build bookmaker filter options combining live source status (marking errored
- * sites as disabled with an explanatory tooltip) and any seen snapshot quotes.
- */
-export function buildBookmakerSourceOptions(
-  snapshot: Pick<ScrapeSnapshot, 'sources' | 'rows' | 'backMarketGroups' | 'dutcherRows'>
-): SourceOption[] {
-  const map = new Map<string, SourceOption>();
-  for (const s of snapshot.sources) {
-    if (s.kind !== 'bookmaker' || !s.enabled) continue;
-    const isErr = s.state === 'error';
-    map.set(s.id, {
-      id: s.id,
-      name: s.name,
-      disabled: isErr,
-      disabledReason: isErr ? formatSourceErrorReason(s) : undefined,
-    });
-  }
-  for (const r of snapshot.rows) {
-    if (!map.has(r.bookmakerId)) {
-      map.set(r.bookmakerId, { id: r.bookmakerId, name: r.bookmakerName });
-    }
-  }
-  for (const g of snapshot.backMarketGroups ?? []) {
-    for (const q of g.quotes) {
-      if (!map.has(q.bookmakerId)) {
-        map.set(q.bookmakerId, { id: q.bookmakerId, name: q.bookmakerName });
-      }
-    }
-  }
-  for (const dr of snapshot.dutcherRows ?? []) {
-    for (const leg of dr.legs) {
-      if (!map.has(leg.bookmakerId)) {
-        map.set(leg.bookmakerId, { id: leg.bookmakerId, name: leg.bookmakerName });
-      }
-    }
-  }
-  if (map.size === 0) {
-    for (const s of SOURCE_CATALOG.filter((x) => x.kind === 'bookmaker' && x.enabled)) {
-      map.set(s.id, { id: s.id, name: s.name });
-    }
-  }
-  return Array.from(map.values()).sort(
-    (a, b) => Number(Boolean(a.disabled)) - Number(Boolean(b.disabled))
-  );
-}
-
-/**
- * Build exchange filter options from snapshot sources, marking errored ones disabled.
- */
-export function buildExchangeSourceOptions(
-  snapshot: Pick<ScrapeSnapshot, 'sources'>
-): SourceOption[] {
-  const exchangeSrcs = snapshot.sources.filter((x) => x.kind === 'exchange');
-  if (exchangeSrcs.length === 0) {
-    return SOURCE_CATALOG.filter((x) => x.kind === 'exchange').map((x) => ({
-      id: x.id,
-      name: x.name,
-    }));
-  }
-  return exchangeSrcs
-    .map((s) => {
-      const isErr = s.enabled && s.state === 'error';
-      return {
-        id: s.id,
-        name: s.name,
-        disabled: isErr,
-        disabledReason: isErr ? formatSourceErrorReason(s) : undefined,
-      };
-    })
-    .sort((a, b) => Number(Boolean(a.disabled)) - Number(Boolean(b.disabled)));
-}
+export {
+  buildBookmakerSourceOptions,
+  buildExchangeSourceOptions,
+  formatSourceErrorReason,
+  SCRAPER_DISABLED_BOOKMAKER_REASON,
+  SCRAPER_DISABLED_EXCHANGE_REASON,
+  type SourceDisabledReasonKind,
+  type SourceOption,
+};
 
 interface HoveredDisabledTooltip {
   name: string;
+  kind: SourceDisabledReasonKind;
   reason: string;
   rect: DOMRect;
+}
+
+function getDisabledHoverMeta(opt: SourceOption): {
+  kind: SourceDisabledReasonKind;
+  reason: string;
+} {
+  const kind: SourceDisabledReasonKind = opt.disabledKind ?? 'error';
+  const reason =
+    opt.disabledReason ||
+    (kind === 'scraper_disabled'
+      ? SCRAPER_DISABLED_BOOKMAKER_REASON
+      : 'Errore nel recupero delle quote');
+  return { kind, reason };
 }
 
 const DisabledSourceTooltipPortal: React.FC<{ hovered: HoveredDisabledTooltip | null }> = ({
   hovered,
 }) => {
   if (!hovered || typeof document === 'undefined') return null;
-  const tooltipW = 256;
+  const tooltipW = 264;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const fitsRight = hovered.rect.right + 10 + tooltipW <= vw - 12;
   const left = fitsRight
     ? Math.round(hovered.rect.right + 10)
     : Math.max(12, Math.round(hovered.rect.left - tooltipW - 10));
-  const rawTop = hovered.rect.top + hovered.rect.height / 2 - 34;
-  const top = Math.max(12, Math.min(vh - 96, Math.round(rawTop)));
+  const rawTop = hovered.rect.top + hovered.rect.height / 2 - 38;
+  const top = Math.max(12, Math.min(vh - 120, Math.round(rawTop)));
+  const isScraperDisabled = hovered.kind === 'scraper_disabled';
 
   return createPortal(
     <div
       role="tooltip"
       data-testid="source-disabled-tooltip"
+      data-disabled-kind={hovered.kind}
       style={{ position: 'fixed', left, top, width: tooltipW }}
-      className="pointer-events-none z-[1050] rounded-xl border border-rose-500/45 bg-[var(--bg-modal-solid)] p-2.5 shadow-[0_14px_38px_rgba(0,0,0,0.92)]"
+      className={`pointer-events-none z-[1050] rounded-xl border bg-[var(--bg-modal-solid)] p-2.5 shadow-[0_14px_38px_rgba(0,0,0,0.92)] ${
+        isScraperDisabled ? 'border-amber-400/45' : 'border-rose-500/45'
+      }`}
     >
-      <div className="flex items-center gap-1.5 text-[11px] font-bold text-rose-200">
-        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
-        <span className="truncate">{hovered.name} non disponibile</span>
+      <div
+        className={`flex items-center gap-1.5 text-[11px] font-bold ${
+          isScraperDisabled ? 'text-amber-200' : 'text-rose-200'
+        }`}
+      >
+        {isScraperDisabled ? (
+          <PowerOff className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+        ) : (
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+        )}
+        <span className="min-w-0 leading-snug">
+          {isScraperDisabled
+            ? `${hovered.name} disattivato nello scraper`
+            : `${hovered.name} non disponibile`}
+        </span>
       </div>
       <p className="mt-1 text-[10px] leading-relaxed text-slate-300">{hovered.reason}</p>
     </div>,
     document.body
+  );
+};
+
+const DisabledSourceBadge: React.FC<{ kind: SourceDisabledReasonKind }> = ({ kind }) => {
+  if (kind === 'scraper_disabled') {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-700/80 bg-slate-800/85 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-400">
+        <PowerOff className="h-2.5 w-2.5" />
+        DISATTIVATO
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded border border-rose-500/35 bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-300">
+      <AlertCircle className="h-2.5 w-2.5" />
+      ERRORE
+    </span>
   );
 };
 
@@ -293,7 +271,12 @@ export const SourceSelect: React.FC<SourceSelectProps> = ({
                   </div>
                 )}
 
-                <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
+                <div
+                  className="flex-1 overflow-y-auto p-1 space-y-0.5"
+                  onScroll={() => {
+                    if (hoveredDisabled) setHoveredDisabled(null);
+                  }}
+                >
                   {filteredOptions.length === 0 ? (
                     <div className="px-2 py-3 text-center text-[11px] text-slate-500">
                       Nessuna corrispondenza
@@ -302,12 +285,15 @@ export const SourceSelect: React.FC<SourceSelectProps> = ({
                     filteredOptions.map((opt) => {
                       const isSelected = value === opt.id && !opt.disabled;
                       const isOptDisabled = Boolean(opt.disabled);
+                      const disabledMeta = isOptDisabled ? getDisabledHoverMeta(opt) : null;
+                      const isScraperDisabled = disabledMeta?.kind === 'scraper_disabled';
                       return (
                         <button
                           key={opt.id}
                           type="button"
                           aria-disabled={isOptDisabled || undefined}
                           data-disabled={isOptDisabled ? 'true' : undefined}
+                          data-disabled-kind={disabledMeta?.kind}
                           data-testid={dataTestId ? `${dataTestId}-opt-${opt.id}` : undefined}
                           onClick={() => {
                             if (isOptDisabled) return;
@@ -315,10 +301,11 @@ export const SourceSelect: React.FC<SourceSelectProps> = ({
                             setOpen(false);
                           }}
                           onMouseEnter={(e) => {
-                            if (!isOptDisabled) return;
+                            if (!disabledMeta) return;
                             setHoveredDisabled({
                               name: opt.name,
-                              reason: opt.disabledReason || 'Errore nel recupero delle quote',
+                              kind: disabledMeta.kind,
+                              reason: disabledMeta.reason,
                               rect: e.currentTarget.getBoundingClientRect(),
                             });
                           }}
@@ -327,7 +314,9 @@ export const SourceSelect: React.FC<SourceSelectProps> = ({
                           }}
                           className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
                             isOptDisabled
-                              ? 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
+                              ? isScraperDisabled
+                                ? 'cursor-not-allowed bg-slate-900/55 text-slate-500 opacity-60 hover:bg-slate-800/45'
+                                : 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
                               : isSelected
                               ? 'bg-brand-500/20 font-semibold text-brand-200'
                               : 'text-slate-200 hover:bg-slate-800/80 hover:text-white'
@@ -341,11 +330,8 @@ export const SourceSelect: React.FC<SourceSelectProps> = ({
                             />
                             <span className="truncate">{opt.name}</span>
                           </span>
-                          {isOptDisabled ? (
-                            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-rose-500/35 bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-300">
-                              <AlertCircle className="h-2.5 w-2.5" />
-                              ERRORE
-                            </span>
+                          {disabledMeta ? (
+                            <DisabledSourceBadge kind={disabledMeta.kind} />
                           ) : (
                             isSelected && <Check className="h-3.5 w-3.5 shrink-0 text-brand-300" />
                           )}
@@ -387,7 +373,7 @@ export const SourceMultiSelect: React.FC<SourceMultiSelectProps> = ({
   disabled = false,
   searchable = true,
   searchPlaceholder = 'Cerca per nome...',
-  minMenuWidth = 228,
+  minMenuWidth = 248,
   onChange,
   'data-testid': dataTestId,
 }) => {
@@ -596,31 +582,40 @@ export const SourceMultiSelect: React.FC<SourceMultiSelectProps> = ({
                 )}
 
                 {/* Checkbox Options List */}
-                <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
+                <div
+                  className="flex-1 overflow-y-auto p-1 space-y-0.5"
+                  onScroll={() => {
+                    if (hoveredDisabled) setHoveredDisabled(null);
+                  }}
+                >
                   {filteredOptions.length === 0 ? (
                     <div className="px-2 py-3 text-center text-[11px] text-slate-500">
                       Nessuna corrispondenza
                     </div>
                   ) : (
                     filteredOptions.map((opt) => {
-                      const isSelected = selectedSet.has(opt.id) && !opt.disabled;
+                      const isSelected = selectedSet.has(opt.id);
                       const isOptDisabled = Boolean(opt.disabled);
+                      const disabledMeta = isOptDisabled ? getDisabledHoverMeta(opt) : null;
+                      const isScraperDisabled = disabledMeta?.kind === 'scraper_disabled';
                       return (
                         <button
                           key={opt.id}
                           type="button"
-                          aria-disabled={isOptDisabled || undefined}
+                          aria-disabled={(isOptDisabled && !isSelected) || undefined}
                           data-disabled={isOptDisabled ? 'true' : undefined}
+                          data-disabled-kind={disabledMeta?.kind}
                           data-testid={dataTestId ? `${dataTestId}-opt-${opt.id}` : undefined}
                           onClick={() => {
-                            if (isOptDisabled) return;
+                            if (isOptDisabled && !isSelected) return;
                             toggleId(opt.id);
                           }}
                           onMouseEnter={(e) => {
-                            if (!isOptDisabled) return;
+                            if (!disabledMeta) return;
                             setHoveredDisabled({
                               name: opt.name,
-                              reason: opt.disabledReason || 'Errore nel recupero delle quote',
+                              kind: disabledMeta.kind,
+                              reason: disabledMeta.reason,
                               rect: e.currentTarget.getBoundingClientRect(),
                             });
                           }}
@@ -628,8 +623,10 @@ export const SourceMultiSelect: React.FC<SourceMultiSelectProps> = ({
                             if (isOptDisabled) setHoveredDisabled(null);
                           }}
                           className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition ${
-                            isOptDisabled
-                              ? 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
+                            isOptDisabled && !isSelected
+                              ? isScraperDisabled
+                                ? 'cursor-not-allowed bg-slate-900/55 text-slate-500 opacity-60 hover:bg-slate-800/45'
+                                : 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
                               : isSelected
                               ? 'bg-brand-500/15 font-semibold text-brand-100'
                               : 'text-slate-200 hover:bg-slate-800/80 hover:text-white'
@@ -638,15 +635,23 @@ export const SourceMultiSelect: React.FC<SourceMultiSelectProps> = ({
                           <span className="flex min-w-0 items-center gap-2">
                             <span
                               className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
-                                isOptDisabled
-                                  ? 'border-rose-500/40 bg-rose-950/60 text-rose-400'
-                                  : isSelected
+                                isSelected
                                   ? 'border-brand-300 bg-brand-400 text-slate-950'
+                                  : isOptDisabled
+                                  ? isScraperDisabled
+                                    ? 'border-slate-700/90 bg-slate-900 text-slate-500'
+                                    : 'border-rose-500/40 bg-rose-950/60 text-rose-400'
                                   : 'border-slate-700 bg-slate-900/90 text-transparent'
                               }`}
                             >
-                              {isOptDisabled ? (
-                                <AlertCircle className="h-3 w-3" />
+                              {isSelected ? (
+                                <Check className="h-3 w-3 stroke-[3]" />
+                              ) : isOptDisabled ? (
+                                isScraperDisabled ? (
+                                  <Ban className="h-3 w-3" />
+                                ) : (
+                                  <AlertCircle className="h-3 w-3" />
+                                )
                               ) : (
                                 <Check className="h-3 w-3 stroke-[3]" />
                               )}
@@ -658,11 +663,7 @@ export const SourceMultiSelect: React.FC<SourceMultiSelectProps> = ({
                             />
                             <span className="truncate">{opt.name}</span>
                           </span>
-                          {isOptDisabled && (
-                            <span className="shrink-0 rounded border border-rose-500/35 bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-300">
-                              ERRORE
-                            </span>
-                          )}
+                          {disabledMeta && <DisabledSourceBadge kind={disabledMeta.kind} />}
                         </button>
                       );
                     })

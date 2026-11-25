@@ -9,7 +9,11 @@ import {
   findBestMultiodds,
 } from './math';
 import { linkScrapedMarkets, matchesEventHints, normalizeTeamName, teamSimilarity } from '../../electron/scrapers/matchLinker';
-import { sortMultipleLegs, validateManualMultipleCandidate } from './multioddsValidation';
+import {
+  filterManualMultioddsCatalog,
+  sortMultipleLegs,
+  validateManualMultipleCandidate,
+} from './multioddsValidation';
 import { computeConnectionDiagnostic, formatFriendlyNetworkError } from './networkHealth';
 import {
   extractBackMarketGroupsFromSnapshot,
@@ -49,6 +53,12 @@ import {
   evaluateSavedMultiplePlan,
   syncLiveOddsForSavedPlan,
 } from './savedMultiples';
+import {
+  buildBookmakerSourceOptions,
+  buildExchangeSourceOptions,
+  SCRAPER_DISABLED_BOOKMAKER_REASON,
+  SCRAPER_DISABLED_EXCHANGE_REASON,
+} from './sourceOptions';
 import {
   DEFAULT_SETTINGS,
   type DutcherRow,
@@ -2446,5 +2456,398 @@ describe('Bonus Rollover Calculator & Auto Rating Engine', () => {
     const evSettled = evaluateSavedMultiplePlan(settledPlan);
     expect(evSettled.settledOutcome).toBe('lost_at_leg');
     expect(evSettled.projectedProfit).toBeCloseTo(top.guaranteedProfit, 2);
+  });
+});
+
+describe('Bookmaker Filter Validation against Scraper Enabled Sources', () => {
+  const makeBkStatus = (
+    id: SourceStatus['id'],
+    name: string,
+    state: SourceStatus['state'],
+    lastError: string | null = null
+  ): SourceStatus => ({
+    id,
+    name,
+    shortName: name,
+    kind: 'bookmaker',
+    color: '#3b82f6',
+    enabled: state !== 'disabled',
+    state,
+    latencyMs: 120,
+    eventsCount: state === 'ok' ? 10 : 0,
+    marketsCount: state === 'ok' ? 30 : 0,
+    lastScrapedAt: null,
+    lastError,
+    successCount: state === 'ok' ? 1 : 0,
+    errorCount: state === 'error' ? 1 : 0,
+  });
+
+  it('marks bookmakers deselected in snapshot.sources as disabled with explanatory scraper reason', () => {
+    const options = buildBookmakerSourceOptions({
+      sources: [
+        makeBkStatus('sisal_it', 'Sisal.it', 'disabled'),
+        makeBkStatus('snai_it', 'SNAI.it', 'ok'),
+        makeBkStatus('eurobet_it', 'Eurobet.it', 'error', 'HTTP 503'),
+      ],
+      rows: [],
+      backMarketGroups: [],
+      dutcherRows: [],
+    });
+
+    expect(options.map((o) => o.id)).toEqual(['snai_it', 'eurobet_it', 'sisal_it']);
+
+    const snai = options.find((o) => o.id === 'snai_it');
+    expect(snai?.disabled).toBeFalsy();
+
+    const eurobet = options.find((o) => o.id === 'eurobet_it');
+    expect(eurobet?.disabled).toBe(true);
+    expect(eurobet?.disabledKind).toBe('error');
+    expect(eurobet?.disabledReason).toContain('HTTP 503');
+
+    const sisal = options.find((o) => o.id === 'sisal_it');
+    expect(sisal?.disabled).toBe(true);
+    expect(sisal?.disabledKind).toBe('scraper_disabled');
+    expect(sisal?.disabledReason).toBe(SCRAPER_DISABLED_BOOKMAKER_REASON);
+  });
+
+  it('immediately inhibits bookmakers deselected via enabledSources override even with stale rows', () => {
+    const staleRow = makeRow({
+      id: 'stale_sisal',
+      startTime: '2026-11-26T18:00:00Z',
+      bookmakerId: 'sisal_it',
+      bookmakerName: 'Sisal.it',
+    });
+
+    const options = buildBookmakerSourceOptions(
+      {
+        sources: [
+          makeBkStatus('sisal_it', 'Sisal.it', 'ok'),
+          makeBkStatus('snai_it', 'SNAI.it', 'ok'),
+        ],
+        rows: [staleRow],
+        backMarketGroups: [],
+        dutcherRows: [],
+      },
+      { sisal_it: false, snai_it: true }
+    );
+
+    const sisal = options.find((o) => o.id === 'sisal_it');
+    expect(sisal?.disabled).toBe(true);
+    expect(sisal?.disabledKind).toBe('scraper_disabled');
+    expect(sisal?.disabledReason).toBe(SCRAPER_DISABLED_BOOKMAKER_REASON);
+
+    // Re-enabling makes it selectable again
+    const reenabled = buildBookmakerSourceOptions(
+      {
+        sources: [
+          makeBkStatus('sisal_it', 'Sisal.it', 'disabled'),
+          makeBkStatus('snai_it', 'SNAI.it', 'ok'),
+        ],
+        rows: [],
+        backMarketGroups: [],
+        dutcherRows: [],
+      },
+      { sisal_it: true, snai_it: true }
+    );
+    expect(reenabled.find((o) => o.id === 'sisal_it')?.disabled).toBeFalsy();
+  });
+
+  it('keeps disabled scraper bookmakers marked disabled in catalog fallback when snapshot has no sources', () => {
+    const options = buildBookmakerSourceOptions(
+      {
+        sources: [],
+        rows: [],
+        backMarketGroups: [],
+        dutcherRows: [],
+      },
+      { ...DEFAULT_SETTINGS.enabledSources, bet365_it: false }
+    );
+
+    const bet365 = options.find((o) => o.id === 'bet365_it');
+    expect(bet365?.disabled).toBe(true);
+    expect(bet365?.disabledKind).toBe('scraper_disabled');
+
+    const oddsApi = options.find((o) => o.id === 'the_odds_api');
+    expect(oddsApi?.disabled).toBe(true);
+    expect(oddsApi?.disabledKind).toBe('scraper_disabled');
+  });
+
+  it('marks exchanges deselected in scraper as disabled with explanatory reason and supports override/reenable', () => {
+    const makeExStatus = (
+      id: SourceStatus['id'],
+      name: string,
+      state: SourceStatus['state'],
+      lastError: string | null = null
+    ): SourceStatus => ({
+      id,
+      name,
+      shortName: name,
+      kind: 'exchange',
+      color: '#ffb80c',
+      enabled: state !== 'disabled',
+      state,
+      latencyMs: 90,
+      eventsCount: state === 'ok' ? 12 : 0,
+      marketsCount: state === 'ok' ? 40 : 0,
+      lastScrapedAt: null,
+      lastError,
+      successCount: state === 'ok' ? 1 : 0,
+      errorCount: state === 'error' ? 1 : 0,
+    });
+
+    const options = buildExchangeSourceOptions({
+      sources: [
+        makeExStatus('smarkets_exchange', 'Smarkets', 'disabled'),
+        makeExStatus('betfair_exchange', 'Betfair Exchange IT', 'ok'),
+        makeExStatus('betflag_exchange', 'Betflag Exchange IT', 'error', 'HTTP 403'),
+      ],
+    });
+
+    expect(options.map((o) => o.id)).toEqual([
+      'betfair_exchange',
+      'betflag_exchange',
+      'smarkets_exchange',
+    ]);
+
+    const betfair = options.find((o) => o.id === 'betfair_exchange');
+    expect(betfair?.disabled).toBeFalsy();
+
+    const betflag = options.find((o) => o.id === 'betflag_exchange');
+    expect(betflag?.disabled).toBe(true);
+    expect(betflag?.disabledKind).toBe('error');
+    expect(betflag?.disabledReason).toContain('HTTP 403');
+
+    const smarkets = options.find((o) => o.id === 'smarkets_exchange');
+    expect(smarkets?.disabled).toBe(true);
+    expect(smarkets?.disabledKind).toBe('scraper_disabled');
+    expect(smarkets?.disabledReason).toBe(SCRAPER_DISABLED_EXCHANGE_REASON);
+
+    // Immediate override before snapshot updates + fallback catalog check
+    const overridden = buildExchangeSourceOptions(
+      {
+        sources: [
+          makeExStatus('betfair_exchange', 'Betfair Exchange IT', 'ok'),
+          makeExStatus('smarkets_exchange', 'Smarkets', 'disabled'),
+        ],
+      },
+      { betfair_exchange: false, smarkets_exchange: true }
+    );
+    expect(overridden.find((o) => o.id === 'betfair_exchange')?.disabled).toBe(true);
+    expect(overridden.find((o) => o.id === 'betfair_exchange')?.disabledKind).toBe(
+      'scraper_disabled'
+    );
+    expect(overridden.find((o) => o.id === 'smarkets_exchange')?.disabled).toBeFalsy();
+
+    const catalogFallback = buildExchangeSourceOptions(
+      { sources: [] },
+      { betflag_exchange: false }
+    );
+    expect(catalogFallback.find((o) => o.id === 'betflag_exchange')?.disabled).toBe(true);
+    expect(catalogFallback.find((o) => o.id === 'betflag_exchange')?.disabledKind).toBe(
+      'scraper_disabled'
+    );
+  });
+});
+
+describe('Manual Multiodds Catalog Filtering', () => {
+  it('enforces bookmaker, exchange, and all other filters even when onlyEligible is false', () => {
+    const nowMs = new Date('2026-11-25T12:00:00Z').getTime();
+    const future4h = new Date(nowMs + 4 * 3600_000).toISOString();
+    const future5h = new Date(nowMs + 5 * 3600_000).toISOString();
+    const future9h = new Date(nowMs + 9 * 3600_000).toISOString();
+    const past1h = new Date(nowMs - 3600_000).toISOString();
+
+    const sisalBfEligible = makeRow({
+      id: 'm_sisal_bf_ok',
+      eventKey: 'ev_1',
+      sport: 'football',
+      league: 'ITALIA: Serie A',
+      eventName: 'Inter - Milan',
+      startTime: future4h,
+      marketType: '1X2',
+      bookmakerId: 'sisal_it',
+      bookmakerName: 'Sisal.it',
+      exchangeId: 'betfair_exchange',
+      exchangeName: 'Betfair Exchange IT',
+      backOdds: 2.1,
+      layOdds: 2.12,
+      liquidity: 150,
+      ratingNormal: 97.5,
+      ratingSnr: 52.0,
+    });
+
+    const sisalBfGapConflict = makeRow({
+      id: 'm_sisal_bf_gap',
+      eventKey: 'ev_2',
+      sport: 'football',
+      league: 'ITALIA: Serie A',
+      eventName: 'Roma - Lazio',
+      startTime: future5h, // < 2h gap from ev_1
+      marketType: '1X2',
+      bookmakerId: 'sisal_it',
+      bookmakerName: 'Sisal.it',
+      exchangeId: 'betfair_exchange',
+      exchangeName: 'Betfair Exchange IT',
+      backOdds: 2.2,
+      layOdds: 2.24,
+      liquidity: 120,
+      ratingNormal: 96.8,
+      ratingSnr: 50.0,
+    });
+
+    const sisalBfStarted = makeRow({
+      id: 'm_sisal_bf_past',
+      eventKey: 'ev_3',
+      sport: 'football',
+      league: 'ITALIA: Serie A',
+      eventName: 'Juve - Torino',
+      startTime: past1h,
+      marketType: '1X2',
+      bookmakerId: 'sisal_it',
+      bookmakerName: 'Sisal.it',
+      exchangeId: 'betfair_exchange',
+      exchangeName: 'Betfair Exchange IT',
+      backOdds: 2.0,
+      layOdds: 2.02,
+      liquidity: 200,
+      ratingNormal: 97.9,
+      ratingSnr: 49.0,
+    });
+
+    const sisalSmOtherExchange = makeRow({
+      id: 'm_sisal_sm',
+      eventKey: 'ev_4',
+      sport: 'football',
+      league: 'ITALIA: Serie A',
+      eventName: 'Napoli - Atalanta',
+      startTime: future9h,
+      marketType: '1X2',
+      bookmakerId: 'sisal_it',
+      bookmakerName: 'Sisal.it',
+      exchangeId: 'smarkets_exchange',
+      exchangeName: 'Smarkets Exchange',
+      backOdds: 2.3,
+      layOdds: 2.32,
+      liquidity: 180,
+      ratingNormal: 98.2,
+      ratingSnr: 54.0,
+    });
+
+    const snaiBfOtherBookie = makeRow({
+      id: 'm_snai_bf',
+      eventKey: 'ev_5',
+      sport: 'football',
+      league: 'ITALIA: Serie A',
+      eventName: 'Bologna - Fiorentina',
+      startTime: future9h,
+      marketType: '1X2',
+      bookmakerId: 'snai_it',
+      bookmakerName: 'SNAI.it',
+      exchangeId: 'betfair_exchange',
+      exchangeName: 'Betfair Exchange IT',
+      backOdds: 2.4,
+      layOdds: 2.42,
+      liquidity: 220,
+      ratingNormal: 99.1,
+      ratingSnr: 57.0,
+    });
+
+    const sisalBfTennis = makeRow({
+      id: 'm_sisal_bf_tennis',
+      eventKey: 'ev_6',
+      sport: 'tennis',
+      league: 'ATP - SINGOLARE: Roma',
+      eventName: 'Sinner - Alcaraz',
+      startTime: future9h,
+      marketType: 'H2H',
+      bookmakerId: 'sisal_it',
+      bookmakerName: 'Sisal.it',
+      exchangeId: 'betfair_exchange',
+      exchangeName: 'Betfair Exchange IT',
+      backOdds: 1.9,
+      layOdds: 1.92,
+      liquidity: 300,
+      ratingNormal: 98.5,
+      ratingSnr: 47.0,
+    });
+
+    const allRows = [
+      sisalBfEligible,
+      sisalBfGapConflict,
+      sisalBfStarted,
+      sisalSmOtherExchange,
+      snaiBfOtherBookie,
+      sisalBfTennis,
+    ];
+
+    const baseInput = {
+      rows: allRows,
+      selectedLegs: [] as OddsmatcherRow[],
+      mode: 'normal' as const,
+      search: '',
+      sport: 'ALL' as const,
+      leagues: [] as string[],
+      market: 'ALL' as const,
+      bookmakerIds: [] as string[],
+      exchangeIds: [] as string[],
+      minLegOdds: 1.01,
+      maxLegOdds: 25,
+      minRating: 0,
+      minLiquidity: 0,
+      dateRange: EMPTY_DATE_RANGE,
+      onlySurebets: false,
+      noSurebets: false,
+      onlyEligible: false,
+      minGapMinutes: 120,
+      nowMs,
+    };
+
+    // 1. With onlyEligible=false, bookmaker + exchange + sport + rating filters still strictly filter the list
+    const filteredEmptySlip = filterManualMultioddsCatalog({
+      ...baseInput,
+      sport: 'football',
+      bookmakerIds: ['sisal_it'],
+      exchangeIds: ['betfair_exchange'],
+      minRating: 97,
+      onlyEligible: false,
+    });
+    expect(filteredEmptySlip.items.map((x) => x.row.id)).toEqual([
+      'm_sisal_bf_past',
+      'm_sisal_bf_ok',
+    ]);
+    expect(filteredEmptySlip.eligibleCount).toBe(1);
+    expect(filteredEmptySlip.ineligibleCount).toBe(1);
+
+    // 2. When 1 leg is selected (locked to sisal_it) and onlyEligible=false, other bookmakers MUST NOT appear
+    //    even if bookmakerIds was [] or included multiple bookmakers before locking
+    const filteredWithLockedLeg = filterManualMultioddsCatalog({
+      ...baseInput,
+      selectedLegs: [sisalBfEligible],
+      bookmakerIds: [],
+      exchangeIds: ['betfair_exchange'],
+      onlyEligible: false,
+    });
+    const lockedIds = filteredWithLockedLeg.items.map((x) => x.row.id);
+    expect(lockedIds).not.toContain('m_snai_bf');
+    expect(lockedIds).not.toContain('m_sisal_sm');
+    expect(lockedIds).toEqual([
+      'm_sisal_bf_ok',
+      'm_sisal_bf_tennis',
+      'm_sisal_bf_past',
+      'm_sisal_bf_gap',
+    ]);
+
+    // 3. Toggling onlyEligible=true hides the ineligible rows of the locked bookmaker while keeping eligible ones
+    const filteredOnlyEligible = filterManualMultioddsCatalog({
+      ...baseInput,
+      selectedLegs: [sisalBfEligible],
+      bookmakerIds: [],
+      exchangeIds: ['betfair_exchange'],
+      onlyEligible: true,
+    });
+    expect(filteredOnlyEligible.items.map((x) => x.row.id)).toEqual([
+      'm_sisal_bf_ok',
+      'm_sisal_bf_tennis',
+    ]);
   });
 });

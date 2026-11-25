@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -35,6 +35,7 @@ import {
 } from '../../shared/dateRange';
 import { calculateSequentialMultiodds, computeAutoRolloverRating } from '../../shared/math';
 import {
+  filterManualMultioddsCatalog,
   sortMultipleLegs,
   validateManualMultipleCandidate,
   type ManualMultipleValidation,
@@ -42,9 +43,6 @@ import {
 import {
   buildCompetitionOptions,
   getTopCompetitionValues,
-  inferSportFromLeague,
-  isRowSurebet,
-  matchesWatchLeagues,
 } from '../../shared/ratingWatch';
 import { buildSavedMultipleInputFromPlan } from '../../shared/savedMultiples';
 import {
@@ -55,6 +53,7 @@ import {
   type SavedMultiplePlan,
   type SavedMultiplePlanInput,
   type ScrapeSnapshot,
+  type SourceId,
   type SportKey,
   type TrackedBet,
 } from '../../shared/types';
@@ -74,7 +73,6 @@ import { CustomMultiSelect, CustomSelect } from './CustomSelect';
 import {
   DateRangeCalendar,
   EMPTY_DATE_RANGE,
-  matchesDateRange,
   toLocalDateKey,
   type DateRangeValue,
 } from './DateRangeCalendar';
@@ -88,13 +86,82 @@ import {
   SourceMultiSelect,
 } from './SourceSelect';
 
+export interface ManualMultioddsState {
+  selectedRows: OddsmatcherRow[];
+  planName: string;
+  mode: BetMode;
+  stake: number;
+  bonusBoostPct: number;
+  minGapMinutes: number;
+  refundAmount: number;
+  refundRetention: number;
+  realBalance: number;
+  bonusBalance: number;
+  rolloverRemaining: number;
+  autoEstimatedRating: boolean;
+  manualEstimatedRating: number;
+  rolloverWalletRule: RolloverWalletRule;
+  search: string;
+  sport: SportKey | 'ALL';
+  leagues: string[];
+  market: MarketType | 'ALL';
+  bookmakerFilters: string[];
+  exchangeFilters: string[];
+  minLegOdds: number;
+  maxLegOdds: number;
+  minRating: number;
+  minLiquidity: number;
+  dateRange: DateRangeValue;
+  onlySurebets: boolean;
+  noSurebets: boolean;
+  onlyEligible: boolean;
+  pageSize: number;
+}
+
+export function createDefaultManualMultioddsState(): ManualMultioddsState {
+  return {
+    selectedRows: [],
+    planName: '',
+    mode: 'normal',
+    stake: 50,
+    bonusBoostPct: 0,
+    minGapMinutes: 120,
+    refundAmount: 25,
+    refundRetention: 70,
+    realBalance: 100,
+    bonusBalance: 100,
+    rolloverRemaining: 500,
+    autoEstimatedRating: true,
+    manualEstimatedRating: 96,
+    rolloverWalletRule: 'mixed',
+    search: '',
+    sport: 'ALL',
+    leagues: [],
+    market: 'ALL',
+    bookmakerFilters: [],
+    exchangeFilters: [],
+    minLegOdds: 1.01,
+    maxLegOdds: 25,
+    minRating: 0,
+    minLiquidity: 0,
+    dateRange: EMPTY_DATE_RANGE,
+    onlySurebets: false,
+    noSurebets: false,
+    onlyEligible: false,
+    pageSize: 60,
+  };
+}
+
 interface ManualMultioddsBuilderProps {
   snapshot: ScrapeSnapshot;
+  enabledSources?: Partial<Record<SourceId, boolean>>;
   isBrowserOnline: boolean;
   autoScrapeActive?: boolean;
   lockedRows: OddsmatcherRow[];
   soundEnabled: boolean;
   savedCount?: number;
+  persistedState?: ManualMultioddsState;
+  onChangePersistedState?: React.Dispatch<React.SetStateAction<ManualMultioddsState>>;
   onSaveTrackedBet: (bet: Omit<TrackedBet, 'id' | 'createdAt'>) => void;
   onSaveMultiplePlan?: (
     plan: SavedMultiplePlan | SavedMultiplePlanInput
@@ -114,11 +181,14 @@ const MAX_MANUAL_LEGS = 8;
 export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = React.memo(
   ({
     snapshot,
+    enabledSources,
     isBrowserOnline,
     autoScrapeActive = true,
     lockedRows,
     soundEnabled,
     savedCount = 0,
+    persistedState,
+    onChangePersistedState,
     onSaveTrackedBet,
     onSaveMultiplePlan,
     onOpenSavedList,
@@ -127,44 +197,146 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     onRestartAutoScrape,
     onOpenScrapers,
   }) => {
-    // Selected leg IDs + fallback row cache so background scrape refreshes update odds without losing picks
-    const [selectedIds, setSelectedIds] = useState<string[]>([]);
-    const cachedRowsRef = useRef<Map<string, OddsmatcherRow>>(new Map());
+    const [localState, setLocalState] = useState<ManualMultioddsState>(() =>
+      createDefaultManualMultioddsState()
+    );
+    const state = persistedState ?? localState;
+    const setState = onChangePersistedState ?? setLocalState;
 
-    // Slip calculation parameters
-    const [planName, setPlanName] = useState<string>('');
-    const [mode, setMode] = useState<BetMode>('normal');
-    const [stake, setStake] = useState<number>(50);
-    const [bonusBoostPct, setBonusBoostPct] = useState<number>(0);
-    const [minGapMinutes, setMinGapMinutes] = useState<number>(120);
-    const [refundAmount, setRefundAmount] = useState<number>(25);
-    const [refundRetention, setRefundRetention] = useState<number>(70);
+    const {
+      selectedRows,
+      planName,
+      mode,
+      stake,
+      bonusBoostPct,
+      minGapMinutes,
+      refundAmount,
+      refundRetention,
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      autoEstimatedRating,
+      manualEstimatedRating,
+      rolloverWalletRule,
+      search,
+      sport,
+      leagues,
+      market,
+      bookmakerFilters,
+      exchangeFilters,
+      minLegOdds,
+      maxLegOdds,
+      minRating,
+      minLiquidity,
+      dateRange,
+      onlySurebets,
+      noSurebets,
+      onlyEligible,
+      pageSize,
+    } = state;
 
-    // Rollover parameters
-    const [realBalance, setRealBalance] = useState<number>(100);
-    const [bonusBalance, setBonusBalance] = useState<number>(100);
-    const [rolloverRemaining, setRolloverRemaining] = useState<number>(500);
-    const [autoEstimatedRating, setAutoEstimatedRating] = useState<boolean>(true);
-    const [manualEstimatedRating, setManualEstimatedRating] = useState<number>(96);
-    const [rolloverWalletRule, setRolloverWalletRule] = useState<RolloverWalletRule>('mixed');
+    const setPlanName = useCallback(
+      (v: string) => setState((prev) => ({ ...prev, planName: v })),
+      [setState]
+    );
+    const setMode = useCallback(
+      (v: BetMode) => setState((prev) => ({ ...prev, mode: v })),
+      [setState]
+    );
+    const setStake = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, stake: v })),
+      [setState]
+    );
+    const setBonusBoostPct = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, bonusBoostPct: v })),
+      [setState]
+    );
+    const setMinGapMinutes = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, minGapMinutes: v })),
+      [setState]
+    );
+    const setRefundAmount = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, refundAmount: v })),
+      [setState]
+    );
+    const setRefundRetention = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, refundRetention: v })),
+      [setState]
+    );
+    const setRealBalance = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, realBalance: v })),
+      [setState]
+    );
+    const setBonusBalance = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, bonusBalance: v })),
+      [setState]
+    );
+    const setRolloverRemaining = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, rolloverRemaining: v })),
+      [setState]
+    );
+    const setAutoEstimatedRating = useCallback(
+      (v: boolean) => setState((prev) => ({ ...prev, autoEstimatedRating: v })),
+      [setState]
+    );
+    const setManualEstimatedRating = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, manualEstimatedRating: v })),
+      [setState]
+    );
+    const setRolloverWalletRule = useCallback(
+      (v: RolloverWalletRule) => setState((prev) => ({ ...prev, rolloverWalletRule: v })),
+      [setState]
+    );
+    const setSearch = useCallback(
+      (v: string) => setState((prev) => ({ ...prev, search: v })),
+      [setState]
+    );
+    const setSport = useCallback(
+      (v: SportKey | 'ALL') => setState((prev) => ({ ...prev, sport: v })),
+      [setState]
+    );
+    const setLeagues = useCallback(
+      (v: string[]) => setState((prev) => ({ ...prev, leagues: v })),
+      [setState]
+    );
+    const setMarket = useCallback(
+      (v: MarketType | 'ALL') => setState((prev) => ({ ...prev, market: v })),
+      [setState]
+    );
+    const setBookmakerFilters = useCallback(
+      (v: string[]) => setState((prev) => ({ ...prev, bookmakerFilters: v })),
+      [setState]
+    );
+    const setExchangeFilters = useCallback(
+      (v: string[]) => setState((prev) => ({ ...prev, exchangeFilters: v })),
+      [setState]
+    );
+    const setMinLegOdds = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, minLegOdds: v })),
+      [setState]
+    );
+    const setMaxLegOdds = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, maxLegOdds: v })),
+      [setState]
+    );
+    const setMinRating = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, minRating: v })),
+      [setState]
+    );
+    const setMinLiquidity = useCallback(
+      (v: number) => setState((prev) => ({ ...prev, minLiquidity: v })),
+      [setState]
+    );
+    const setOnlyEligible = useCallback(
+      (v: boolean | ((prev: boolean) => boolean)) =>
+        setState((prev) => ({
+          ...prev,
+          onlyEligible: typeof v === 'function' ? v(prev.onlyEligible) : v,
+        })),
+      [setState]
+    );
 
-    // Event browser filters (full parity with Ottimizzatore Automatico)
-    const [search, setSearch] = useState<string>('');
-    const [sport, setSport] = useState<SportKey | 'ALL'>('ALL');
-    const [leagues, setLeagues] = useState<string[]>([]);
-    const [market, setMarket] = useState<MarketType | 'ALL'>('ALL');
-    const [bookmakerFilters, setBookmakerFilters] = useState<string[]>([]);
-    const [exchangeFilters, setExchangeFilters] = useState<string[]>([]);
-    const [minLegOdds, setMinLegOdds] = useState<number>(1.01);
-    const [maxLegOdds, setMaxLegOdds] = useState<number>(25);
-    const [minRating, setMinRating] = useState<number>(0);
-    const [minLiquidity, setMinLiquidity] = useState<number>(0);
-    const [dateRange, setDateRange] = useState<DateRangeValue>(EMPTY_DATE_RANGE);
-    const [onlySurebets, setOnlySurebets] = useState<boolean>(false);
-    const [noSurebets, setNoSurebets] = useState<boolean>(false);
-    const [onlyEligible, setOnlyEligible] = useState<boolean>(false);
     const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(false);
-    const [pageSize, setPageSize] = useState<number>(60);
 
     useEffect(() => {
       if (!showAdvancedFilters) return;
@@ -191,20 +363,10 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
       return m;
     }, [snapshot.rows]);
 
-    // Update cache with fresh ticks for selected legs
-    for (const id of selectedIds) {
-      const fresh = rowMap.get(id);
-      if (fresh) cachedRowsRef.current.set(id, fresh);
-    }
-
     const selectedLegs = useMemo(() => {
-      const legs: OddsmatcherRow[] = [];
-      for (const id of selectedIds) {
-        const row = rowMap.get(id) ?? cachedRowsRef.current.get(id);
-        if (row) legs.push(row);
-      }
+      const legs = selectedRows.map((row) => rowMap.get(row.id) ?? row);
       return sortMultipleLegs(legs);
-    }, [selectedIds, rowMap]);
+    }, [selectedRows, rowMap]);
 
     const lockedBookmakerId = selectedLegs[0]?.bookmakerId ?? null;
     const lockedBookmakerName = selectedLegs[0]?.bookmakerName ?? null;
@@ -214,13 +376,13 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     );
 
     const bookmakerOptions = useMemo(
-      () => buildBookmakerSourceOptions(snapshot),
-      [snapshot]
+      () => buildBookmakerSourceOptions(snapshot, enabledSources),
+      [snapshot, enabledSources]
     );
 
     const exchangeOptions = useMemo(
-      () => buildExchangeSourceOptions(snapshot),
-      [snapshot]
+      () => buildExchangeSourceOptions(snapshot, enabledSources),
+      [snapshot, enabledSources]
     );
 
     const competitionOptions = useMemo(
@@ -237,36 +399,6 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
       return topCompetitionsForSport.every((comp) => selected.has(comp));
     }, [leagues, topCompetitionsForSport]);
 
-    // Prune selected competitions belonging to another sport when switching sport
-    useEffect(() => {
-      if (sport === 'ALL') return;
-      setLeagues((prev) => {
-        const next = prev.filter((lg) => {
-          const inferred = inferSportFromLeague(lg);
-          return !inferred || inferred === sport;
-        });
-        return next.length === prev.length ? prev : next;
-      });
-    }, [sport]);
-
-    // Prune disabled sources on error
-    useEffect(() => {
-      const disabledBookIds = new Set(bookmakerOptions.filter((o) => o.disabled).map((o) => o.id));
-      if (disabledBookIds.size > 0) {
-        setBookmakerFilters((prev) => {
-          const next = prev.filter((id) => !disabledBookIds.has(id));
-          return next.length === prev.length ? prev : next;
-        });
-      }
-      const disabledExIds = new Set(exchangeOptions.filter((o) => o.disabled).map((o) => o.id));
-      if (disabledExIds.size > 0) {
-        setExchangeFilters((prev) => {
-          const next = prev.filter((id) => !disabledExIds.has(id));
-          return next.length === prev.length ? prev : next;
-        });
-      }
-    }, [bookmakerOptions, exchangeOptions]);
-
     // Live event density map per local calendar day (YYYY-MM-DD) for calendar day dots
     const eventDateCounts = useMemo(() => {
       const counts: Record<string, number> = {};
@@ -280,7 +412,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     }, [snapshot.rows]);
 
     const handleDateRangeChange = (next: DateRangeValue, meta?: { pendingEnd?: boolean }) => {
-      setDateRange(next);
+      setState((prev) => ({ ...prev, dateRange: next }));
       onDateRangeFilterChange?.(next, meta);
     };
 
@@ -292,44 +424,56 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     const isDateRangeScraping = Boolean(snapshot.stats.isDateRangeScraping);
 
     const autoRatingEstimate = useMemo(() => {
-      const targetBookie =
-        lockedBookmakerId ?? (bookmakerFilters.length === 1 ? bookmakerFilters[0] : null);
       const scopedRows = snapshot.rows.filter((r) => {
-        if (targetBookie && r.bookmakerId !== targetBookie) return false;
+        if (
+          effectiveBookmakerFilters.length > 0 &&
+          !effectiveBookmakerFilters.includes(r.bookmakerId)
+        ) {
+          return false;
+        }
         if (exchangeFilters.length > 0 && !exchangeFilters.includes(r.exchangeId)) return false;
         return true;
       });
       return computeAutoRolloverRating({
         rows: scopedRows.length > 0 ? scopedRows : snapshot.rows,
       });
-    }, [snapshot.rows, lockedBookmakerId, bookmakerFilters, exchangeFilters]);
+    }, [snapshot.rows, effectiveBookmakerFilters, exchangeFilters]);
 
     const effectiveEstimatedRating = autoEstimatedRating
       ? autoRatingEstimate.estimatedRating
       : manualEstimatedRating;
 
     const resetAllCatalogFilters = () => {
-      setSearch('');
-      setSport('ALL');
-      setLeagues([]);
-      setMarket('ALL');
-      setBookmakerFilters([]);
-      setExchangeFilters([]);
-      setMinLegOdds(1.01);
-      setMaxLegOdds(25);
-      setMinRating(0);
-      setMinLiquidity(0);
-      handleDateRangeChange(EMPTY_DATE_RANGE);
-      setOnlySurebets(false);
-      setNoSurebets(false);
-      setOnlyEligible(false);
+      setState((prev) => ({
+        ...prev,
+        search: '',
+        sport: 'ALL',
+        leagues: [],
+        market: 'ALL',
+        bookmakerFilters: [],
+        exchangeFilters: [],
+        minLegOdds: 1.01,
+        maxLegOdds: 25,
+        minRating: 0,
+        minLiquidity: 0,
+        dateRange: EMPTY_DATE_RANGE,
+        onlySurebets: false,
+        noSurebets: false,
+        onlyEligible: false,
+      }));
+      onDateRangeFilterChange?.(EMPTY_DATE_RANGE);
     };
 
     const activeAdvancedFilterCount = useMemo(() => {
       let count = 0;
       if (leagues.length > 0) count++;
       if (market !== 'ALL') count++;
-      if (Math.abs(minLegOdds - 1.01) > 0.005 || Math.abs(maxLegOdds - 25) > 0.005) count++;
+      if (
+        (minLegOdds > 0 && Math.abs(minLegOdds - 1.01) > 0.005) ||
+        (maxLegOdds >= 1.05 && Math.abs(maxLegOdds - 25) > 0.005)
+      ) {
+        count++;
+      }
       if (minRating > 0) count++;
       if (minLiquidity > 0) count++;
       if (dateRange.mode !== 'all') count++;
@@ -340,118 +484,75 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
 
     const { visibleCatalog, totalMatchingFilters, eligibleCount, ineligibleCount } =
       useMemo(() => {
-        const q = search.trim().toLowerCase();
-        const nowMs = Date.now();
-        const items: Array<{ row: OddsmatcherRow; validation: ManualMultipleValidation }> = [];
-
-        let elig = 0;
-        let inelig = 0;
-
-        for (const row of snapshot.rows) {
-          if (sport !== 'ALL' && row.sport !== sport) continue;
-          if (leagues.length > 0 && !matchesWatchLeagues(leagues, row.league, row.sport)) continue;
-          if (market !== 'ALL' && row.marketType !== market) continue;
-          if (exchangeFilters.length > 0 && !exchangeFilters.includes(row.exchangeId)) continue;
-
-          // If user chose explicit bookmakers when slip is empty, filter by them
-          if (
-            !lockedBookmakerId &&
-            bookmakerFilters.length > 0 &&
-            !bookmakerFilters.includes(row.bookmakerId)
-          ) {
-            continue;
-          }
-
-          if (row.backOdds < minLegOdds || row.backOdds > maxLegOdds) continue;
-          if (row.liquidity < minLiquidity) continue;
-          if (dateRange.mode !== 'all' && !matchesDateRange(row.startTime, dateRange, nowMs)) {
-            continue;
-          }
-
-          const rowRating = mode === 'snr' ? row.ratingSnr : row.ratingNormal;
-          if (minRating > 0 && rowRating < minRating) continue;
-
-          const surebet = isRowSurebet(row);
-          if (onlySurebets && !surebet) continue;
-          if (noSurebets && surebet) continue;
-
-          if (q) {
-            const hay = `${row.eventName} ${row.league} ${row.selectionLabel} ${row.bookmakerName}`.toLowerCase();
-            if (!hay.includes(q)) continue;
-          }
-
-          const validation = validateManualMultipleCandidate(row, selectedLegs, {
-            minGapMinutes,
-            maxLegs: MAX_MANUAL_LEGS,
-            nowMs,
-          });
-
-          if (validation.eligible) elig++;
-          else if (validation.reason !== 'already_selected') inelig++;
-
-          if (onlyEligible && !validation.eligible && validation.reason !== 'already_selected') {
-            continue;
-          }
-
-          items.push({ row, validation });
-        }
-
-        // Pin selected legs in step order at top; keep eligible & ineligible inline by active mode Rating
-        items.sort((a, b) => {
-          const aSel = a.validation.reason === 'already_selected';
-          const bSel = b.validation.reason === 'already_selected';
-          if (aSel !== bSel) return aSel ? -1 : 1;
-          if (aSel && bSel) {
-            return (a.validation.conflictStepIndex ?? 0) - (b.validation.conflictStepIndex ?? 0);
-          }
-          const ra = mode === 'snr' ? a.row.ratingSnr : a.row.ratingNormal;
-          const rb = mode === 'snr' ? b.row.ratingSnr : b.row.ratingNormal;
-          return rb - ra;
+        const res = filterManualMultioddsCatalog({
+          rows: snapshot.rows,
+          selectedLegs,
+          mode,
+          search,
+          sport,
+          leagues,
+          market,
+          bookmakerIds: effectiveBookmakerFilters,
+          exchangeIds: exchangeFilters,
+          minLegOdds,
+          maxLegOdds,
+          minRating,
+          minLiquidity,
+          dateRange,
+          onlySurebets,
+          noSurebets,
+          onlyEligible,
+          minGapMinutes,
+          maxLegs: MAX_MANUAL_LEGS,
         });
 
         return {
-          visibleCatalog: items.slice(0, pageSize),
-          totalMatchingFilters: items.length,
-          eligibleCount: elig,
-          ineligibleCount: inelig,
+          visibleCatalog: res.items.slice(0, pageSize),
+          totalMatchingFilters: res.items.length,
+          eligibleCount: res.eligibleCount,
+          ineligibleCount: res.ineligibleCount,
         };
       }, [
         snapshot.rows,
+        selectedLegs,
+        mode,
         search,
         sport,
         leagues,
         market,
+        effectiveBookmakerFilters,
         exchangeFilters,
-        lockedBookmakerId,
-        bookmakerFilters,
         minLegOdds,
         maxLegOdds,
+        minRating,
         minLiquidity,
         dateRange,
-        mode,
-        minRating,
         onlySurebets,
         noSurebets,
-        selectedLegs,
-        minGapMinutes,
         onlyEligible,
+        minGapMinutes,
         pageSize,
       ]);
 
     const addLeg = (row: OddsmatcherRow, validation: ManualMultipleValidation) => {
       if (!validation.eligible) return;
-      cachedRowsRef.current.set(row.id, row);
-      setSelectedIds((prev) => (prev.includes(row.id) ? prev : [...prev, row.id]));
+      setState((prev) =>
+        prev.selectedRows.some((x) => x.id === row.id)
+          ? prev
+          : { ...prev, selectedRows: [...prev.selectedRows, row] }
+      );
       if (soundEnabled) playCopyTick();
     };
 
     const removeLeg = (id: string) => {
-      setSelectedIds((prev) => prev.filter((x) => x !== id));
+      setState((prev) => ({
+        ...prev,
+        selectedRows: prev.selectedRows.filter((x) => x.id !== id),
+      }));
     };
 
     const clearSlip = () => {
-      setSelectedIds([]);
-      setPlanName('');
+      setState((prev) => ({ ...prev, selectedRows: [], planName: '' }));
       setSavedSignature(null);
       setSavedPlanState(null);
     };
@@ -465,12 +566,11 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
           maxLegs: MAX_MANUAL_LEGS,
         });
         if (res.eligible) {
-          cachedRowsRef.current.set(candidate.id, candidate);
           next.push(candidate);
         }
       }
       if (next.length > 0) {
-        setSelectedIds(next.map((r) => r.id));
+        setState((prev) => ({ ...prev, selectedRows: next }));
         if (soundEnabled) playCopyTick();
       }
     };
@@ -856,12 +956,15 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                                   Math.abs(minRating - 90) < 0.005 &&
                                   Math.abs(minLiquidity - 25) < 0.005,
                                 onSelect: () => {
-                                  setMode('normal');
-                                  setMinLegOdds(1.4);
-                                  setMaxLegOdds(4.5);
-                                  setMinRating(90);
-                                  setMinLiquidity(25);
-                                  setOnlySurebets(false);
+                                  setState((prev) => ({
+                                    ...prev,
+                                    mode: 'normal',
+                                    minLegOdds: 1.4,
+                                    maxLegOdds: 4.5,
+                                    minRating: 90,
+                                    minLiquidity: 25,
+                                    onlySurebets: false,
+                                  }));
                                 },
                               },
                               {
@@ -878,12 +981,15 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                                   Math.abs(minRating - 55) < 0.005 &&
                                   Math.abs(minLiquidity - 20) < 0.005,
                                 onSelect: () => {
-                                  setMode('snr');
-                                  setMinLegOdds(1.6);
-                                  setMaxLegOdds(6.0);
-                                  setMinRating(55);
-                                  setMinLiquidity(20);
-                                  setOnlySurebets(false);
+                                  setState((prev) => ({
+                                    ...prev,
+                                    mode: 'snr',
+                                    minLegOdds: 1.6,
+                                    maxLegOdds: 6.0,
+                                    minRating: 55,
+                                    minLiquidity: 20,
+                                    onlySurebets: false,
+                                  }));
                                 },
                               },
                               {
@@ -894,13 +1000,16 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                                 icon: <Flame className="h-3 w-3" />,
                                 active: onlySurebets,
                                 onSelect: () => {
-                                  setMode('normal');
-                                  setMinLegOdds(1.1);
-                                  setMaxLegOdds(20);
-                                  setMinRating(100);
-                                  setMinLiquidity(10);
-                                  setOnlySurebets(true);
-                                  setNoSurebets(false);
+                                  setState((prev) => ({
+                                    ...prev,
+                                    mode: 'normal',
+                                    minLegOdds: 1.1,
+                                    maxLegOdds: 20,
+                                    minRating: 100,
+                                    minLiquidity: 10,
+                                    onlySurebets: true,
+                                    noSurebets: false,
+                                  }));
                                 },
                               },
                               {
@@ -911,8 +1020,11 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                                 icon: <Coins className="h-3 w-3" />,
                                 active: !onlySurebets && minLiquidity >= 100,
                                 onSelect: () => {
-                                  setMinLiquidity(100);
-                                  setOnlySurebets(false);
+                                  setState((prev) => ({
+                                    ...prev,
+                                    minLiquidity: 100,
+                                    onlySurebets: false,
+                                  }));
                                 },
                               },
                               {
@@ -936,10 +1048,13 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                             data-testid="manual-only-surebet-toggle"
                             aria-pressed={onlySurebets}
                             onClick={() =>
-                              setOnlySurebets((v) => {
-                                const next = !v;
-                                if (next) setNoSurebets(false);
-                                return next;
+                              setState((prev) => {
+                                const next = !prev.onlySurebets;
+                                return {
+                                  ...prev,
+                                  onlySurebets: next,
+                                  noSurebets: next ? false : prev.noSurebets,
+                                };
                               })
                             }
                             title="Mostra solo esiti singoli con Rating ≥ 100% (Surebet)"
@@ -967,10 +1082,13 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                             data-testid="manual-no-surebet-toggle"
                             aria-pressed={noSurebets}
                             onClick={() =>
-                              setNoSurebets((v) => {
-                                const next = !v;
-                                if (next) setOnlySurebets(false);
-                                return next;
+                              setState((prev) => {
+                                const next = !prev.noSurebets;
+                                return {
+                                  ...prev,
+                                  noSurebets: next,
+                                  onlySurebets: next ? false : prev.onlySurebets,
+                                };
                               })
                             }
                             title="Esclude automaticamente tutte le surebet singole (Rating Normale ≥ 100%)"
@@ -1050,7 +1168,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                                 data-testid="manual-min-leg-odds"
                                 min={1.01}
                                 value={minLegOdds}
-                                onChange={(v) => setMinLegOdds(Math.max(1.01, v))}
+                                onChange={setMinLegOdds}
                                 placeholder="1.01"
                                 className="w-1/2 rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 font-mono text-xs text-white focus:border-brand-400 focus:outline-none"
                               />
@@ -1058,7 +1176,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                                 data-testid="manual-max-leg-odds"
                                 min={1.05}
                                 value={maxLegOdds}
-                                onChange={(v) => setMaxLegOdds(Math.max(1.05, v))}
+                                onChange={setMaxLegOdds}
                                 placeholder="25"
                                 className="w-1/2 rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 font-mono text-xs text-white focus:border-brand-400 focus:outline-none"
                               />
@@ -1206,16 +1324,16 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                 )}
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto">
+              <div className="flex-1 overflow-auto">
                 <table className="w-full border-collapse text-left text-xs">
                   <thead className="sticky top-0 z-20 border-b border-slate-800 bg-[var(--bg-modal-solid)]">
                     <tr className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                      <th className="px-3 py-2.5">Data/Ora</th>
-                      <th className="px-3 py-2.5">Evento & Esito</th>
-                      <th className="px-2.5 py-2.5 text-right">Punta</th>
-                      <th className="px-2.5 py-2.5 text-right">Banca</th>
-                      <th className="px-2.5 py-2.5 text-right">Rating</th>
-                      <th className="px-3 py-2.5 text-right">Multipla</th>
+                      <th className="px-2.5 py-2.5">Data/Ora</th>
+                      <th className="px-2.5 py-2.5">Evento & Esito</th>
+                      <th className="px-2 py-2.5 text-right">Punta</th>
+                      <th className="px-2 py-2.5 text-right">Banca</th>
+                      <th className="px-2 py-2.5 text-right">Rating</th>
+                      <th className="px-2.5 py-2.5 text-right">Multipla</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/55">
@@ -1239,14 +1357,14 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                               : 'hover:bg-brand-500/10'
                           }`}
                         >
-                          <td className="whitespace-nowrap px-3 py-2">
+                          <td className="whitespace-nowrap px-2.5 py-2">
                             <div className="font-mono text-[11px] font-semibold text-slate-200">
                               {tm.date} <span className="text-brand-300">{tm.time}</span>
                             </div>
                             <div className="text-[10px] text-slate-500">{tm.relative}</div>
                           </td>
 
-                          <td className="max-w-[220px] px-3 py-2">
+                          <td className="max-w-[195px] px-2.5 py-2">
                             <div className="truncate font-semibold text-white">{row.eventName}</div>
                             <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-400">
                               <span className="rounded bg-slate-800 px-1 py-0.5 text-[9px] font-bold uppercase text-slate-300">
@@ -1258,30 +1376,35 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                             </div>
                           </td>
 
-                          <td className="whitespace-nowrap px-2.5 py-2 text-right">
-                            <div className="inline-flex items-center justify-end gap-2">
-                              <div className="flex flex-col items-end">
+                          <td className="whitespace-nowrap px-2 py-2 text-right">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              <div className="flex min-w-0 flex-col items-end">
                                 <div className="font-mono text-xs font-extrabold text-blue-300">
                                   {formatOdds(row.backOdds)}
                                 </div>
-                                <div className="text-[10px] text-slate-400">
+                                <div className="max-w-[84px] truncate text-[10px] text-slate-400">
                                   {row.bookmakerName}
                                 </div>
                               </div>
-                              <BookmakerIcon sourceId={row.bookmakerId} size={22} className="rounded-[5px]" />
+                              <BookmakerIcon sourceId={row.bookmakerId} size={20} className="shrink-0 rounded-[5px]" />
                             </div>
                           </td>
 
-                          <td className="whitespace-nowrap px-2.5 py-2 text-right">
-                            <div className="font-mono text-xs font-extrabold text-rose-300">
-                              {formatOdds(row.layOdds)}
-                            </div>
-                            <div className="font-mono text-[10px] text-slate-400">
-                              Liq {formatEuro(row.liquidity)}
+                          <td className="whitespace-nowrap px-2 py-2 text-right" title={row.exchangeName}>
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              <div className="flex min-w-0 flex-col items-end">
+                                <div className="font-mono text-xs font-extrabold text-rose-300">
+                                  {formatOdds(row.layOdds)}
+                                </div>
+                                <div className="font-mono text-[10px] text-slate-400">
+                                  Liq {formatEuro(row.liquidity)}
+                                </div>
+                              </div>
+                              <BookmakerIcon sourceId={row.exchangeId} size={20} className="shrink-0 rounded-[5px]" />
                             </div>
                           </td>
 
-                          <td className="whitespace-nowrap px-2.5 py-2 text-right">
+                          <td className="whitespace-nowrap px-2 py-2 text-right">
                             {(() => {
                               const rowRating = mode === 'snr' ? row.ratingSnr : row.ratingNormal;
                               return (
@@ -1300,7 +1423,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                             })()}
                           </td>
 
-                          <td className="whitespace-nowrap px-3 py-2 text-right">
+                          <td className="whitespace-nowrap px-2.5 py-2 text-right">
                             {isSelected ? (
                               <div className="inline-flex items-center gap-1">
                                 <span className="rounded-md border border-brand-400/50 bg-brand-400/20 px-2 py-1 font-mono text-[10px] font-bold text-brand-200">
@@ -1353,7 +1476,9 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                     </span>
                     <button
                       type="button"
-                      onClick={() => setPageSize((s) => s + 60)}
+                      onClick={() =>
+                        setState((prev) => ({ ...prev, pageSize: prev.pageSize + 60 }))
+                      }
                       className="rounded-lg border border-brand-400/35 bg-brand-500/10 px-2.5 py-1 font-semibold text-brand-200 hover:bg-brand-500/20"
                     >
                       Carica altri 60

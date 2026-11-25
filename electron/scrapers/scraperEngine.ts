@@ -254,6 +254,46 @@ export class ScraperEngine {
     return SOURCE_CATALOG.map((c) => this.sourceStatuses.get(c.id)!);
   }
 
+  public syncEnabledSources(
+    enabledSources: Partial<Record<SourceId, boolean>>,
+    emit = true
+  ): ScrapeSnapshot {
+    let changed = false;
+    for (const cfg of SOURCE_CATALOG) {
+      const st = this.sourceStatuses.get(cfg.id);
+      if (!st) continue;
+      const enabled = enabledSources[cfg.id] ?? cfg.enabled;
+      if (st.enabled !== enabled) {
+        st.enabled = enabled;
+        changed = true;
+      }
+      if (!enabled && st.state !== 'disabled') {
+        st.state = 'disabled';
+        changed = true;
+      } else if (enabled && st.state === 'disabled') {
+        st.state = 'idle';
+        changed = true;
+      }
+    }
+    if (changed) {
+      if (emit) {
+        this.emitPartial();
+      } else {
+        const sources = this.getSourcesList();
+        this.lastSnapshot = {
+          ...this.lastSnapshot,
+          sources,
+          connection: computeConnectionDiagnostic({
+            sources,
+            isSystemOnline: this.checkOnline(),
+            hasCompletedCycle: this.lastSnapshot.stats.lastCompletedAt !== null,
+          }),
+        };
+      }
+    }
+    return this.lastSnapshot;
+  }
+
   private addLog(level: ScrapeLogEntry['level'], source: string, message: string) {
     const entry: ScrapeLogEntry = {
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,

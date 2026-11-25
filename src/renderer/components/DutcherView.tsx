@@ -20,6 +20,7 @@ import type {
   DutcherRow,
   MarketType,
   ScrapeSnapshot,
+  SourceId,
   SportKey,
   TableDensity,
   TrackedBet,
@@ -38,6 +39,7 @@ import { SlidingPillTrack } from './SlidingPillTrack';
 
 interface DutcherViewProps {
   snapshot: ScrapeSnapshot;
+  enabledSources?: Partial<Record<SourceId, boolean>>;
   isBrowserOnline: boolean;
   autoScrapeActive?: boolean;
   soundEnabled: boolean;
@@ -56,6 +58,7 @@ interface DutcherViewProps {
 
 export const DutcherView: React.FC<DutcherViewProps> = ({
   snapshot,
+  enabledSources,
   isBrowserOnline,
   autoScrapeActive = true,
   soundEnabled,
@@ -534,6 +537,7 @@ export const DutcherView: React.FC<DutcherViewProps> = ({
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <PuntaPuntaMatcher
             snapshot={snapshot}
+            enabledSources={enabledSources}
             isBrowserOnline={isBrowserOnline}
             autoScrapeActive={autoScrapeActive}
             mode={matcherMode}

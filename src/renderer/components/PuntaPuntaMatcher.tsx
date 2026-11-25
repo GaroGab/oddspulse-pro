@@ -42,6 +42,7 @@ import type {
   BetMode,
   MarketType,
   ScrapeSnapshot,
+  SourceId,
   SportKey,
   TableDensity,
 } from '../../shared/types';
@@ -65,6 +66,7 @@ import { buildBookmakerSourceOptions, SourceMultiSelect } from './SourceSelect';
 
 interface PuntaPuntaMatcherProps {
   snapshot: ScrapeSnapshot;
+  enabledSources?: Partial<Record<SourceId, boolean>>;
   isBrowserOnline: boolean;
   autoScrapeActive?: boolean;
   mode: BetMode;
@@ -107,6 +109,7 @@ const OUTCOMES_MODE_OPTIONS: Array<{ value: OutcomesFilterMode; label: string; h
 
 export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
   snapshot,
+  enabledSources,
   isBrowserOnline,
   autoScrapeActive = true,
   mode,
@@ -152,8 +155,8 @@ export const PuntaPuntaMatcher: React.FC<PuntaPuntaMatcherProps> = ({
   const [pageSize, setPageSize] = useState(80);
 
   const bookmakerOptions = useMemo(
-    () => buildBookmakerSourceOptions(snapshot),
-    [snapshot]
+    () => buildBookmakerSourceOptions(snapshot, enabledSources),
+    [snapshot, enabledSources]
   );
 
   // Prune any previously selected bookmaker if it enters error state

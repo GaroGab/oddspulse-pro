@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Activity,
+  Ban,
+  CheckCheck,
   CheckCircle2,
   KeyRound,
   Play,
@@ -71,6 +73,20 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
     [snapshot.sources]
   );
 
+  const enabledFilteredCount = useMemo(
+    () =>
+      filteredSources.reduce((acc, src) => {
+        const meta = sourceMetaMap.get(src.id);
+        const isEnabled = settings.enabledSources[src.id] ?? meta?.enabled ?? src.enabled;
+        return acc + (isEnabled ? 1 : 0);
+      }, 0),
+    [filteredSources, settings.enabledSources, sourceMetaMap]
+  );
+
+  const allFilteredEnabled =
+    filteredSources.length > 0 && enabledFilteredCount === filteredSources.length;
+  const noneFilteredEnabled = filteredSources.length === 0 || enabledFilteredCount === 0;
+
   const toggleSource = (id: SourceId) => {
     onUpdateSettings({
       enabledSources: {
@@ -78,6 +94,17 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
         [id]: !settings.enabledSources[id],
       },
     });
+  };
+
+  const setFilteredSourcesEnabled = (enabled: boolean) => {
+    if (filteredSources.length === 0) return;
+    const nextEnabledSources: AppSettings['enabledSources'] = {
+      ...settings.enabledSources,
+    };
+    for (const src of filteredSources) {
+      nextEnabledSources[src.id] = enabled;
+    }
+    onUpdateSettings({ enabledSources: nextEnabledSources });
   };
 
   return (
@@ -320,27 +347,54 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
           </SlidingPillTrack>
         </div>
 
-        <div className="relative w-full sm:w-72">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-          <input
-            type="text"
-            value={sourceSearch}
-            onChange={(e) => setSourceSearch(e.target.value)}
-            placeholder="Cerca bookmaker o exchange per nome..."
-            data-testid="scrapers-bookmaker-search"
-            className="h-9 w-full rounded-xl border border-slate-800 bg-slate-950/90 pl-8 pr-8 text-xs text-white placeholder-slate-500 focus:border-brand-400 focus:outline-none"
-          />
-          {sourceSearch && (
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
-              aria-label="Azzera ricerca bookmaker"
-              data-testid="scrapers-bookmaker-search-clear"
-              onClick={() => setSourceSearch('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 transition hover:text-white"
+              onClick={() => setFilteredSourcesEnabled(true)}
+              disabled={allFilteredEnabled}
+              data-testid="scrapers-select-all"
+              title="Attiva tutte le fonti visibili nell'elenco"
+              className="flex h-9 items-center gap-1.5 rounded-xl border border-emerald-400/35 bg-emerald-500/15 px-2.5 text-[11px] font-bold text-emerald-200 transition hover:border-emerald-400/65 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-45"
             >
-              <X className="h-3.5 w-3.5" />
+              <CheckCheck className="h-3.5 w-3.5 shrink-0" />
+              <span>Seleziona tutti</span>
             </button>
-          )}
+            <button
+              type="button"
+              onClick={() => setFilteredSourcesEnabled(false)}
+              disabled={noneFilteredEnabled}
+              data-testid="scrapers-deselect-all"
+              title="Disattiva tutte le fonti visibili nell'elenco"
+              className="flex h-9 items-center gap-1.5 rounded-xl border border-rose-500/35 bg-rose-500/10 px-2.5 text-[11px] font-bold text-rose-200 transition hover:border-rose-400/65 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Ban className="h-3.5 w-3.5 shrink-0" />
+              <span>Deseleziona tutti</span>
+            </button>
+          </div>
+
+          <div className="relative w-full sm:w-72">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+            <input
+              type="text"
+              value={sourceSearch}
+              onChange={(e) => setSourceSearch(e.target.value)}
+              placeholder="Cerca bookmaker o exchange per nome..."
+              data-testid="scrapers-bookmaker-search"
+              className="h-9 w-full rounded-xl border border-slate-800 bg-slate-950/90 pl-8 pr-8 text-xs text-white placeholder-slate-500 focus:border-brand-400 focus:outline-none"
+            />
+            {sourceSearch && (
+              <button
+                type="button"
+                aria-label="Azzera ricerca bookmaker"
+                data-testid="scrapers-bookmaker-search-clear"
+                onClick={() => setSourceSearch('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 transition hover:text-white"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

@@ -84,7 +84,11 @@ import { DateRangeCalendar } from './DateRangeCalendar';
 import { NumericInput } from './NumericInput';
 import { QuickPresetsMenu, type QuickPresetItem } from './QuickPresetsMenu';
 import { SlidingPillTrack } from './SlidingPillTrack';
-import { SourceMultiSelect } from './SourceSelect';
+import {
+  buildBookmakerSourceOptions,
+  buildExchangeSourceOptions,
+  SourceMultiSelect,
+} from './SourceSelect';
 
 interface RatingWatchViewProps {
   snapshot: ScrapeSnapshot;
@@ -544,19 +548,33 @@ export const RatingWatchView: React.FC<RatingWatchViewProps> = ({
   }, [draftSeed, onConsumeDraftSeed]);
 
   // Available Bookmaker & Exchange options
-  const bookmakerOptions = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const r of snapshot.rows) map.set(r.bookmakerId, r.bookmakerName);
-    for (const s of SOURCE_CATALOG.filter((x) => x.kind === 'bookmaker' && x.enabled)) {
-      if (!map.has(s.id)) map.set(s.id, s.name);
-    }
-    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [snapshot.rows]);
+  const bookmakerOptions = useMemo(
+    () => buildBookmakerSourceOptions(snapshot, settings.enabledSources),
+    [snapshot, settings.enabledSources]
+  );
 
   const exchangeOptions = useMemo(
-    () => SOURCE_CATALOG.filter((s) => s.kind === 'exchange').map((s) => ({ id: s.id, name: s.name })),
-    []
+    () => buildExchangeSourceOptions(snapshot, settings.enabledSources),
+    [snapshot, settings.enabledSources]
   );
+
+  // Prune any bookmaker/exchange from the draft form if deselected in scraper or in error state
+  useEffect(() => {
+    const disabledBookIds = new Set(bookmakerOptions.filter((o) => o.disabled).map((o) => o.id));
+    if (disabledBookIds.size > 0) {
+      setForm((prev) => {
+        const next = prev.bookmakerIds.filter((id) => !disabledBookIds.has(id));
+        return next.length === prev.bookmakerIds.length ? prev : { ...prev, bookmakerIds: next };
+      });
+    }
+    const disabledExIds = new Set(exchangeOptions.filter((o) => o.disabled).map((o) => o.id));
+    if (disabledExIds.size > 0) {
+      setForm((prev) => {
+        const next = prev.exchangeIds.filter((id) => !disabledExIds.has(id));
+        return next.length === prev.exchangeIds.length ? prev : { ...prev, exchangeIds: next };
+      });
+    }
+  }, [bookmakerOptions, exchangeOptions]);
 
   // Deduplicated upcoming/live events from snapshot.rows for searchable autocomplete
   const catalogEvents = useMemo(() => {

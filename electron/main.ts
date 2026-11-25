@@ -586,6 +586,7 @@ app.whenReady().then(() => {
     },
     () => net.isOnline()
   );
+  scraperEngine.syncEnabledSources(currentSettings.enabledSources, false);
 
   // Window IPC
   ipcMain.handle('window:minimize', () => {
@@ -729,6 +730,9 @@ app.whenReady().then(() => {
       if (bg) mainWindow.setBackgroundColor(bg);
     }
     saveSettings(currentSettings);
+    if (patch.enabledSources) {
+      scraperEngine.syncEnabledSources(currentSettings.enabledSources);
+    }
     const nextAutoActive = isAutoScrapeActive(currentSettings);
     if (patch.autoScrapeEnabled === false) {
       clearRefreshTimer(false);

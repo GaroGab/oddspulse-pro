@@ -1,4 +1,6 @@
-import type { OddsmatcherRow } from './types';
+import { matchesDateRange } from './dateRange';
+import { isRowSurebet, matchesWatchLeagues } from './ratingWatch';
+import type { BetMode, DateRangeValue, MarketType, OddsmatcherRow, SportKey } from './types';
 
 export type ManualMultipleValidationReason =
   | 'ok'
@@ -165,4 +167,138 @@ export function validateManualMultipleCandidate(
     shortLabel: null,
     detail: null,
   };
+}
+
+export interface FilterManualMultioddsCatalogInput {
+  rows: OddsmatcherRow[];
+  selectedLegs: OddsmatcherRow[];
+  mode: BetMode;
+  search: string;
+  sport: SportKey | 'ALL';
+  leagues: string[];
+  market: MarketType | 'ALL';
+  bookmakerIds: string[];
+  exchangeIds: string[];
+  minLegOdds: number;
+  maxLegOdds: number;
+  minRating: number;
+  minLiquidity: number;
+  dateRange: DateRangeValue;
+  onlySurebets: boolean;
+  noSurebets: boolean;
+  onlyEligible: boolean;
+  minGapMinutes: number;
+  maxLegs?: number;
+  nowMs?: number;
+}
+
+export interface ManualMultioddsCatalogItem {
+  row: OddsmatcherRow;
+  validation: ManualMultipleValidation;
+}
+
+export interface FilterManualMultioddsCatalogResult {
+  items: ManualMultioddsCatalogItem[];
+  eligibleCount: number;
+  ineligibleCount: number;
+}
+
+/**
+ * Filters and sorts the Manual Multiodds event catalog.
+ * Active filters (including bookmaker, locked slip bookmaker, and exchange) are always
+ * enforced regardless of whether `onlyEligible` is enabled or disabled.
+ */
+export function filterManualMultioddsCatalog(
+  input: FilterManualMultioddsCatalogInput
+): FilterManualMultioddsCatalogResult {
+  const {
+    rows,
+    selectedLegs,
+    mode,
+    search,
+    sport,
+    leagues,
+    market,
+    bookmakerIds,
+    exchangeIds,
+    minLegOdds,
+    maxLegOdds,
+    minRating,
+    minLiquidity,
+    dateRange,
+    onlySurebets,
+    noSurebets,
+    onlyEligible,
+    minGapMinutes,
+    maxLegs = 8,
+    nowMs = Date.now(),
+  } = input;
+
+  const q = search.trim().toLowerCase();
+  const lockedBookmakerId = selectedLegs[0]?.bookmakerId ?? null;
+  const effectiveBookmakerIds = lockedBookmakerId ? [lockedBookmakerId] : bookmakerIds;
+  const effMinOdds = minLegOdds > 0 ? minLegOdds : 1.01;
+  const effMaxOdds = maxLegOdds >= 1.05 ? maxLegOdds : Infinity;
+
+  const items: ManualMultioddsCatalogItem[] = [];
+  let eligibleCount = 0;
+  let ineligibleCount = 0;
+
+  for (const row of rows) {
+    if (sport !== 'ALL' && row.sport !== sport) continue;
+    if (leagues.length > 0 && !matchesWatchLeagues(leagues, row.league, row.sport)) continue;
+    if (market !== 'ALL' && row.marketType !== market) continue;
+    if (exchangeIds.length > 0 && !exchangeIds.includes(row.exchangeId)) continue;
+    if (effectiveBookmakerIds.length > 0 && !effectiveBookmakerIds.includes(row.bookmakerId)) {
+      continue;
+    }
+
+    if (row.backOdds < effMinOdds || row.backOdds > effMaxOdds) continue;
+    if (row.liquidity < minLiquidity) continue;
+    if (dateRange.mode !== 'all' && !matchesDateRange(row.startTime, dateRange, nowMs)) {
+      continue;
+    }
+
+    const rowRating = mode === 'snr' ? row.ratingSnr : row.ratingNormal;
+    if (minRating > 0 && rowRating < minRating) continue;
+
+    const surebet = isRowSurebet(row);
+    if (onlySurebets && !surebet) continue;
+    if (noSurebets && surebet) continue;
+
+    if (q) {
+      const hay = `${row.eventName} ${row.league} ${row.selectionLabel} ${row.marketLabel} ${row.bookmakerName} ${row.exchangeName}`.toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+
+    const validation = validateManualMultipleCandidate(row, selectedLegs, {
+      minGapMinutes,
+      maxLegs,
+      nowMs,
+    });
+
+    if (validation.eligible) eligibleCount++;
+    else if (validation.reason !== 'already_selected') ineligibleCount++;
+
+    if (onlyEligible && !validation.eligible && validation.reason !== 'already_selected') {
+      continue;
+    }
+
+    items.push({ row, validation });
+  }
+
+  // Pin selected legs in step order at top; keep eligible & ineligible inline by active mode Rating
+  items.sort((a, b) => {
+    const aSel = a.validation.reason === 'already_selected';
+    const bSel = b.validation.reason === 'already_selected';
+    if (aSel !== bSel) return aSel ? -1 : 1;
+    if (aSel && bSel) {
+      return (a.validation.conflictStepIndex ?? 0) - (b.validation.conflictStepIndex ?? 0);
+    }
+    const ra = mode === 'snr' ? a.row.ratingSnr : a.row.ratingNormal;
+    const rb = mode === 'snr' ? b.row.ratingSnr : b.row.ratingNormal;
+    return rb - ra;
+  });
+
+  return { items, eligibleCount, ineligibleCount };
 }
