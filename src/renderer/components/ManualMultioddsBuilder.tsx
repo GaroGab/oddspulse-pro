@@ -1,34 +1,57 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
+  Ban,
   BookmarkCheck,
   BookmarkPlus,
   Check,
   ClipboardCheck,
   Clock,
+  Coins,
   Copy,
   Filter,
+  Flame,
+  Gift,
   Layers,
   Lock,
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
+  Target,
   Trash2,
+  Trophy,
   X,
 } from 'lucide-react';
-import { calculateSequentialMultiodds } from '../../shared/math';
+import {
+  formatScrapeDateWindowLabel,
+  needsFutureDateScrape,
+  resolveScrapeDateWindow,
+} from '../../shared/dateRange';
+import { calculateSequentialMultiodds, computeAutoRolloverRating } from '../../shared/math';
 import {
   sortMultipleLegs,
   validateManualMultipleCandidate,
   type ManualMultipleValidation,
 } from '../../shared/multioddsValidation';
+import {
+  buildCompetitionOptions,
+  getTopCompetitionValues,
+  inferSportFromLeague,
+  isRowSurebet,
+  matchesWatchLeagues,
+} from '../../shared/ratingWatch';
 import { buildSavedMultipleInputFromPlan } from '../../shared/savedMultiples';
 import {
-  SOURCE_CATALOG,
   type BetMode,
+  type MarketType,
   type OddsmatcherRow,
+  type RolloverWalletRule,
   type SavedMultiplePlan,
   type SavedMultiplePlanInput,
   type ScrapeSnapshot,
@@ -47,10 +70,23 @@ import { playCopyTick } from '../utils/sound';
 import { AnimatedNumber } from './AnimatedNumber';
 import { BookmakerIcon } from './BookmakerIcon';
 import { ConnectionAlert } from './ConnectionAlert';
-import { CustomSelect } from './CustomSelect';
+import { CustomMultiSelect, CustomSelect } from './CustomSelect';
+import {
+  DateRangeCalendar,
+  EMPTY_DATE_RANGE,
+  matchesDateRange,
+  toLocalDateKey,
+  type DateRangeValue,
+} from './DateRangeCalendar';
 import { NumericInput } from './NumericInput';
+import { QuickPresetsMenu, type QuickPresetItem } from './QuickPresetsMenu';
+import { RolloverParamsPanel } from './RolloverParamsPanel';
 import { SlidingPillTrack } from './SlidingPillTrack';
-import { SourceMultiSelect } from './SourceSelect';
+import {
+  buildBookmakerSourceOptions,
+  buildExchangeSourceOptions,
+  SourceMultiSelect,
+} from './SourceSelect';
 
 interface ManualMultioddsBuilderProps {
   snapshot: ScrapeSnapshot;
@@ -64,6 +100,10 @@ interface ManualMultioddsBuilderProps {
     plan: SavedMultiplePlan | SavedMultiplePlanInput
   ) => Promise<SavedMultiplePlan | null> | SavedMultiplePlan | null | void;
   onOpenSavedList?: (planId?: string) => void;
+  onDateRangeFilterChange?: (
+    next: DateRangeValue,
+    opts?: { pendingEnd?: boolean; force?: boolean }
+  ) => void;
   onRetryScrape: () => void;
   onRestartAutoScrape?: () => void;
   onOpenScrapers: () => void;
@@ -82,6 +122,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     onSaveTrackedBet,
     onSaveMultiplePlan,
     onOpenSavedList,
+    onDateRangeFilterChange,
     onRetryScrape,
     onRestartAutoScrape,
     onOpenScrapers,
@@ -99,13 +140,40 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     const [refundAmount, setRefundAmount] = useState<number>(25);
     const [refundRetention, setRefundRetention] = useState<number>(70);
 
-    // Event browser filters
+    // Rollover parameters
+    const [realBalance, setRealBalance] = useState<number>(100);
+    const [bonusBalance, setBonusBalance] = useState<number>(100);
+    const [rolloverRemaining, setRolloverRemaining] = useState<number>(500);
+    const [autoEstimatedRating, setAutoEstimatedRating] = useState<boolean>(true);
+    const [manualEstimatedRating, setManualEstimatedRating] = useState<number>(96);
+    const [rolloverWalletRule, setRolloverWalletRule] = useState<RolloverWalletRule>('mixed');
+
+    // Event browser filters (full parity with Ottimizzatore Automatico)
     const [search, setSearch] = useState<string>('');
     const [sport, setSport] = useState<SportKey | 'ALL'>('ALL');
+    const [leagues, setLeagues] = useState<string[]>([]);
+    const [market, setMarket] = useState<MarketType | 'ALL'>('ALL');
     const [bookmakerFilters, setBookmakerFilters] = useState<string[]>([]);
     const [exchangeFilters, setExchangeFilters] = useState<string[]>([]);
+    const [minLegOdds, setMinLegOdds] = useState<number>(1.01);
+    const [maxLegOdds, setMaxLegOdds] = useState<number>(25);
+    const [minRating, setMinRating] = useState<number>(0);
+    const [minLiquidity, setMinLiquidity] = useState<number>(0);
+    const [dateRange, setDateRange] = useState<DateRangeValue>(EMPTY_DATE_RANGE);
+    const [onlySurebets, setOnlySurebets] = useState<boolean>(false);
+    const [noSurebets, setNoSurebets] = useState<boolean>(false);
     const [onlyEligible, setOnlyEligible] = useState<boolean>(false);
+    const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(false);
     const [pageSize, setPageSize] = useState<number>(60);
+
+    useEffect(() => {
+      if (!showAdvancedFilters) return;
+      const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') setShowAdvancedFilters(false);
+      };
+      window.addEventListener('keydown', onKeyDown);
+      return () => window.removeEventListener('keydown', onKeyDown);
+    }, [showAdvancedFilters]);
 
     // UI feedback
     const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -145,16 +213,130 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
       [lockedBookmakerId, bookmakerFilters]
     );
 
-    const bookmakerOptions = useMemo(() => {
-      const map = new Map<string, string>();
-      for (const r of snapshot.rows) map.set(r.bookmakerId, r.bookmakerName);
-      return Array.from(map.entries());
-    }, [snapshot.rows]);
+    const bookmakerOptions = useMemo(
+      () => buildBookmakerSourceOptions(snapshot),
+      [snapshot]
+    );
 
     const exchangeOptions = useMemo(
-      () => SOURCE_CATALOG.filter((s) => s.kind === 'exchange'),
-      []
+      () => buildExchangeSourceOptions(snapshot),
+      [snapshot]
     );
+
+    const competitionOptions = useMemo(
+      () => buildCompetitionOptions(snapshot.rows, sport === 'ALL' ? undefined : sport, leagues),
+      [snapshot.rows, sport, leagues]
+    );
+
+    const topCompetitionsForSport = useMemo(() => getTopCompetitionValues(sport), [sport]);
+
+    const isTopCompetitionsActive = useMemo(() => {
+      if (topCompetitionsForSport.length === 0) return false;
+      if (leagues.length !== topCompetitionsForSport.length) return false;
+      const selected = new Set(leagues);
+      return topCompetitionsForSport.every((comp) => selected.has(comp));
+    }, [leagues, topCompetitionsForSport]);
+
+    // Prune selected competitions belonging to another sport when switching sport
+    useEffect(() => {
+      if (sport === 'ALL') return;
+      setLeagues((prev) => {
+        const next = prev.filter((lg) => {
+          const inferred = inferSportFromLeague(lg);
+          return !inferred || inferred === sport;
+        });
+        return next.length === prev.length ? prev : next;
+      });
+    }, [sport]);
+
+    // Prune disabled sources on error
+    useEffect(() => {
+      const disabledBookIds = new Set(bookmakerOptions.filter((o) => o.disabled).map((o) => o.id));
+      if (disabledBookIds.size > 0) {
+        setBookmakerFilters((prev) => {
+          const next = prev.filter((id) => !disabledBookIds.has(id));
+          return next.length === prev.length ? prev : next;
+        });
+      }
+      const disabledExIds = new Set(exchangeOptions.filter((o) => o.disabled).map((o) => o.id));
+      if (disabledExIds.size > 0) {
+        setExchangeFilters((prev) => {
+          const next = prev.filter((id) => !disabledExIds.has(id));
+          return next.length === prev.length ? prev : next;
+        });
+      }
+    }, [bookmakerOptions, exchangeOptions]);
+
+    // Live event density map per local calendar day (YYYY-MM-DD) for calendar day dots
+    const eventDateCounts = useMemo(() => {
+      const counts: Record<string, number> = {};
+      for (const r of snapshot.rows) {
+        const d = new Date(r.startTime);
+        if (!Number.isFinite(d.getTime())) continue;
+        const key = toLocalDateKey(d);
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+      return counts;
+    }, [snapshot.rows]);
+
+    const handleDateRangeChange = (next: DateRangeValue, meta?: { pendingEnd?: boolean }) => {
+      setDateRange(next);
+      onDateRangeFilterChange?.(next, meta);
+    };
+
+    const isFutureDateSelected = useMemo(() => needsFutureDateScrape(dateRange), [dateRange]);
+    const selectedDateWindow = useMemo(() => resolveScrapeDateWindow(dateRange), [dateRange]);
+    const selectedDateLabel = selectedDateWindow
+      ? formatScrapeDateWindowLabel(selectedDateWindow)
+      : null;
+    const isDateRangeScraping = Boolean(snapshot.stats.isDateRangeScraping);
+
+    const autoRatingEstimate = useMemo(() => {
+      const targetBookie =
+        lockedBookmakerId ?? (bookmakerFilters.length === 1 ? bookmakerFilters[0] : null);
+      const scopedRows = snapshot.rows.filter((r) => {
+        if (targetBookie && r.bookmakerId !== targetBookie) return false;
+        if (exchangeFilters.length > 0 && !exchangeFilters.includes(r.exchangeId)) return false;
+        return true;
+      });
+      return computeAutoRolloverRating({
+        rows: scopedRows.length > 0 ? scopedRows : snapshot.rows,
+      });
+    }, [snapshot.rows, lockedBookmakerId, bookmakerFilters, exchangeFilters]);
+
+    const effectiveEstimatedRating = autoEstimatedRating
+      ? autoRatingEstimate.estimatedRating
+      : manualEstimatedRating;
+
+    const resetAllCatalogFilters = () => {
+      setSearch('');
+      setSport('ALL');
+      setLeagues([]);
+      setMarket('ALL');
+      setBookmakerFilters([]);
+      setExchangeFilters([]);
+      setMinLegOdds(1.01);
+      setMaxLegOdds(25);
+      setMinRating(0);
+      setMinLiquidity(0);
+      handleDateRangeChange(EMPTY_DATE_RANGE);
+      setOnlySurebets(false);
+      setNoSurebets(false);
+      setOnlyEligible(false);
+    };
+
+    const activeAdvancedFilterCount = useMemo(() => {
+      let count = 0;
+      if (leagues.length > 0) count++;
+      if (market !== 'ALL') count++;
+      if (Math.abs(minLegOdds - 1.01) > 0.005 || Math.abs(maxLegOdds - 25) > 0.005) count++;
+      if (minRating > 0) count++;
+      if (minLiquidity > 0) count++;
+      if (dateRange.mode !== 'all') count++;
+      if (onlySurebets) count++;
+      if (noSurebets) count++;
+      return count;
+    }, [leagues, market, minLegOdds, maxLegOdds, minRating, minLiquidity, dateRange, onlySurebets, noSurebets]);
 
     const { visibleCatalog, totalMatchingFilters, eligibleCount, ineligibleCount } =
       useMemo(() => {
@@ -167,6 +349,8 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
 
         for (const row of snapshot.rows) {
           if (sport !== 'ALL' && row.sport !== sport) continue;
+          if (leagues.length > 0 && !matchesWatchLeagues(leagues, row.league, row.sport)) continue;
+          if (market !== 'ALL' && row.marketType !== market) continue;
           if (exchangeFilters.length > 0 && !exchangeFilters.includes(row.exchangeId)) continue;
 
           // If user chose explicit bookmakers when slip is empty, filter by them
@@ -177,6 +361,19 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
           ) {
             continue;
           }
+
+          if (row.backOdds < minLegOdds || row.backOdds > maxLegOdds) continue;
+          if (row.liquidity < minLiquidity) continue;
+          if (dateRange.mode !== 'all' && !matchesDateRange(row.startTime, dateRange, nowMs)) {
+            continue;
+          }
+
+          const rowRating = mode === 'snr' ? row.ratingSnr : row.ratingNormal;
+          if (minRating > 0 && rowRating < minRating) continue;
+
+          const surebet = isRowSurebet(row);
+          if (onlySurebets && !surebet) continue;
+          if (noSurebets && surebet) continue;
 
           if (q) {
             const hay = `${row.eventName} ${row.league} ${row.selectionLabel} ${row.bookmakerName}`.toLowerCase();
@@ -199,7 +396,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
           items.push({ row, validation });
         }
 
-        // Pin selected legs in step order at top; keep eligible & ineligible inline by Rating so "Solo Idonei" has immediate visual effect
+        // Pin selected legs in step order at top; keep eligible & ineligible inline by active mode Rating
         items.sort((a, b) => {
           const aSel = a.validation.reason === 'already_selected';
           const bSel = b.validation.reason === 'already_selected';
@@ -207,7 +404,9 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
           if (aSel && bSel) {
             return (a.validation.conflictStepIndex ?? 0) - (b.validation.conflictStepIndex ?? 0);
           }
-          return b.row.ratingNormal - a.row.ratingNormal;
+          const ra = mode === 'snr' ? a.row.ratingSnr : a.row.ratingNormal;
+          const rb = mode === 'snr' ? b.row.ratingSnr : b.row.ratingNormal;
+          return rb - ra;
         });
 
         return {
@@ -220,9 +419,19 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
         snapshot.rows,
         search,
         sport,
+        leagues,
+        market,
         exchangeFilters,
         lockedBookmakerId,
         bookmakerFilters,
+        minLegOdds,
+        maxLegOdds,
+        minLiquidity,
+        dateRange,
+        mode,
+        minRating,
+        onlySurebets,
+        noSurebets,
         selectedLegs,
         minGapMinutes,
         onlyEligible,
@@ -276,6 +485,11 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
         bonusBoostPct,
         refundAmount,
         refundRetention,
+        realBalance,
+        bonusBalance,
+        rolloverRemaining,
+        estimatedRating: effectiveEstimatedRating,
+        rolloverWalletRule,
         minGapRequiredMinutes: minGapMinutes,
       });
     }, [
@@ -285,6 +499,11 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
       bonusBoostPct,
       refundAmount,
       refundRetention,
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      effectiveEstimatedRating,
+      rolloverWalletRule,
       minGapMinutes,
     ]);
 
@@ -301,7 +520,11 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
     }, [selectedLegs]);
 
     const planSignature = plan
-      ? `${plan.id}_${mode}_${stake}_${bonusBoostPct}_${refundAmount}_${refundRetention}`
+      ? `${plan.id}_${mode}_${stake}_${bonusBoostPct}_${refundAmount}_${refundRetention}_${
+          mode === 'rollover'
+            ? `${realBalance}_${bonusBalance}_${rolloverRemaining}_${effectiveEstimatedRating}_${rolloverWalletRule}`
+            : ''
+        }`
       : '';
     const isSaved = Boolean(planSignature && savedSignature === planSignature);
     const isPlanSaved = Boolean(planSignature && savedPlanState?.sig === planSignature);
@@ -319,6 +542,11 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
         bonusBoostPct,
         refundAmount,
         refundRetention,
+        realBalance: mode === 'rollover' ? realBalance : undefined,
+        bonusBalance: mode === 'rollover' ? bonusBalance : undefined,
+        rolloverRemaining: mode === 'rollover' ? rolloverRemaining : undefined,
+        estimatedRating: mode === 'rollover' ? effectiveEstimatedRating : undefined,
+        rolloverWalletRule: mode === 'rollover' ? rolloverWalletRule : undefined,
         minGapMinutes,
         customName: planName,
       });
@@ -391,7 +619,11 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
         rating: plan.rating,
         status: 'pending',
         realizedProfit: plan.guaranteedProfit,
-        notes: `Multipla Manuale ${plan.legs.length} leg | Bonus +${bonusBoostPct}%`,
+        notes:
+          `Multipla Manuale ${plan.legs.length} leg | Bonus +${bonusBoostPct}%` +
+          (mode === 'rollover'
+            ? ` | Rollover €${rolloverRemaining} @${effectiveEstimatedRating.toFixed(1)}%`
+            : ''),
       });
       setSavedSignature(planSignature);
       if (soundEnabled) playCopyTick();
@@ -404,7 +636,7 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
           {/* Event Filters & Validation Counters */}
           <div className="glass-panel relative z-30 space-y-2.5 rounded-2xl p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="relative min-w-[190px] flex-1">
+              <div className="relative min-w-[140px] flex-1">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
                 <input
                   type="text"
@@ -456,6 +688,25 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                 <Filter className="h-3 w-3" />
                 Solo Idonei
               </button>
+
+              <button
+                type="button"
+                data-testid="manual-advanced-filters-btn"
+                onClick={() => setShowAdvancedFilters((v) => !v)}
+                className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                  showAdvancedFilters || activeAdvancedFilterCount > 0
+                    ? 'border-brand-400/50 bg-brand-500/15 text-brand-200'
+                    : 'border-slate-800 bg-slate-900/90 text-slate-300 hover:text-white'
+                }`}
+              >
+                <SlidersHorizontal className="h-3 w-3" />
+                Filtri
+                {activeAdvancedFilterCount > 0 && (
+                  <span className="rounded bg-brand-400/25 px-1.5 py-0.5 font-mono text-[10px] font-bold text-brand-200">
+                    {activeAdvancedFilterCount}
+                  </span>
+                )}
+              </button>
             </div>
 
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
@@ -473,7 +724,8 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                   values={effectiveBookmakerFilters}
                   disabled={Boolean(lockedBookmakerId)}
                   allLabel="Tutti i bookmaker"
-                  options={bookmakerOptions.map(([id, name]) => ({ id, name }))}
+                  searchPlaceholder="Cerca bookmaker per nome..."
+                  options={bookmakerOptions}
                   onChange={setBookmakerFilters}
                 />
               </div>
@@ -486,7 +738,8 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                   data-testid="manual-exchange-select"
                   values={exchangeFilters}
                   allLabel="Tutti gli Exchange"
-                  options={exchangeOptions.map((ex) => ({ id: ex.id, name: ex.name }))}
+                  searchPlaceholder="Cerca exchange..."
+                  options={exchangeOptions}
                   onChange={setExchangeFilters}
                 />
               </div>
@@ -514,11 +767,389 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                 )}
               </div>
             </div>
+
           </div>
+
+          {typeof document !== 'undefined' &&
+            createPortal(
+              <AnimatePresence>
+                {showAdvancedFilters && (
+                  <div
+                    className="fixed inset-0 top-12 z-50 flex items-center justify-center p-4 sm:p-6"
+                    data-testid="manual-advanced-filters-panel"
+                  >
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.16 }}
+                      onClick={() => setShowAdvancedFilters(false)}
+                      className="absolute inset-0 bg-black/75 backdrop-blur-sm"
+                    />
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.96, y: 10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.96, y: 10 }}
+                      transition={{ duration: 0.18, ease: 'easeOut' }}
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label="Filtri Costruttore Manuale"
+                      className="relative z-10 flex max-h-[84vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-brand-400/35 bg-[var(--bg-modal-solid)] shadow-[0_24px_70px_rgba(0,0,0,0.9)]"
+                    >
+                      <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 px-5 py-3.5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-brand-400/40 bg-brand-500/15 text-brand-300">
+                            <SlidersHorizontal className="h-4 w-4" />
+                          </div>
+                          <div>
+                            <h2 className="font-display text-sm font-bold text-white">
+                              Filtri Costruttore Manuale
+                            </h2>
+                            <p className="text-[11px] text-slate-400">
+                              Preset rapidi, surebet, competizioni, mercati, quote singole, rating, liquidità e calendario
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="rounded-lg border border-brand-400/35 bg-brand-500/15 px-2.5 py-1 font-mono text-[11px] font-bold text-brand-200">
+                            {totalMatchingFilters} esiti
+                          </span>
+                          <button
+                            type="button"
+                            data-testid="manual-reset-filters-btn"
+                            onClick={resetAllCatalogFilters}
+                            className="flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:border-rose-400/40 hover:text-rose-200"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            Reset Filtri
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShowAdvancedFilters(false)}
+                            aria-label="Chiudi filtri"
+                            className="rounded-xl border border-slate-800 bg-slate-900 p-1.5 text-slate-400 transition hover:text-white"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <QuickPresetsMenu
+                            data-testid="manual-quick-presets-btn"
+                            menuTestId="manual-quick-presets-menu"
+                            activeCount={(isTopCompetitionsActive ? 1 : 0) + (onlySurebets ? 1 : 0)}
+                            items={[
+                              {
+                                id: 'qualifier',
+                                label: 'Qualificante (≥90%)',
+                                description: 'Normale · Rating ≥90% · Q. Singola 1.40–4.50 · Liq ≥25€',
+                                tone: 'brand',
+                                icon: <Target className="h-3 w-3" />,
+                                active:
+                                  mode === 'normal' &&
+                                  !onlySurebets &&
+                                  Math.abs(minLegOdds - 1.4) < 0.005 &&
+                                  Math.abs(maxLegOdds - 4.5) < 0.005 &&
+                                  Math.abs(minRating - 90) < 0.005 &&
+                                  Math.abs(minLiquidity - 25) < 0.005,
+                                onSelect: () => {
+                                  setMode('normal');
+                                  setMinLegOdds(1.4);
+                                  setMaxLegOdds(4.5);
+                                  setMinRating(90);
+                                  setMinLiquidity(25);
+                                  setOnlySurebets(false);
+                                },
+                              },
+                              {
+                                id: 'snr',
+                                label: 'Freebet SNR (Q ≥ 1.60)',
+                                description: 'Freebet SNR · Rating ≥55% · Q. Singola 1.60–6.00 · Liq ≥20€',
+                                tone: 'accent',
+                                icon: <Gift className="h-3 w-3" />,
+                                active:
+                                  mode === 'snr' &&
+                                  !onlySurebets &&
+                                  Math.abs(minLegOdds - 1.6) < 0.005 &&
+                                  Math.abs(maxLegOdds - 6.0) < 0.005 &&
+                                  Math.abs(minRating - 55) < 0.005 &&
+                                  Math.abs(minLiquidity - 20) < 0.005,
+                                onSelect: () => {
+                                  setMode('snr');
+                                  setMinLegOdds(1.6);
+                                  setMaxLegOdds(6.0);
+                                  setMinRating(55);
+                                  setMinLiquidity(20);
+                                  setOnlySurebets(false);
+                                },
+                              },
+                              {
+                                id: 'surebet',
+                                label: 'Solo Surebet (≥100%)',
+                                description: 'Normale · Esiti singoli Surebet ≥100% · Q. 1.10–20.00 · Liq ≥10€',
+                                tone: 'emerald',
+                                icon: <Flame className="h-3 w-3" />,
+                                active: onlySurebets,
+                                onSelect: () => {
+                                  setMode('normal');
+                                  setMinLegOdds(1.1);
+                                  setMaxLegOdds(20);
+                                  setMinRating(100);
+                                  setMinLiquidity(10);
+                                  setOnlySurebets(true);
+                                  setNoSurebets(false);
+                                },
+                              },
+                              {
+                                id: 'high-liquidity',
+                                label: 'Alta Liquidità (≥100€)',
+                                description: 'Filtra solo mercati Exchange con almeno 100€ disponibili',
+                                tone: 'amber',
+                                icon: <Coins className="h-3 w-3" />,
+                                active: !onlySurebets && minLiquidity >= 100,
+                                onSelect: () => {
+                                  setMinLiquidity(100);
+                                  setOnlySurebets(false);
+                                },
+                              },
+                              {
+                                id: 'top-competitions',
+                                label: 'Top Competizioni',
+                                description: 'Serie A/B, Premier, LaLiga, Bundesliga, UEFA, ATP/WTA, NBA',
+                                tone: 'sky',
+                                icon: <Trophy className="h-3 w-3" />,
+                                active: isTopCompetitionsActive,
+                                onSelect: () => {
+                                  setLeagues(isTopCompetitionsActive ? [] : topCompetitionsForSport);
+                                },
+                              },
+                            ] satisfies QuickPresetItem[]}
+                            onReset={resetAllCatalogFilters}
+                            resetLabel="Reset tutti i filtri"
+                          />
+
+                          <button
+                            type="button"
+                            data-testid="manual-only-surebet-toggle"
+                            aria-pressed={onlySurebets}
+                            onClick={() =>
+                              setOnlySurebets((v) => {
+                                const next = !v;
+                                if (next) setNoSurebets(false);
+                                return next;
+                              })
+                            }
+                            title="Mostra solo esiti singoli con Rating ≥ 100% (Surebet)"
+                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${
+                              onlySurebets
+                                ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-100'
+                                : 'border-slate-700/80 bg-slate-900/90 text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <Flame className={`h-3.5 w-3.5 ${onlySurebets ? 'text-emerald-300' : 'text-slate-400'}`} />
+                            <span>Solo Surebet</span>
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-bold ${
+                                onlySurebets
+                                  ? 'bg-emerald-400/25 text-emerald-200'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {onlySurebets ? 'ON' : 'OFF'}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
+                            data-testid="manual-no-surebet-toggle"
+                            aria-pressed={noSurebets}
+                            onClick={() =>
+                              setNoSurebets((v) => {
+                                const next = !v;
+                                if (next) setOnlySurebets(false);
+                                return next;
+                              })
+                            }
+                            title="Esclude automaticamente tutte le surebet singole (Rating Normale ≥ 100%)"
+                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${
+                              noSurebets
+                                ? 'border-rose-400/60 bg-rose-500/15 text-rose-100'
+                                : 'border-slate-700/80 bg-slate-900/90 text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <Ban className={`h-3.5 w-3.5 ${noSurebets ? 'text-rose-300' : 'text-slate-400'}`} />
+                            <span>No Surebet</span>
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-bold ${
+                                noSurebets
+                                  ? 'bg-rose-400/25 text-rose-200'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {noSurebets ? 'ON' : 'OFF'}
+                            </span>
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider text-slate-400">
+                              Competizioni ({leagues.length === 0 ? 'Tutte' : leagues.length})
+                            </label>
+                            <CustomMultiSelect<string>
+                              data-testid="manual-league-select"
+                              values={leagues}
+                              allLabel="Tutte le competizioni"
+                              minMenuWidth={240}
+                              options={competitionOptions}
+                              onChange={setLeagues}
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider text-slate-400">
+                              Mercato
+                            </label>
+                            <CustomSelect<MarketType | 'ALL'>
+                              data-testid="manual-market-select"
+                              className="mt-1"
+                              value={market}
+                              minMenuWidth={185}
+                              onChange={setMarket}
+                              options={[
+                                { value: 'ALL', label: 'Tutti i mercati' },
+                                { value: '1X2', label: 'Esito Finale 1X2' },
+                                { value: 'OVER_UNDER_25', label: 'Under/Over 2.5' },
+                                { value: 'BTTS', label: 'Goal / NoGoal' },
+                                { value: 'H2H', label: 'Testa a Testa' },
+                              ]}
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider text-slate-400">
+                              Data / Periodo
+                            </label>
+                            <DateRangeCalendar
+                              value={dateRange}
+                              onChange={handleDateRangeChange}
+                              eventDateCounts={eventDateCounts}
+                              isScraping={isDateRangeScraping && isFutureDateSelected}
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider text-slate-400">
+                              Quota Singola (Min / Max)
+                            </label>
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <NumericInput
+                                data-testid="manual-min-leg-odds"
+                                min={1.01}
+                                value={minLegOdds}
+                                onChange={(v) => setMinLegOdds(Math.max(1.01, v))}
+                                placeholder="1.01"
+                                className="w-1/2 rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 font-mono text-xs text-white focus:border-brand-400 focus:outline-none"
+                              />
+                              <NumericInput
+                                data-testid="manual-max-leg-odds"
+                                min={1.05}
+                                value={maxLegOdds}
+                                onChange={(v) => setMaxLegOdds(Math.max(1.05, v))}
+                                placeholder="25"
+                                className="w-1/2 rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 font-mono text-xs text-white focus:border-brand-400 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider text-slate-400">
+                              Rating Min (%)
+                            </label>
+                            <NumericInput
+                              data-testid="manual-min-rating-input"
+                              min={0}
+                              value={minRating}
+                              onChange={(v) => setMinRating(Math.max(0, v))}
+                              placeholder="0"
+                              className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 font-mono text-xs text-white focus:border-brand-400 focus:outline-none"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider text-slate-400">
+                              Liquidità Min (€)
+                            </label>
+                            <NumericInput
+                              data-testid="manual-min-liquidity-input"
+                              min={0}
+                              value={minLiquidity}
+                              onChange={(v) => setMinLiquidity(Math.max(0, v))}
+                              placeholder="0"
+                              className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 font-mono text-xs text-white focus:border-brand-400 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 bg-slate-950/60 px-5 py-3">
+                        <div className="text-xs text-slate-400">
+                          <strong className="font-mono text-white">{totalMatchingFilters}</strong>{' '}
+                          esiti trovati (<strong className="text-emerald-300">{eligibleCount}</strong>{' '}
+                          idonei)
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowAdvancedFilters(false)}
+                          className="rounded-xl bg-gradient-to-r from-brand-300 to-accent-400 px-4 py-2 text-xs font-extrabold text-slate-950 shadow-glow transition hover:brightness-110"
+                        >
+                          Mostra {totalMatchingFilters} Esiti
+                        </button>
+                      </div>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>,
+              document.body
+            )}
+
+          {isDateRangeScraping && isFutureDateSelected && visibleCatalog.length > 0 && (
+            <div
+              data-testid="manual-date-scrape-banner"
+              className="flex items-center justify-between gap-2 rounded-xl border border-brand-400/25 bg-brand-500/10 px-3.5 py-1.5 text-[11px] text-brand-200"
+            >
+              <div className="flex items-center gap-2">
+                <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-brand-300" />
+                <span>
+                  Ricerca quote future per{' '}
+                  <strong className="font-mono text-white">{selectedDateLabel}</strong>...
+                </span>
+              </div>
+              <span className="font-mono text-[10px] text-brand-300/90">
+                {totalMatchingFilters} esiti pronti
+              </span>
+            </div>
+          )}
 
           {/* Live Validated Events Table */}
           <div className="glass-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl">
-            {snapshot.rows.length === 0 &&
+            {visibleCatalog.length === 0 && isDateRangeScraping && isFutureDateSelected ? (
+              <div
+                data-testid="manual-date-scrape-loading"
+                className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center"
+              >
+                <RefreshCw className="h-7 w-7 animate-spin text-brand-300" />
+                <div className="text-sm font-semibold text-white">
+                  Caricamento quote per {selectedDateLabel}...
+                </div>
+                <p className="max-w-xs text-xs text-slate-400">
+                  Lo scraper sta interrogando bookmaker ed exchange sulle date selezionate.
+                </p>
+              </div>
+            ) : snapshot.rows.length === 0 &&
             !snapshot.stats.isRunning &&
             (!isBrowserOnline ||
               snapshot.connection.health === 'offline' ||
@@ -651,17 +1282,22 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                           </td>
 
                           <td className="whitespace-nowrap px-2.5 py-2 text-right">
-                            <span
-                              className={`font-mono text-xs font-bold ${
-                                row.ratingNormal >= 100
-                                  ? 'text-brand-300'
-                                  : row.ratingNormal >= 95
-                                  ? 'text-emerald-400'
-                                  : 'text-amber-300'
-                              }`}
-                            >
-                              {formatPct(row.ratingNormal)}
-                            </span>
+                            {(() => {
+                              const rowRating = mode === 'snr' ? row.ratingSnr : row.ratingNormal;
+                              return (
+                                <span
+                                  className={`font-mono text-xs font-bold ${
+                                    rowRating >= 100
+                                      ? 'text-brand-300'
+                                      : rowRating >= 95
+                                      ? 'text-emerald-400'
+                                      : 'text-amber-300'
+                                  }`}
+                                >
+                                  {formatPct(rowRating)}
+                                </span>
+                              );
+                            })()}
                           </td>
 
                           <td className="whitespace-nowrap px-3 py-2 text-right">
@@ -781,99 +1417,130 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                 <label className="text-[10px] uppercase tracking-wider text-slate-500">
                   Modalità
                 </label>
-                <CustomSelect<BetMode>
-                  data-testid="manual-mode-select"
-                  size="sm"
-                  className="mt-1"
-                  minMenuWidth={155}
-                  value={mode}
-                  onChange={setMode}
-                  options={[
-                    { value: 'normal', label: 'Normale' },
-                    { value: 'snr', label: 'Freebet SNR' },
-                    { value: 'sr', label: 'Bonus SR' },
-                    { value: 'rf', label: 'Rimborso RF' },
-                  ]}
-                />
-              </div>
+                  <CustomSelect<BetMode>
+                    data-testid="manual-mode-select"
+                    size="sm"
+                    className="mt-1"
+                    minMenuWidth={155}
+                    value={mode}
+                    onChange={setMode}
+                    options={[
+                      { value: 'normal', label: 'Normale' },
+                      { value: 'snr', label: 'Freebet SNR' },
+                      { value: 'sr', label: 'Bonus SR' },
+                      { value: 'rf', label: 'Rimborso RF' },
+                      { value: 'rollover', label: 'Rollover' },
+                    ]}
+                  />
+                </div>
 
-              <div>
-                <label className="text-[10px] uppercase tracking-wider text-slate-500">
-                  Puntata (€)
-                </label>
-                <NumericInput
-                  data-testid="manual-stake-input"
-                  min={1}
-                  value={stake}
-                  onChange={setStake}
-                  placeholder="50"
-                  className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-brand-200 focus:border-brand-400 focus:outline-none"
-                />
-              </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-slate-500">
+                    Puntata (€)
+                  </label>
+                  <NumericInput
+                    data-testid="manual-stake-input"
+                    min={1}
+                    value={stake}
+                    onChange={setStake}
+                    placeholder="50"
+                    className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-brand-200 focus:border-brand-400 focus:outline-none"
+                  />
+                </div>
 
-              <div>
-                <label className="text-[10px] uppercase tracking-wider text-slate-500">
-                  Bonus (%)
-                </label>
-                <NumericInput
-                  min={0}
-                  max={100}
-                  value={bonusBoostPct}
-                  onChange={setBonusBoostPct}
-                  placeholder="0"
-                  className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-amber-300 focus:border-brand-400 focus:outline-none"
-                />
-              </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-slate-500">
+                    Bonus (%)
+                  </label>
+                  <NumericInput
+                    min={0}
+                    max={100}
+                    value={bonusBoostPct}
+                    onChange={setBonusBoostPct}
+                    placeholder="0"
+                    className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-amber-300 focus:border-brand-400 focus:outline-none"
+                  />
+                </div>
 
-              <div>
-                <label className="text-[10px] uppercase tracking-wider text-slate-500">
-                  Gap Minimo
-                </label>
-                <CustomSelect<number>
-                  data-testid="manual-gap-select"
-                  size="sm"
-                  className="mt-1"
-                  minMenuWidth={205}
-                  value={minGapMinutes}
-                  onChange={setMinGapMinutes}
-                  triggerClassName="text-emerald-300"
-                  options={[
-                    { value: 120, label: 'Min 2h', hint: 'Consigliato', dotColor: 'bg-emerald-400' },
-                    { value: 150, label: 'Min 2h 30m', hint: 'Sicuro', dotColor: 'bg-emerald-400' },
-                    { value: 180, label: 'Min 3h', hint: 'Ampio', dotColor: 'bg-brand-300' },
-                  ]}
-                />
-              </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-slate-500">
+                    Gap Minimo
+                  </label>
+                  <CustomSelect<number>
+                    data-testid="manual-gap-select"
+                    size="sm"
+                    className="mt-1"
+                    minMenuWidth={205}
+                    value={minGapMinutes}
+                    onChange={setMinGapMinutes}
+                    triggerClassName="text-emerald-300"
+                    options={[
+                      { value: 120, label: 'Min 2h', hint: 'Consigliato', dotColor: 'bg-emerald-400' },
+                      { value: 150, label: 'Min 2h 30m', hint: 'Sicuro', dotColor: 'bg-emerald-400' },
+                      { value: 180, label: 'Min 3h', hint: 'Ampio', dotColor: 'bg-brand-300' },
+                      { value: 60, label: 'Min 1h', hint: 'Ridotto', dotColor: 'bg-amber-400' },
+                      { value: 0, label: 'Sovrapposti OK', hint: 'Senza vincoli', dotColor: 'bg-slate-400' },
+                    ]}
+                  />
+                </div>
 
-              {mode === 'rf' && (
-                <>
-                  <div className="col-span-1 sm:col-span-2">
-                    <label className="text-[10px] uppercase tracking-wider text-accent-300">
-                      Rimborso Multipla (€)
-                    </label>
-                    <NumericInput
-                      min={0}
-                      value={refundAmount}
-                      onChange={setRefundAmount}
-                      placeholder="25"
-                      className="mt-1 w-full rounded-lg border border-accent-500/40 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-white focus:border-accent-400 focus:outline-none"
+                {mode === 'rf' && (
+                  <>
+                    <div className="col-span-1 sm:col-span-2">
+                      <label className="text-[10px] uppercase tracking-wider text-accent-300">
+                        Rimborso Multipla (€)
+                      </label>
+                      <NumericInput
+                        min={0}
+                        value={refundAmount}
+                        onChange={setRefundAmount}
+                        placeholder="25"
+                        className="mt-1 w-full rounded-lg border border-accent-500/40 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-white focus:border-accent-400 focus:outline-none"
+                      />
+                    </div>
+                    <div className="col-span-1 sm:col-span-2">
+                      <label className="text-[10px] uppercase tracking-wider text-accent-300">
+                        Ritenzione Bonus (%)
+                      </label>
+                      <NumericInput
+                        min={0}
+                        max={100}
+                        value={refundRetention}
+                        onChange={setRefundRetention}
+                        placeholder="70"
+                        className="mt-1 w-full rounded-lg border border-accent-500/40 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-white focus:border-accent-400 focus:outline-none"
+                      />
+                    </div>
+                  </>
+                )}
+
+                {mode === 'rollover' && (
+                  <div className="col-span-full mt-0.5">
+                    <RolloverParamsPanel
+                      compact
+                      testIdPrefix="manual-rollover"
+                      stake={stake}
+                      realBalance={realBalance}
+                      bonusBalance={bonusBalance}
+                      rolloverRemaining={rolloverRemaining}
+                      estimatedRating={effectiveEstimatedRating}
+                      autoEstimatedRating={autoEstimatedRating}
+                      autoRatingInfo={autoRatingEstimate}
+                      walletRule={rolloverWalletRule}
+                      rolloverDetails={plan?.rollover}
+                      onChangeStake={setStake}
+                      onChangeRealBalance={setRealBalance}
+                      onChangeBonusBalance={setBonusBalance}
+                      onChangeRolloverRemaining={setRolloverRemaining}
+                      onChangeEstimatedRating={(v) => {
+                        setAutoEstimatedRating(false);
+                        setManualEstimatedRating(v);
+                      }}
+                      onToggleAutoRating={setAutoEstimatedRating}
+                      onChangeWalletRule={setRolloverWalletRule}
                     />
                   </div>
-                  <div className="col-span-1 sm:col-span-2">
-                    <label className="text-[10px] uppercase tracking-wider text-accent-300">
-                      Ritenzione Bonus (%)
-                    </label>
-                    <NumericInput
-                      min={0}
-                      max={100}
-                      value={refundRetention}
-                      onChange={setRefundRetention}
-                      placeholder="70"
-                      className="mt-1 w-full rounded-lg border border-accent-500/40 bg-slate-950 px-2 py-1 font-mono text-[11px] font-bold text-white focus:border-accent-400 focus:outline-none"
-                    />
-                  </div>
-                </>
-              )}
+                )}
             </div>
 
             {/* Scrollable Slip Body */}
@@ -1034,6 +1701,31 @@ export const ManualMultioddsBuilder: React.FC<ManualMultioddsBuilderProps> = Rea
                           <span>
                             Liquidità inferiore alla bancata su Step{' '}
                             {liquidityWarnings.map((w) => w.legIndex).join(', ')}.
+                          </span>
+                        </div>
+                      )}
+
+                      {plan.rollover && (
+                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-brand-400/25 bg-brand-500/[0.06] px-2.5 py-1.5 text-[10px]">
+                          <span className="font-semibold text-brand-200">
+                            Rollover: €{plan.rollover.rolloverBefore.toFixed(0)} →{' '}
+                            <strong className="text-white">
+                              {plan.rollover.completesRolloverOnThisBet
+                                ? 'Completato'
+                                : `€${plan.rollover.rolloverAfter.toFixed(0)}`}
+                            </strong>
+                          </span>
+                          <span className="text-slate-400">
+                            Match Rating:{' '}
+                            <strong className="font-mono text-emerald-300">
+                              {plan.rollover.matchRating.toFixed(2)}%
+                            </strong>
+                          </span>
+                          <span className="font-mono text-slate-400">
+                            Costo V/P: -{formatEuro(plan.rollover.futureRolloverCostIfWin)} /{' '}
+                            {plan.rollover.clearsRolloverOnLose
+                              ? '€0'
+                              : `-${formatEuro(plan.rollover.futureRolloverCostIfLose)}`}
                           </span>
                         </div>
                       )}

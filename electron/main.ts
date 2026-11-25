@@ -877,6 +877,7 @@ app.whenReady().then(() => {
       minLiquidity: Number.isFinite(input.minLiquidity) ? Math.max(0, input.minLiquidity) : 0,
       minBackOdds: minBack,
       maxBackOdds: maxBack,
+      excludeSurebets: Boolean(input.excludeSurebets),
       autoPauseOnTrigger: input.autoPauseOnTrigger !== false,
       cooldownSec: Number.isFinite(input.cooldownSec)
         ? Math.max(10, Math.round(input.cooldownSec))
@@ -921,7 +922,8 @@ app.whenReady().then(() => {
           patch.mode !== undefined ||
           patch.minLiquidity !== undefined ||
           patch.minBackOdds !== undefined ||
-          patch.maxBackOdds !== undefined;
+          patch.maxBackOdds !== undefined ||
+          patch.excludeSurebets !== undefined;
         return {
           ...w,
           ...patch,

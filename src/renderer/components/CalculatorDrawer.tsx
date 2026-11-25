@@ -14,10 +14,11 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { calculateSingleMatch } from '../../shared/math';
+import { calculateSingleMatch, computeAutoRolloverRating } from '../../shared/math';
 import type {
   BetMode,
   OddsmatcherRow,
+  RolloverWalletRule,
   TrackedBet,
   VerifyRowQuotesResult,
 } from '../../shared/types';
@@ -32,6 +33,7 @@ import { playCopyTick } from '../utils/sound';
 import { AnimatedNumber } from './AnimatedNumber';
 import { BookmakerIcon } from './BookmakerIcon';
 import { NumericInput } from './NumericInput';
+import { RolloverParamsPanel } from './RolloverParamsPanel';
 import { SlidingPillTrack } from './SlidingPillTrack';
 
 interface CalculatorDrawerProps {
@@ -40,6 +42,7 @@ interface CalculatorDrawerProps {
   initialStake: number;
   drawerWidth: number;
   soundEnabled: boolean;
+  snapshotRows?: OddsmatcherRow[];
   onClose: () => void;
   onSaveBet: (bet: Omit<TrackedBet, 'id' | 'createdAt'>) => void;
   onLockToMultiodds: (row: OddsmatcherRow) => void;
@@ -51,6 +54,7 @@ const MODES: Array<{ id: BetMode; label: string; hint: string }> = [
   { id: 'snr', label: 'Freebet SNR', hint: 'Bonus Stake Not Returned' },
   { id: 'sr', label: 'Bonus SR', hint: 'Bonus Reale Stake Returned' },
   { id: 'rf', label: 'Rimborso RF', hint: 'Cashback se perdente' },
+  { id: 'rollover', label: 'Rollover', hint: 'Sblocco bonus a rigioco' },
 ];
 
 export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
@@ -59,6 +63,7 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
   initialStake,
   drawerWidth,
   soundEnabled,
+  snapshotRows,
   onClose,
   onSaveBet,
   onLockToMultiodds,
@@ -71,6 +76,12 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
   const [commissionPct, setCommissionPct] = useState((row?.commission ?? 0.045) * 100);
   const [refundAmount, setRefundAmount] = useState(initialStake);
   const [refundRetention, setRefundRetention] = useState(70);
+  const [realBalance, setRealBalance] = useState(initialStake || 50);
+  const [bonusBalance, setBonusBalance] = useState(initialStake || 50);
+  const [rolloverRemaining, setRolloverRemaining] = useState((initialStake || 50) * 6);
+  const [autoEstimatedRating, setAutoEstimatedRating] = useState(true);
+  const [manualEstimatedRating, setManualEstimatedRating] = useState(96);
+  const [rolloverWalletRule, setRolloverWalletRule] = useState<RolloverWalletRule>('mixed');
   const [balanceBias, setBalanceBias] = useState(0);
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -179,6 +190,21 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [row, onClose]);
 
+  const autoRatingInfo = useMemo(
+    () =>
+      computeAutoRolloverRating({
+        rows: snapshotRows,
+        currentBackOdds: backOdds,
+        currentLayOdds: layOdds,
+        currentCommission: commissionPct / 100,
+      }),
+    [snapshotRows, backOdds, layOdds, commissionPct]
+  );
+
+  const effectiveEstimatedRating = autoEstimatedRating
+    ? autoRatingInfo.estimatedRating
+    : manualEstimatedRating;
+
   const calc = useMemo(
     () =>
       calculateSingleMatch({
@@ -189,9 +215,28 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
         commission: commissionPct / 100,
         refundAmount,
         refundRetention,
+        realBalance,
+        bonusBalance,
+        rolloverRemaining,
+        estimatedRating: effectiveEstimatedRating,
+        rolloverWalletRule,
         balanceBias,
       }),
-    [mode, stake, backOdds, layOdds, commissionPct, refundAmount, refundRetention, balanceBias]
+    [
+      mode,
+      stake,
+      backOdds,
+      layOdds,
+      commissionPct,
+      refundAmount,
+      refundRetention,
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      effectiveEstimatedRating,
+      rolloverWalletRule,
+      balanceBias,
+    ]
   );
 
   const handleCopyLay = async () => {
@@ -227,6 +272,11 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
       rating: calc.rating,
       status: 'pending',
       realizedProfit: calc.expectedProfit,
+      ...(mode === 'rollover' && calc.rollover
+        ? {
+            notes: `Rollover €${calc.rollover.rolloverBefore}→€${calc.rollover.rolloverAfter} • Real €${calc.rollover.realBalance} + Bonus €${calc.rollover.bonusBalance} @ ${calc.rollover.estimatedRating}%`,
+          }
+        : {}),
     });
     setSaved(true);
     if (soundEnabled) playCopyTick();
@@ -515,7 +565,7 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
               <SlidingPillTrack
                 activeKey={mode}
                 pillClassName="rounded-lg bg-gradient-to-r from-brand-300 to-accent-400 shadow-glow"
-                className="grid grid-cols-4 gap-1 rounded-xl bg-slate-950/80 p-1 border border-slate-800/80"
+                className="grid grid-cols-3 gap-1 rounded-xl bg-slate-950/80 p-1 border border-slate-800/80 sm:grid-cols-5"
               >
                 {MODES.map((m) => (
                   <button
@@ -540,7 +590,11 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
                     htmlFor="calc-stake-input"
                     className="block truncate text-[11px] font-medium text-slate-400"
                   >
-                    {mode === 'snr' ? 'Valore Freebet (€)' : 'Puntata Bookmaker (€)'}
+                    {mode === 'snr'
+                      ? 'Valore Freebet (€)'
+                      : mode === 'rollover'
+                      ? 'Puntata Rollover (€)'
+                      : 'Puntata Bookmaker (€)'}
                   </label>
                   <NumericInput
                     id="calc-stake-input"
@@ -686,6 +740,42 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
                 )}
               </AnimatePresence>
 
+              {/* Rollover Mode Extra Parameters */}
+              <AnimatePresence initial={false}>
+                {mode === 'rollover' && (
+                  <motion.div
+                    key="calc-drawer-rollover"
+                    data-testid="drawer-rollover-panel"
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                    className="overflow-hidden"
+                  >
+                    <RolloverParamsPanel
+                      compact
+                      stake={stake}
+                      realBalance={realBalance}
+                      bonusBalance={bonusBalance}
+                      rolloverRemaining={rolloverRemaining}
+                      estimatedRating={effectiveEstimatedRating}
+                      autoEstimatedRating={autoEstimatedRating}
+                      autoRatingInfo={autoRatingInfo}
+                      walletRule={rolloverWalletRule}
+                      rolloverDetails={calc.rollover}
+                      onChangeStake={setStake}
+                      onChangeRealBalance={setRealBalance}
+                      onChangeBonusBalance={setBonusBalance}
+                      onChangeRolloverRemaining={setRolloverRemaining}
+                      onChangeEstimatedRating={setManualEstimatedRating}
+                      onToggleAutoRating={setAutoEstimatedRating}
+                      onChangeWalletRule={setRolloverWalletRule}
+                      testIdPrefix="drawer-rollover"
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               {/* HERO RESULT: LAY STAKE & LIABILITY */}
               <div className="relative overflow-hidden rounded-2xl border border-brand-400/35 bg-gradient-to-br from-brand-500/14 via-slate-900/90 to-accent-500/14 p-3.5 shadow-glow">
                 <div className="flex items-center justify-between">
@@ -725,23 +815,35 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
                     />
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase text-slate-400">Rating Netto</div>
+                    <div className="text-[10px] uppercase text-slate-400">
+                      {mode === 'rollover'
+                        ? bonusBalance > 0
+                          ? 'Estrazione Bonus'
+                          : 'Rating Rollover'
+                        : 'Rating Netto'}
+                    </div>
                     <AnimatedNumber
                       value={calc.rating}
                       formatter={(v) => formatPct(v)}
                       className={`font-mono text-sm font-bold ${
                         calc.rating >= 100
                           ? 'text-brand-300'
-                          : calc.rating >= 95
+                          : calc.rating >= 95 || (mode === 'rollover' && calc.rating >= 60)
                           ? 'text-emerald-400'
                           : 'text-amber-300'
                       }`}
                     />
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase text-slate-400">Rating Lordo</div>
+                    <div className="text-[10px] uppercase text-slate-400">
+                      {mode === 'rollover' ? 'Rating Singola' : 'Rating Lordo'}
+                    </div>
                     <div className="font-mono text-sm font-bold text-slate-300">
-                      {formatPct(calc.rawRating)}
+                      {formatPct(
+                        mode === 'rollover'
+                          ? calc.rollover?.matchRating ?? calc.rawRating
+                          : calc.rawRating
+                      )}
                     </div>
                   </div>
                 </div>
@@ -881,6 +983,27 @@ export const CalculatorDrawer: React.FC<CalculatorDrawerProps> = ({
                     />
                   </div>
                 </div>
+
+                {mode === 'rollover' && calc.rollover && (
+                  <div className="grid grid-cols-2 gap-2 border-t border-slate-800/80 pt-2 text-[10px] text-slate-400">
+                    <div className="flex justify-between gap-1">
+                      <span>Rollover se vince Book:</span>
+                      <span className="font-mono font-semibold text-amber-300">
+                        {calc.rollover.futureRolloverCostIfWin > 0.005
+                          ? `-${formatEuro(calc.rollover.futureRolloverCostIfWin)}`
+                          : '€0,00'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-1">
+                      <span>Rollover se vince Exch:</span>
+                      <span className="font-mono font-semibold text-emerald-300">
+                        {calc.rollover.clearsRolloverOnLose
+                          ? '€0,00 (Sblocco!)'
+                          : `-${formatEuro(calc.rollover.futureRolloverCostIfLose)}`}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

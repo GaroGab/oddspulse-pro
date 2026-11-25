@@ -566,6 +566,7 @@ export const DutcherView: React.FC<DutcherViewProps> = ({
         initialRefundAmount={matcherRefundAmount}
         initialRefundRetention={matcherRefundRetention}
         soundEnabled={soundEnabled}
+        dutcherRows={snapshot.dutcherRows}
         onClose={() => setSelectedMatcherRow(null)}
         onSaveTrackedBet={onSaveTrackedBet}
       />

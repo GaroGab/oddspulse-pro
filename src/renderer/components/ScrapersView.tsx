@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Activity,
@@ -7,9 +7,11 @@ import {
   Play,
   Radar,
   RefreshCw,
+  Search,
   Settings2,
   Square,
   Terminal,
+  X,
   XCircle,
 } from 'lucide-react';
 import {
@@ -20,6 +22,7 @@ import {
 } from '../../shared/types';
 import { BookmakerIcon } from './BookmakerIcon';
 import { CustomSelect } from './CustomSelect';
+import { SlidingPillTrack } from './SlidingPillTrack';
 
 interface ScrapersViewProps {
   snapshot: ScrapeSnapshot;
@@ -43,6 +46,30 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
   onStartAutoScrape,
 }) => {
   const [apiKeyDraft, setApiKeyDraft] = useState(settings.theOddsApiKey);
+  const [sourceSearch, setSourceSearch] = useState('');
+  const [sourceKindFilter, setSourceKindFilter] = useState<'ALL' | 'bookmaker' | 'exchange'>('ALL');
+
+  const sourceMetaMap = useMemo(() => new Map(SOURCE_CATALOG.map((c) => [c.id, c])), []);
+
+  const filteredSources = useMemo(() => {
+    const q = sourceSearch.trim().toLowerCase();
+    return snapshot.sources.filter((src) => {
+      if (sourceKindFilter !== 'ALL' && src.kind !== sourceKindFilter) return false;
+      if (!q) return true;
+      const meta = sourceMetaMap.get(src.id);
+      const hay = `${src.name} ${src.shortName} ${src.id} ${meta?.region ?? ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [snapshot.sources, sourceKindFilter, sourceSearch, sourceMetaMap]);
+
+  const bookmakersTotal = useMemo(
+    () => snapshot.sources.filter((s) => s.kind === 'bookmaker').length,
+    [snapshot.sources]
+  );
+  const exchangesTotal = useMemo(
+    () => snapshot.sources.filter((s) => s.kind === 'exchange').length,
+    [snapshot.sources]
+  );
 
   const toggleSource = (id: SourceId) => {
     onUpdateSettings({
@@ -85,7 +112,7 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
               </span>
             </div>
             <p className="text-[11px] text-slate-400">
-              Scraping live su Exchange (Betfair.it, Betflag EX, Smarkets) e Bookmaker ADM italiani (Sisal, SNAI, Betflag, Eurobet, GoldBet, 888sport, LeoVegas, Betfair SB) + EU.
+              Scraping live su Exchange (Betfair.it, Betflag EX, Smarkets) e Bookmaker ADM italiani (Sisal, SNAI, Betflag, Eurobet, GoldBet, Lottomatica, Planetwin365, bet365, Betsson, DomusBet, DAZN Bet, WilliamHill, Gioco Digitale, PokerStars, NetBet, Stanleybet, 888sport, LeoVegas, Betfair SB) + EU.
             </p>
           </div>
         </div>
@@ -137,11 +164,11 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
       </div>
 
       {/* Global Settings Row */}
-      <div className="glass-card grid grid-cols-1 gap-3 rounded-2xl p-4 md:grid-cols-5">
-        <div>
-          <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
-            <Settings2 className="h-3.5 w-3.5 text-brand-400" />
-            Frequenza Auto-Scraping
+      <div className="glass-card grid grid-cols-1 items-start gap-3.5 rounded-2xl p-4 md:grid-cols-5">
+        <div className="flex flex-col">
+          <label className="flex h-4 items-center gap-1.5 text-[11px] font-semibold text-slate-300">
+            <Settings2 className="h-3.5 w-3.5 shrink-0 text-brand-400" />
+            <span className="truncate">Frequenza Auto-Scraping</span>
           </label>
           <CustomSelect<number>
             data-testid="scrapers-interval-select"
@@ -154,7 +181,7 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
                 autoScrapeEnabled: val > 0,
               })
             }
-            triggerClassName="rounded-xl py-2"
+            triggerClassName="h-9 rounded-xl py-0"
             options={[
               { value: 0, label: 'Manuale (On-Demand)', dotColor: 'bg-slate-400' },
               { value: 20, label: 'Ogni 20 secondi', hint: 'Ultra-rapido', dotColor: 'bg-brand-300' },
@@ -165,15 +192,15 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
             ]}
           />
           {!autoScrapeActive && settings.refreshIntervalSec > 0 && (
-            <p className="mt-1 text-[10px] font-medium text-amber-300/90">
+            <p className="mt-1.5 text-[10px] font-medium text-amber-300/90">
               In pausa (riprenderà ogni {settings.refreshIntervalSec}s al riavvio)
             </p>
           )}
         </div>
 
-        <div>
-          <label className="text-[11px] font-semibold text-slate-300">
-            Comm. Betfair EX (%)
+        <div className="flex flex-col">
+          <label className="flex h-4 items-center text-[11px] font-semibold text-slate-300">
+            <span className="truncate">Comm. Betfair EX (%)</span>
           </label>
           <input
             type="number"
@@ -186,13 +213,13 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
                 betfairCommission: Math.max(0, (parseFloat(e.target.value) || 0) / 100),
               })
             }
-            className="mt-1.5 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs font-bold text-amber-300 focus:border-brand-400 focus:outline-none"
+            className="mt-1.5 h-9 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 font-mono text-xs font-bold text-amber-300 focus:border-brand-400 focus:outline-none"
           />
         </div>
 
-        <div>
-          <label className="text-[11px] font-semibold text-slate-300">
-            Comm. Betflag EX (%)
+        <div className="flex flex-col">
+          <label className="flex h-4 items-center text-[11px] font-semibold text-slate-300">
+            <span className="truncate">Comm. Betflag EX (%)</span>
           </label>
           <input
             type="number"
@@ -205,13 +232,13 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
                 betflagCommission: Math.max(0, (parseFloat(e.target.value) || 0) / 100),
               })
             }
-            className="mt-1.5 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs font-bold text-sky-300 focus:border-brand-400 focus:outline-none"
+            className="mt-1.5 h-9 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 font-mono text-xs font-bold text-sky-300 focus:border-brand-400 focus:outline-none"
           />
         </div>
 
-        <div>
-          <label className="text-[11px] font-semibold text-slate-300">
-            Comm. Smarkets (%)
+        <div className="flex flex-col">
+          <label className="flex h-4 items-center text-[11px] font-semibold text-slate-300">
+            <span className="truncate">Comm. Smarkets (%)</span>
           </label>
           <input
             type="number"
@@ -224,23 +251,28 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
                 smarketsCommission: Math.max(0, (parseFloat(e.target.value) || 0) / 100),
               })
             }
-            className="mt-1.5 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs font-bold text-emerald-300 focus:border-brand-400 focus:outline-none"
+            className="mt-1.5 h-9 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 font-mono text-xs font-bold text-emerald-300 focus:border-brand-400 focus:outline-none"
           />
         </div>
 
-        <div className="flex flex-col justify-between">
-          <label className="text-[11px] font-semibold text-slate-300">Eventi In-Play (LIVE)</label>
+        <div className="flex flex-col">
+          <label className="flex h-4 items-center text-[11px] font-semibold text-slate-300">
+            <span className="truncate">Eventi In-Play (LIVE)</span>
+          </label>
           <button
+            type="button"
             onClick={() => onUpdateSettings({ includeLiveEvents: !settings.includeLiveEvents })}
-            className={`mt-1.5 flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+            className={`mt-1.5 flex h-9 items-center justify-between rounded-xl border px-3 text-xs font-semibold transition ${
               settings.includeLiveEvents
                 ? 'border-brand-400/50 bg-brand-500/15 text-brand-200'
-                : 'border-slate-800 bg-slate-950 text-slate-400'
+                : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700 hover:text-slate-300'
             }`}
           >
-            <span>{settings.includeLiveEvents ? 'Inclusi (Pre + Live)' : 'Solo Pre-Match'}</span>
+            <span className="truncate">
+              {settings.includeLiveEvents ? 'Inclusi (Pre + Live)' : 'Solo Pre-Match'}
+            </span>
             <span
-              className={`h-2.5 w-2.5 rounded-full ${
+              className={`h-2.5 w-2.5 shrink-0 rounded-full ${
                 settings.includeLiveEvents ? 'bg-brand-400 shadow-[0_0_8px_rgb(var(--brand-400))]' : 'bg-slate-600'
               }`}
             />
@@ -248,10 +280,92 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
         </div>
       </div>
 
+      {/* Bookmakers & Sources Search / Filter Bar */}
+      <div className="glass-card flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-white">Elenco Bookmaker & Fonti</span>
+            <span className="rounded-lg border border-slate-800 bg-slate-950/80 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300">
+              {filteredSources.length} / {snapshot.sources.length}
+            </span>
+          </div>
+
+          <SlidingPillTrack
+            activeKey={sourceKindFilter}
+            pillClassName="rounded-lg bg-slate-800 shadow-inner"
+            className="flex items-center rounded-xl border border-slate-800 bg-slate-950/75 p-0.5"
+          >
+            {(
+              [
+                { id: 'ALL', label: `Tutti (${snapshot.sources.length})` },
+                { id: 'bookmaker', label: `Bookmaker (${bookmakersTotal})` },
+                { id: 'exchange', label: `Exchange (${exchangesTotal})` },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                data-pill-key={tab.id}
+                data-testid={`scrapers-kind-${tab.id.toLowerCase()}`}
+                onClick={() => setSourceKindFilter(tab.id)}
+                className={`relative z-10 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                  sourceKindFilter === tab.id
+                    ? 'text-brand-300'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </SlidingPillTrack>
+        </div>
+
+        <div className="relative w-full sm:w-72">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+          <input
+            type="text"
+            value={sourceSearch}
+            onChange={(e) => setSourceSearch(e.target.value)}
+            placeholder="Cerca bookmaker o exchange per nome..."
+            data-testid="scrapers-bookmaker-search"
+            className="h-9 w-full rounded-xl border border-slate-800 bg-slate-950/90 pl-8 pr-8 text-xs text-white placeholder-slate-500 focus:border-brand-400 focus:outline-none"
+          />
+          {sourceSearch && (
+            <button
+              type="button"
+              aria-label="Azzera ricerca bookmaker"
+              data-testid="scrapers-bookmaker-search-clear"
+              onClick={() => setSourceSearch('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 transition hover:text-white"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Sources Health Cards Grid */}
+      {filteredSources.length === 0 ? (
+        <div className="glass-card flex flex-col items-center justify-center gap-2 rounded-2xl p-8 text-center">
+          <Search className="h-6 w-6 text-slate-500" />
+          <div className="text-xs font-semibold text-slate-300">
+            Nessun bookmaker o fonte trovato{sourceSearch.trim() ? ` per "${sourceSearch.trim()}"` : ''}.
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSourceSearch('');
+              setSourceKindFilter('ALL');
+            }}
+            className="mt-1 rounded-lg border border-brand-400/40 bg-brand-500/15 px-3 py-1.5 text-[11px] font-bold text-brand-200 transition hover:bg-brand-500/25"
+          >
+            Mostra tutte le fonti
+          </button>
+        </div>
+      ) : (
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {snapshot.sources.map((src, idx) => {
-          const meta = SOURCE_CATALOG.find((c) => c.id === src.id);
+        {filteredSources.map((src, idx) => {
+          const meta = sourceMetaMap.get(src.id);
           if (!meta) return null;
           const isEnabled = settings.enabledSources[src.id] ?? meta.enabled;
 
@@ -260,7 +374,7 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
               key={src.id}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: idx * 0.03 }}
+              transition={{ delay: Math.min(idx * 0.02, 0.2) }}
               className={`glass-card relative overflow-hidden rounded-2xl p-4 transition ${
                 isEnabled ? 'border-slate-800/90' : 'opacity-60 border-slate-900'
               }`}
@@ -391,6 +505,7 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
           );
         })}
       </div>
+      )}
 
       {/* Live Terminal Scraping Log */}
       <div className="glass-panel flex min-h-[210px] flex-col rounded-2xl overflow-hidden">
@@ -414,7 +529,7 @@ export const ScrapersView: React.FC<ScrapersViewProps> = ({
                   {new Date(log.timestamp).toLocaleTimeString('it-IT')}
                 </span>
                 <span
-                  className={`w-20 shrink-0 font-bold ${
+                  className={`w-28 shrink-0 font-bold ${
                     log.level === 'success'
                       ? 'text-emerald-400'
                       : log.level === 'error'

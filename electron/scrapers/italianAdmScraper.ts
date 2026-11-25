@@ -69,6 +69,48 @@ export const ITALIAN_ADM_BOOKMAKERS: AdmBookmakerSpec[] = [
     name: 'GoldBet.it',
     url: 'https://www.goldbet.it/scommesse/sport',
   },
+  {
+    sourceId: 'lottomatica_it',
+    bookmakerId: 335,
+    name: 'Lottomatica.it',
+    url: 'https://www.lottomatica.it/scommesse',
+  },
+  {
+    sourceId: 'planetwin365_it',
+    bookmakerId: 467,
+    name: 'Planetwin365.it',
+    url: 'https://www.planetwin365.it/it/scommesse',
+  },
+  {
+    sourceId: 'bet365_it',
+    bookmakerId: 419,
+    name: 'bet365.it',
+    url: 'https://www.bet365.it/',
+  },
+  {
+    sourceId: 'betsson_it',
+    bookmakerId: 773,
+    name: 'Betsson.it',
+    url: 'https://www.betsson.it/scommesse',
+  },
+  {
+    sourceId: 'domusbet_it',
+    bookmakerId: 548,
+    name: 'DomusBet.it',
+    url: 'https://www.domusbet.it/scommesse',
+  },
+  {
+    sourceId: 'daznbet_it',
+    bookmakerId: 1185,
+    name: 'DAZN Bet.it',
+    url: 'https://www.daznbet.it/scommesse',
+  },
+  {
+    sourceId: 'williamhill_it',
+    bookmakerId: 372,
+    name: 'WilliamHill.it',
+    url: 'https://sports.williamhill.it/',
+  },
 ];
 
 interface ScheduledDirettaEvent {

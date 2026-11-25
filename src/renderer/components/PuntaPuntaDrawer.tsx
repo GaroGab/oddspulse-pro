@@ -15,11 +15,18 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
-import { calculatePuntaPunta, round2, type PuntaPuntaCalcInput } from '../../shared/math';
+import {
+  calculatePuntaPunta,
+  computeAutoPuntaPuntaRolloverRating,
+  round2,
+  type PuntaPuntaCalcInput,
+} from '../../shared/math';
 import type { PuntaPuntaCandidateRow } from '../../shared/puntaPuntaMatcher';
 import type {
   BetMode,
+  DutcherRow,
   LiveVerifySideResult,
+  RolloverWalletRule,
   SourceId,
   TrackedBet,
   VerifyPuntaPuntaResult,
@@ -30,6 +37,7 @@ import { AnimatedNumber } from './AnimatedNumber';
 import { BookmakerIcon } from './BookmakerIcon';
 import { CustomSelect, type SelectOption } from './CustomSelect';
 import { NumericInput } from './NumericInput';
+import { RolloverParamsPanel } from './RolloverParamsPanel';
 import { SlidingPillTrack } from './SlidingPillTrack';
 
 interface PuntaPuntaDrawerProps {
@@ -40,6 +48,7 @@ interface PuntaPuntaDrawerProps {
   initialRefundAmount: number;
   initialRefundRetention: number;
   soundEnabled: boolean;
+  dutcherRows?: DutcherRow[];
   onClose: () => void;
   onSaveTrackedBet: (bet: Omit<TrackedBet, 'id' | 'createdAt'>) => void;
 }
@@ -62,6 +71,7 @@ const MODE_LABELS: { id: BetMode; label: string; hint: string }[] = [
   { id: 'snr', label: 'Freebet SNR', hint: 'Stake non restituito' },
   { id: 'sr', label: 'Bonus SR', hint: 'Stake restituito' },
   { id: 'rf', label: 'Rimborso RF', hint: 'Rimborso se perdente' },
+  { id: 'rollover', label: 'Rollover', hint: 'Sblocco bonus a rigioco' },
 ];
 
 export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
@@ -72,6 +82,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
   initialRefundAmount,
   initialRefundRetention,
   soundEnabled,
+  dutcherRows,
   onClose,
   onSaveTrackedBet,
 }) => {
@@ -81,6 +92,12 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
     useState<NonNullable<PuntaPuntaCalcInput['anchorMode']>>(initialAnchorMode);
   const [refundAmount, setRefundAmount] = useState<number>(initialRefundAmount);
   const [refundRetention, setRefundRetention] = useState<number>(initialRefundRetention);
+  const [realBalance, setRealBalance] = useState<number>(initialStake || 50);
+  const [bonusBalance, setBonusBalance] = useState<number>(initialStake || 50);
+  const [rolloverRemaining, setRolloverRemaining] = useState<number>((initialStake || 50) * 6);
+  const [autoEstimatedRating, setAutoEstimatedRating] = useState<boolean>(true);
+  const [manualEstimatedRating, setManualEstimatedRating] = useState<number>(95);
+  const [rolloverWalletRule, setRolloverWalletRule] = useState<RolloverWalletRule>('mixed');
   const [balanceBias, setBalanceBias] = useState<number>(0);
   const [legs, setLegs] = useState<EditableLeg[]>([]);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
@@ -187,6 +204,19 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [row, onClose]);
 
+  const autoRatingInfo = useMemo(
+    () =>
+      computeAutoPuntaPuntaRolloverRating({
+        dutcherRows,
+        currentOdds: legs.map((l) => Math.max(1.01, l.odds || 1.01)),
+      }),
+    [dutcherRows, legs]
+  );
+
+  const effectiveEstimatedRating = autoEstimatedRating
+    ? autoRatingInfo.estimatedRating
+    : manualEstimatedRating;
+
   const calc = useMemo(() => {
     if (legs.length < 2) return null;
     return calculatePuntaPunta({
@@ -196,9 +226,27 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
       anchorMode,
       refundAmount: Math.max(0, refundAmount || 0),
       refundRetention: Math.max(0, Math.min(100, refundRetention || 0)),
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      estimatedRating: effectiveEstimatedRating,
+      rolloverWalletRule,
       balanceBias,
     });
-  }, [legs, mode, stake, anchorMode, refundAmount, refundRetention, balanceBias]);
+  }, [
+    legs,
+    mode,
+    stake,
+    anchorMode,
+    refundAmount,
+    refundRetention,
+    realBalance,
+    bonusBalance,
+    rolloverRemaining,
+    effectiveEstimatedRating,
+    rolloverWalletRule,
+    balanceBias,
+  ]);
 
   const isModifiedFromLive = useMemo(() => {
     if (!row || legs.length !== row.legs.length) return false;
@@ -302,7 +350,10 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
       rating: calc.rating,
       status: 'pending',
       realizedProfit: 0,
-      notes: `Punta-Punta (${mode.toUpperCase()}) • Lavagna ${round2(calc.impliedProbSum * 100).toFixed(2)}%`,
+      notes:
+        mode === 'rollover' && calc.rollover
+          ? `Rollover €${calc.rollover.rolloverBefore}→€${calc.rollover.rolloverAfter} • Real €${calc.rollover.realBalance} + Bonus €${calc.rollover.bonusBalance} @ ${calc.rollover.estimatedRating}%`
+          : `Punta-Punta (${mode.toUpperCase()}) • Lavagna ${round2(calc.impliedProbSum * 100).toFixed(2)}%`,
     });
     if (soundEnabled) playCopyTick();
     setSavedBanner(true);
@@ -392,7 +443,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
                   <SlidingPillTrack
                     activeKey={mode}
                     pillClassName="rounded-md bg-brand-500 shadow-[0_0_12px_rgba(245,158,11,0.35)]"
-                    className="grid grid-cols-4 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1"
+                    className="grid grid-cols-3 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1 sm:grid-cols-5"
                   >
                     {MODE_LABELS.map((m) => (
                       <button
@@ -418,6 +469,8 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
                         ? 'Budget Totale (€)'
                         : mode === 'snr' || mode === 'sr'
                         ? 'Importo Bonus (€)'
+                        : mode === 'rollover'
+                        ? 'Puntata Rollover (€)'
                         : 'Puntata Punta 1 (€)'}
                     </span>
                     {mode === 'normal' && (
@@ -492,6 +545,30 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
                     />
                   </div>
                 </div>
+              )}
+
+              {/* Rollover Parameters if mode === 'rollover' */}
+              {mode === 'rollover' && (
+                <RolloverParamsPanel
+                  compact
+                  stake={stake}
+                  realBalance={realBalance}
+                  bonusBalance={bonusBalance}
+                  rolloverRemaining={rolloverRemaining}
+                  estimatedRating={effectiveEstimatedRating}
+                  autoEstimatedRating={autoEstimatedRating}
+                  autoRatingInfo={autoRatingInfo}
+                  walletRule={rolloverWalletRule}
+                  rolloverDetails={calc.rollover}
+                  onChangeStake={setStake}
+                  onChangeRealBalance={setRealBalance}
+                  onChangeBonusBalance={setBonusBalance}
+                  onChangeRolloverRemaining={setRolloverRemaining}
+                  onChangeEstimatedRating={setManualEstimatedRating}
+                  onToggleAutoRating={setAutoEstimatedRating}
+                  onChangeWalletRule={setRolloverWalletRule}
+                  testIdPrefix="pp-drawer-rollover"
+                />
               )}
 
               {sameBookieConflict && (
@@ -715,7 +792,7 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
                 <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3">
                   <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-400">
                     <TrendingUp className="h-3 w-3 text-emerald-400" />
-                    Profitto Netto
+                    {mode === 'rollover' ? 'Profitto Finale' : 'Profitto Netto'}
                   </div>
                   <div
                     data-testid="pp-calc-profit"
@@ -846,6 +923,26 @@ export const PuntaPuntaDrawer: React.FC<PuntaPuntaDrawerProps> = ({
                     );
                   })}
                 </div>
+                {mode === 'rollover' && calc.rollover && (
+                  <div className="mt-2 grid grid-cols-2 gap-2 border-t border-slate-800/70 pt-2 text-[10px] text-slate-400">
+                    <div className="flex justify-between gap-1">
+                      <span>Rollover se vince P1:</span>
+                      <span className="font-mono font-semibold text-amber-300">
+                        {calc.rollover.futureRolloverCostIfWin > 0.005
+                          ? `-${formatEuro(calc.rollover.futureRolloverCostIfWin)}`
+                          : '€0,00'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-1">
+                      <span>Rollover se vince Copertura:</span>
+                      <span className="font-mono font-semibold text-emerald-300">
+                        {calc.rollover.clearsRolloverOnLose
+                          ? '€0,00 (Sblocco!)'
+                          : `-${formatEuro(calc.rollover.futureRolloverCostIfLose)}`}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

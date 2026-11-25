@@ -5,7 +5,7 @@ import {
 } from '../../src/shared/dateRange';
 import { quickRatings, round2 } from '../../src/shared/math';
 import { computeConnectionDiagnostic } from '../../src/shared/networkHealth';
-import { ADM_BATCH_SOURCES, KAMBI_SOURCES } from '../../src/shared/ratingWatch';
+import { ADM_BATCH_SOURCES, KAMBI_SOURCES, XSPORT_SOURCES } from '../../src/shared/ratingWatch';
 import {
   SOURCE_CATALOG,
   type AppSettings,
@@ -33,6 +33,7 @@ import {
 import { refreshBetfairExchangeMarkets, scrapeBetfairExchange } from './betfairExchange';
 import { scrapeBetfairSportsbook, verifyBetfairSportsbookMarket } from './betfairSportsbook';
 import { scrapeBetflagExchange, verifyBetflagExchangeEvent } from './betflagExchange';
+import { scrapeGiocoDigitale, verifyGiocoDigitaleEvent } from './giocoDigitaleBookmaker';
 import { computeEffectiveScrapedAt, isAbortError, sleep } from './httpClient';
 import {
   ITALIAN_ADM_BOOKMAKERS,
@@ -44,11 +45,13 @@ import { KAMBI_BRANDS, scrapeKambiBrand, verifyKambiEvent } from './kambiBookmak
 import { linkScrapedMarkets, matchesEventHints, type LinkedEventGroup } from './matchLinker';
 import { scrapeTheOddsApiOptional } from './oddsApiOptional';
 import { scrapePinnacle, verifyPinnacleMarket } from './pinnacleBookmaker';
+import { scrapePokerstars, verifyPokerstarsEvent } from './pokerstarsBookmaker';
 import {
   extractBestSmarketsPrices,
   refreshSmarketsQuotesByMarkets,
   scrapeSmarketsExchange,
 } from './smarketsExchange';
+import { scrapeXSportBrand, verifyXSportEvent, XSPORT_BRANDS } from './xsportBookmaker';
 
 const SOURCE_META = new Map(SOURCE_CATALOG.map((s) => [s.id, s]));
 const DATE_RANGE_CACHE_TTL_MS = 3 * 60_000;
@@ -589,6 +592,24 @@ export class ScraperEngine {
         runSource('betfair_sportsbook', () => scrapeBetfairSportsbook(includeLive, filter, signal))
       );
     }
+    if (settings.enabledSources.giocodigitale_it) {
+      otherBookieTasks.push(
+        runSource('giocodigitale_it', () => scrapeGiocoDigitale(includeLive, filter, signal))
+      );
+    }
+    if (settings.enabledSources.pokerstars_it) {
+      otherBookieTasks.push(
+        runSource('pokerstars_it', () => scrapePokerstars(includeLive, filter, signal))
+      );
+    }
+    for (const xid of XSPORT_SOURCES) {
+      if (!settings.enabledSources[xid]) continue;
+      const spec = XSPORT_BRANDS[xid];
+      if (!spec) continue;
+      otherBookieTasks.push(
+        runSource(xid, () => scrapeXSportBrand(spec, includeLive, filter, signal))
+      );
+    }
     if (settings.enabledSources.pinnacle) {
       otherBookieTasks.push(
         runSource('pinnacle', () => scrapePinnacle(includeLive, filter, signal))
@@ -971,7 +992,7 @@ export class ScraperEngine {
     }
 
     const abortController = new AbortController();
-    setMaxListeners(64, abortController.signal);
+    setMaxListeners(128, abortController.signal);
     const signal = abortController.signal;
     this.dateRangeAbortController = abortController;
     this.activeDateWindow = dateWindow;
@@ -1106,7 +1127,7 @@ export class ScraperEngine {
   private async _executeCycle(settings: AppSettings): Promise<ScrapeSnapshot> {
     if (this.isRunning) return this.lastSnapshot;
     const abortController = new AbortController();
-    setMaxListeners(64, abortController.signal);
+    setMaxListeners(128, abortController.signal);
     const signal = abortController.signal;
     this.activeCycleAbortController = abortController;
     this.isRunning = true;
@@ -1478,6 +1499,21 @@ export class ScraperEngine {
           runSilent('betfair_sportsbook', () => scrapeBetfairSportsbook(includeLive, filter))
         );
       }
+      if (plan.bookmakerIds.includes('giocodigitale_it')) {
+        tasks.push(
+          runSilent('giocodigitale_it', () => scrapeGiocoDigitale(includeLive, filter))
+        );
+      }
+      if (plan.bookmakerIds.includes('pokerstars_it')) {
+        tasks.push(
+          runSilent('pokerstars_it', () => scrapePokerstars(includeLive, filter))
+        );
+      }
+      for (const xid of plan.bookmakerIds.filter((id) => XSPORT_SOURCES.has(id))) {
+        const spec = XSPORT_BRANDS[xid];
+        if (!spec) continue;
+        tasks.push(runSilent(xid, () => scrapeXSportBrand(spec, includeLive, filter)));
+      }
       if (plan.bookmakerIds.includes('pinnacle')) {
         tasks.push(runSilent('pinnacle', () => scrapePinnacle(includeLive, filter)));
       }
@@ -1752,7 +1788,7 @@ export class ScraperEngine {
         };
       }
 
-      // 3. Italian ADM bookmakers (Sisal, SNAI, Betflag, Eurobet, GoldBet) — ~180ms cache-busted GraphQL
+      // 3. Italian ADM bookmakers via Diretta GraphQL (Sisal, SNAI, Betflag, Eurobet, GoldBet, Lottomatica, Planetwin365, bet365, Betsson, DomusBet, DAZN Bet, WilliamHill) — ~180ms cache-busted GraphQL
       if (ADM_BATCH_SOURCES.has(params.sourceId)) {
         if (!params.eventId) {
           return {
@@ -1794,6 +1830,123 @@ export class ScraperEngine {
           latencyMs,
           cacheAgeSec,
           isAggregator: true,
+        };
+      }
+
+      // 3b. Gioco Digitale IT (direct Entain CDS fixture-view) — ~120ms
+      if (params.sourceId === 'giocodigitale_it') {
+        if (!params.eventId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { market, latencyMs, cacheAgeSec } = await verifyGiocoDigitaleEvent({
+          eventId: params.eventId,
+          sport: params.sport,
+          marketType: params.marketType,
+          includeLive: params.includeLive,
+        });
+        const sel = market?.selections.find((s) => s.canonicalKey === rawKey);
+        if (!sel?.backOdds || sel.backOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const changed = Math.abs(sel.backOdds - params.previousOdds) >= 0.005;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: sel.backOdds,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      // 3c. PokerStars.it (direct Flutter/Sisal sportsbook API) — ~180ms
+      if (params.sourceId === 'pokerstars_it') {
+        if (!params.eventId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { market, latencyMs, cacheAgeSec } = await verifyPokerstarsEvent({
+          eventId: params.eventId,
+          sport: params.sport,
+          marketType: params.marketType,
+          manifestationKey: params.metadata?.manifestationKey,
+        });
+        const sel = market?.selections.find((s) => s.canonicalKey === rawKey);
+        if (!sel?.backOdds || sel.backOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const changed = Math.abs(sel.backOdds - params.previousOdds) >= 0.005;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: sel.backOdds,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
+        };
+      }
+
+      // 3d. Exalogic XSport brands (NetBet.it, Stanleybet.it) — ~75-150ms
+      const xsportSpec = XSPORT_BRANDS[params.sourceId];
+      if (xsportSpec) {
+        if (!params.eventId) {
+          return {
+            status: 'skipped',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs: 0,
+          };
+        }
+        const { market, latencyMs, cacheAgeSec } = await verifyXSportEvent({
+          spec: xsportSpec,
+          eventId: params.eventId,
+          sport: params.sport,
+          marketType: params.marketType,
+          homeTeam: params.homeTeam,
+          awayTeam: params.awayTeam,
+          startTime: params.startTime,
+          includeLive: params.includeLive,
+          metadata: params.metadata,
+        });
+        const sel = market?.selections.find((s) => s.canonicalKey === rawKey);
+        if (!sel?.backOdds || sel.backOdds <= 1.005) {
+          return {
+            status: 'suspended',
+            previousOdds: params.previousOdds,
+            checkedAt: Date.now(),
+            latencyMs,
+            cacheAgeSec,
+          };
+        }
+        const changed = Math.abs(sel.backOdds - params.previousOdds) >= 0.005;
+        return {
+          status: changed ? 'changed' : 'confirmed',
+          previousOdds: params.previousOdds,
+          liveOdds: sel.backOdds,
+          checkedAt: computeEffectiveScrapedAt(Date.now(), cacheAgeSec),
+          latencyMs,
+          cacheAgeSec,
         };
       }
 

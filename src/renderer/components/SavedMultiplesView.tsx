@@ -19,6 +19,7 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
+import { computeAutoRolloverRating } from '../../shared/math';
 import {
   evaluateSavedMultiplePlan,
   findLiveRowForSavedLeg,
@@ -27,6 +28,7 @@ import {
 import type {
   BetMode,
   OddsmatcherRow,
+  RolloverWalletRule,
   SavedMultipleLegStatus,
   SavedMultiplePlan,
   SavedMultiplePlanInput,
@@ -38,6 +40,7 @@ import { AnimatedNumber } from './AnimatedNumber';
 import { BookmakerIcon } from './BookmakerIcon';
 import { CustomSelect } from './CustomSelect';
 import { NumericInput } from './NumericInput';
+import { RolloverParamsPanel } from './RolloverParamsPanel';
 import { SlidingPillTrack } from './SlidingPillTrack';
 
 interface SavedMultiplesViewProps {
@@ -102,6 +105,7 @@ export const SavedMultiplesView: React.FC<SavedMultiplesViewProps> = React.memo(
     const [copiedPlan, setCopiedPlan] = useState<boolean>(false);
     const [syncNote, setSyncNote] = useState<string | null>(null);
     const [trackedIds, setTrackedIds] = useState<Set<string>>(new Set());
+    const [autoEstimatedRating, setAutoEstimatedRating] = useState<boolean>(false);
 
     useEffect(() => {
       if (initialSelectedId && savedMultiples.some((p) => p.id === initialSelectedId)) {
@@ -158,6 +162,15 @@ export const SavedMultiplesView: React.FC<SavedMultiplesViewProps> = React.memo(
       () => (selectedPlan ? evaluatedMap.get(selectedPlan.id) ?? evaluateSavedMultiplePlan(selectedPlan) : null),
       [selectedPlan, evaluatedMap]
     );
+
+    const autoRatingEstimate = useMemo(() => {
+      const scopedRows = selectedPlan
+        ? liveRows.filter((r) => r.bookmakerId === selectedPlan.bookmakerId)
+        : liveRows;
+      return computeAutoRolloverRating({
+        rows: scopedRows.length > 0 ? scopedRows : liveRows,
+      });
+    }, [liveRows, selectedPlan]);
 
     const commitUpdate = (nextPlan: SavedMultiplePlan) => {
       void onSaveMultiplePlan(nextPlan);
@@ -595,12 +608,28 @@ export const SavedMultiplesView: React.FC<SavedMultiplesViewProps> = React.memo(
                     className="mt-0.5"
                     minMenuWidth={150}
                     value={selectedPlan.mode}
-                    onChange={(m) => commitUpdate({ ...selectedPlan, mode: m })}
+                    onChange={(m) => {
+                      if (m === 'rollover') {
+                        commitUpdate({
+                          ...selectedPlan,
+                          mode: m,
+                          realBalance: selectedPlan.realBalance ?? 100,
+                          bonusBalance: selectedPlan.bonusBalance ?? 100,
+                          rolloverRemaining: selectedPlan.rolloverRemaining ?? 500,
+                          estimatedRating:
+                            selectedPlan.estimatedRating ?? autoRatingEstimate.estimatedRating,
+                          rolloverWalletRule: selectedPlan.rolloverWalletRule ?? 'mixed',
+                        });
+                      } else {
+                        commitUpdate({ ...selectedPlan, mode: m });
+                      }
+                    }}
                     options={[
                       { value: 'normal', label: 'Normale' },
                       { value: 'snr', label: 'Freebet SNR' },
                       { value: 'sr', label: 'Bonus SR' },
                       { value: 'rf', label: 'Rimborso RF' },
+                      { value: 'rollover', label: 'Rollover' },
                     ]}
                   />
                 </div>
@@ -667,6 +696,46 @@ export const SavedMultiplesView: React.FC<SavedMultiplesViewProps> = React.memo(
                   </div>
                 )}
               </div>
+
+              {selectedPlan.mode === 'rollover' && (
+                <RolloverParamsPanel
+                  compact
+                  testIdPrefix="saved-rollover"
+                  stake={selectedPlan.stake}
+                  realBalance={selectedPlan.realBalance ?? 100}
+                  bonusBalance={selectedPlan.bonusBalance ?? 100}
+                  rolloverRemaining={selectedPlan.rolloverRemaining ?? 500}
+                  estimatedRating={
+                    selectedPlan.estimatedRating ?? autoRatingEstimate.estimatedRating
+                  }
+                  autoEstimatedRating={autoEstimatedRating}
+                  autoRatingInfo={autoRatingEstimate}
+                  walletRule={(selectedPlan.rolloverWalletRule ?? 'mixed') as RolloverWalletRule}
+                  rolloverDetails={selectedEval.rollover}
+                  onChangeStake={(v) => commitUpdate({ ...selectedPlan, stake: v })}
+                  onChangeRealBalance={(v) => commitUpdate({ ...selectedPlan, realBalance: v })}
+                  onChangeBonusBalance={(v) => commitUpdate({ ...selectedPlan, bonusBalance: v })}
+                  onChangeRolloverRemaining={(v) =>
+                    commitUpdate({ ...selectedPlan, rolloverRemaining: v })
+                  }
+                  onChangeEstimatedRating={(v) => {
+                    setAutoEstimatedRating(false);
+                    commitUpdate({ ...selectedPlan, estimatedRating: v });
+                  }}
+                  onToggleAutoRating={(nextAuto) => {
+                    setAutoEstimatedRating(nextAuto);
+                    if (nextAuto) {
+                      commitUpdate({
+                        ...selectedPlan,
+                        estimatedRating: autoRatingEstimate.estimatedRating,
+                      });
+                    }
+                  }}
+                  onChangeWalletRule={(rule) =>
+                    commitUpdate({ ...selectedPlan, rolloverWalletRule: rule })
+                  }
+                />
+              )}
 
               {/* Hero KPI Summary */}
               <div className="grid grid-cols-2 gap-2.5 rounded-xl border border-brand-400/30 bg-gradient-to-r from-brand-500/10 via-slate-900/70 to-accent-500/10 px-3.5 py-2 sm:grid-cols-4">
@@ -736,6 +805,31 @@ export const SavedMultiplesView: React.FC<SavedMultiplesViewProps> = React.memo(
                   </div>
                 </div>
               </div>
+
+              {selectedEval.rollover && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-brand-400/25 bg-brand-500/[0.06] px-3 py-1.5 text-[10px]">
+                  <span className="font-semibold text-brand-200">
+                    Rollover: €{selectedEval.rollover.rolloverBefore.toFixed(0)} →{' '}
+                    <strong className="text-white">
+                      {selectedEval.rollover.completesRolloverOnThisBet
+                        ? 'Completato'
+                        : `€${selectedEval.rollover.rolloverAfter.toFixed(0)}`}
+                    </strong>
+                  </span>
+                  <span className="text-slate-400">
+                    Match Rating:{' '}
+                    <strong className="font-mono text-emerald-300">
+                      {selectedEval.rollover.matchRating.toFixed(2)}%
+                    </strong>
+                  </span>
+                  <span className="font-mono text-slate-400">
+                    Costo futuro V/P: -{formatEuro(selectedEval.rollover.futureRolloverCostIfWin)} /{' '}
+                    {selectedEval.rollover.clearsRolloverOnLose
+                      ? 'Azzera (€0)'
+                      : `-${formatEuro(selectedEval.rollover.futureRolloverCostIfLose)}`}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Scrollable Progressive Steps */}

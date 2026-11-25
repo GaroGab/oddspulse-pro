@@ -2,7 +2,9 @@ export type SportKey = 'football' | 'tennis' | 'basketball';
 
 export type MarketType = '1X2' | 'OVER_UNDER_25' | 'BTTS' | 'H2H';
 
-export type BetMode = 'normal' | 'snr' | 'sr' | 'rf';
+export type BetMode = 'normal' | 'snr' | 'sr' | 'rf' | 'rollover';
+
+export type RolloverWalletRule = 'mixed' | 'bonus_first';
 
 export type SourceKind = 'bookmaker' | 'exchange';
 
@@ -15,6 +17,17 @@ export type SourceId =
   | 'betflag_it'
   | 'eurobet_it'
   | 'goldbet_it'
+  | 'lottomatica_it'
+  | 'planetwin365_it'
+  | 'bet365_it'
+  | 'betsson_it'
+  | 'domusbet_it'
+  | 'daznbet_it'
+  | 'williamhill_it'
+  | 'giocodigitale_it'
+  | 'pokerstars_it'
+  | 'netbet_it'
+  | 'stanleybet_it'
   | 'betfair_sportsbook'
   | '888sport_it'
   | 'leovegas_it'
@@ -353,8 +366,36 @@ export interface SingleCalcInput {
   commission: number; // e.g. 0.045
   refundAmount?: number; // for 'rf' mode
   refundRetention?: number; // 0..100, e.g. 70%
+  /** Rollover mode inputs */
+  realBalance?: number; // Saldo Reale (€) before this bet
+  bonusBalance?: number; // Saldo Bonus (€) before this bet
+  rolloverRemaining?: number; // Rollover rimanente (€) before this bet
+  estimatedRating?: number; // Rating stimato (%) for remaining rollover bets, e.g. 96
+  rolloverWalletRule?: RolloverWalletRule; // 'mixed' (default) | 'bonus_first'
   /** -1 = full underlay, 0 = balanced, +1 = full overlay */
   balanceBias?: number;
+}
+
+export interface RolloverCalcDetails {
+  stake: number;
+  realBalance: number;
+  bonusBalance: number;
+  extraRealUsed: number;
+  totalBalanceBefore: number;
+  rolloverBefore: number;
+  rolloverAfter: number;
+  estimatedRating: number;
+  walletRule: RolloverWalletRule;
+  bookieBalanceIfWin: number;
+  bookieBalanceIfLose: number;
+  futureRolloverCostIfWin: number;
+  futureRolloverCostIfLose: number;
+  singleBetBookieProfit: number;
+  singleBetExchangeProfit: number;
+  matchRating: number;
+  clearsRolloverOnLose: boolean;
+  completesRolloverOnThisBet: boolean;
+  baselineExpectedValue: number;
 }
 
 export interface SingleCalcResult {
@@ -368,6 +409,7 @@ export interface SingleCalcResult {
   expectedProfit: number;
   rating: number;
   rawRating: number;
+  rollover?: RolloverCalcDetails;
 }
 
 export interface MultioddsLegInput {
@@ -408,6 +450,7 @@ export interface MultioddsPlan {
   minLiquidity: number;
   minGapMinutes: number;
   nonOverlapping: boolean;
+  rollover?: RolloverCalcDetails;
 }
 
 export type SavedMultipleLegStatus = 'pending' | 'laid' | 'won_bookie' | 'lost_bookie';
@@ -455,6 +498,11 @@ export interface SavedMultiplePlan {
   bonusBoostPct: number;
   refundAmount: number;
   refundRetention: number;
+  realBalance?: number;
+  bonusBalance?: number;
+  rolloverRemaining?: number;
+  estimatedRating?: number;
+  rolloverWalletRule?: RolloverWalletRule;
   minGapMinutes: number;
   bookmakerId: SourceId;
   bookmakerName: string;
@@ -554,6 +602,7 @@ export interface RatingWatch {
   minLiquidity: number;
   minBackOdds: number;
   maxBackOdds: number;
+  excludeSurebets?: boolean;
   autoPauseOnTrigger: boolean;
   cooldownSec: number;
   lastCheckedAt: number | null;
@@ -805,6 +854,138 @@ export const SOURCE_CATALOG: SourceConfig[] = [
     description: 'Bookmaker italiano ADM — quote live Calcio, Tennis e Basket',
   },
   {
+    id: 'lottomatica_it',
+    name: 'Lottomatica.it',
+    shortName: 'Lottomatica',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#16a34a',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.lottomatica.it/scommesse',
+    description: 'Bookmaker italiano ADM Better/Lottomatica — quote live Calcio (1X2, U/O 2.5, GG/NG), Tennis e Basket',
+  },
+  {
+    id: 'planetwin365_it',
+    name: 'Planetwin365.it',
+    shortName: 'Planetwin',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#e99812',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.planetwin365.it/it/scommesse',
+    description: 'Bookmaker italiano ADM Planetwin365 — quote live Calcio (1X2, U/O 2.5, GG/NG), Tennis e Basket',
+  },
+  {
+    id: 'bet365_it',
+    name: 'bet365.it',
+    shortName: 'bet365',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#126e51',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.bet365.it/',
+    description: 'Bookmaker leader ADM Italia — quote live Calcio (1X2, U/O 2.5, GG/NG), Tennis e Basket',
+  },
+  {
+    id: 'betsson_it',
+    name: 'Betsson.it',
+    shortName: 'Betsson',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#ff6600',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.betsson.it/scommesse',
+    description: 'Bookmaker italiano ADM Betsson — quote live Calcio, Tennis e Basket',
+  },
+  {
+    id: 'domusbet_it',
+    name: 'DomusBet.it',
+    shortName: 'DomusBet',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#dc2626',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.domusbet.it/scommesse',
+    description: 'Bookmaker italiano ADM DomusBet — quote live Calcio, Tennis e Basket',
+  },
+  {
+    id: 'daznbet_it',
+    name: 'DAZN Bet.it',
+    shortName: 'DAZN Bet',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#facc15',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.daznbet.it/scommesse',
+    description: 'Bookmaker italiano ADM DAZN Bet — quote live Calcio, Tennis e Basket',
+  },
+  {
+    id: 'williamhill_it',
+    name: 'WilliamHill.it',
+    shortName: 'WilliamHill',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#1d4ed8',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://sports.williamhill.it/',
+    description: 'Bookmaker storico ADM Italia — quote live Calcio (1X2, U/O 2.5, GG/NG), Tennis e Basket',
+  },
+  {
+    id: 'giocodigitale_it',
+    name: 'Gioco Digitale',
+    shortName: 'GiocoDig',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#f97316',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.giocodigitale.it/it/sports',
+    description: 'Bookmaker italiano ADM (piattaforma diretta Entain) — quote real-time Calcio, Tennis e Basket',
+  },
+  {
+    id: 'pokerstars_it',
+    name: 'PokerStars.it',
+    shortName: 'PokerStars',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#ef4444',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.pokerstars.it/scommesse',
+    description: 'Sportsbook italiano ADM PokerStars — quote dirette real-time Calcio, Tennis e Basket',
+  },
+  {
+    id: 'netbet_it',
+    name: 'NetBet.it',
+    shortName: 'NetBet',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#e11d48',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.netbet.it/scommesse/',
+    description: 'Bookmaker italiano ADM NetBet — palinsesto diretto real-time Calcio, Tennis e Basket',
+  },
+  {
+    id: 'stanleybet_it',
+    name: 'Stanleybet.it',
+    shortName: 'Stanleybet',
+    kind: 'bookmaker',
+    region: 'IT (ADM)',
+    color: '#b91c1c',
+    defaultCommission: 0,
+    enabled: true,
+    url: 'https://www.stanleybet.it/sport',
+    description: 'Bookmaker italiano ADM Stanleybet — palinsesto diretto real-time Calcio, Tennis e Basket',
+  },
+  {
     id: 'betfair_sportsbook',
     name: 'Betfair Sportsbook IT',
     shortName: 'Betfair SB',
@@ -886,7 +1067,7 @@ export const SOURCE_CATALOG: SourceConfig[] = [
     defaultCommission: 0,
     enabled: false,
     url: 'https://the-odds-api.com/',
-    description: 'Connettore opzionale con API Key gratuita per aggiungere bookmaker EU/IT extra (William Hill, Betclic, Marathonbet, ecc.)',
+    description: 'Connettore opzionale con API Key gratuita per aggiungere bookmaker EU/IT extra (Betclic, Marathonbet, bwin, ecc.)',
   },
 ];
 
@@ -908,6 +1089,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
     betflag_it: true,
     eurobet_it: true,
     goldbet_it: true,
+    lottomatica_it: true,
+    planetwin365_it: true,
+    bet365_it: true,
+    betsson_it: true,
+    domusbet_it: true,
+    daznbet_it: true,
+    williamhill_it: true,
+    giocodigitale_it: true,
+    pokerstars_it: true,
+    netbet_it: true,
+    stanleybet_it: true,
     betfair_sportsbook: true,
     '888sport_it': true,
     leovegas_it: true,

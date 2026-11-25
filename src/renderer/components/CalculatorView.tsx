@@ -4,6 +4,7 @@ import {
   BookmarkPlus,
   Calculator,
   Check,
+  ChevronDown,
   ClipboardCheck,
   Copy,
   Gift,
@@ -15,18 +16,30 @@ import {
   Sparkles,
   TrendingUp,
 } from 'lucide-react';
-import { calculatePuntaPunta, calculateSingleMatch } from '../../shared/math';
-import type { BetMode, TrackedBet } from '../../shared/types';
+import {
+  calculatePuntaPunta,
+  calculateSingleMatch,
+  computeAutoPuntaPuntaRolloverRating,
+  computeAutoRolloverRating,
+} from '../../shared/math';
+import type {
+  BetMode,
+  RolloverWalletRule,
+  ScrapeSnapshot,
+  TrackedBet,
+} from '../../shared/types';
 import { formatEuro, formatOdds, formatPct } from '../utils/format';
 import { playCopyTick } from '../utils/sound';
 import { AnimatedNumber } from './AnimatedNumber';
 import { NumericInput } from './NumericInput';
+import { RolloverParamsPanel } from './RolloverParamsPanel';
 import { SlidingPillTrack } from './SlidingPillTrack';
 
 interface CalculatorViewProps {
   defaultStake: number;
   defaultCommission: number;
   soundEnabled: boolean;
+  snapshot?: ScrapeSnapshot;
   onSaveTrackedBet: (bet: Omit<TrackedBet, 'id' | 'createdAt'>) => void;
 }
 
@@ -40,7 +53,7 @@ const MODES: Array<{
     id: 'normal',
     label: 'Normale',
     badge: 'Qualificante',
-    description: 'Puntata con denaro reale (scommessa qualificante, rollover o surebet).',
+    description: 'Puntata con denaro reale (scommessa qualificante o surebet).',
   },
   {
     id: 'snr',
@@ -59,6 +72,13 @@ const MODES: Array<{
     label: 'Rimborso RF',
     badge: 'Risk-Free / Cashback',
     description: 'Scommessa con soldi reali che rimborsa un bonus o cashback in caso di perdita.',
+  },
+  {
+    id: 'rollover',
+    label: 'Rollover',
+    badge: 'Sblocco Bonus',
+    description:
+      'Bonus a requisiti di rigioco: bilancia la copertura considerando Saldo Reale, Saldo Bonus, Rollover Rimanente e Rating Stimato futuro.',
   },
 ];
 
@@ -153,19 +173,168 @@ const BalanceBiasCard: React.FC<BalanceBiasCardProps> = ({
   </div>
 );
 
+interface StrategyComparisonAccordionProps {
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}
+
+const StrategyComparisonAccordion: React.FC<StrategyComparisonAccordionProps> = ({
+  open,
+  onToggle,
+  children,
+}) => (
+  <div>
+    <button
+      type="button"
+      data-testid="strategy-comparison-toggle"
+      aria-expanded={open}
+      onClick={onToggle}
+      className="glass-panel flex w-full items-center justify-between rounded-2xl p-3.5 text-left transition hover:border-brand-400/40"
+    >
+      <span className="flex items-center gap-1.5 text-xs font-bold text-white">
+        <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
+        Confronto Strategie
+      </span>
+      <ChevronDown
+        className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 ${
+          open ? 'rotate-180 text-brand-300' : ''
+        }`}
+      />
+    </button>
+
+    <AnimatePresence initial={false}>
+      {open && (
+        <motion.div
+          key="strategy-comparison-content"
+          data-testid="strategy-comparison-content"
+          initial={{ opacity: 0, height: 0, y: -8 }}
+          animate={{ opacity: 1, height: 'auto', y: 0 }}
+          exit={{ opacity: 0, height: 0, y: -8 }}
+          transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+          className="overflow-hidden"
+        >
+          <div className="space-y-3 pt-3">{children}</div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </div>
+);
+
+interface PpStrategyRowItem {
+  id: string;
+  label: string;
+  bias: number;
+  res: ReturnType<typeof calculatePuntaPunta>;
+}
+
+interface PpStrategyComparisonCardProps {
+  rows: PpStrategyRowItem[];
+  balanceBias: number;
+  onSelectBias: (bias: number) => void;
+}
+
+const PpStrategyComparisonCard: React.FC<PpStrategyComparisonCardProps> = ({
+  rows,
+  balanceBias,
+  onSelectBias,
+}) => (
+  <div className="glass-panel overflow-hidden rounded-2xl p-3.5">
+    <div className="mb-2 flex items-center justify-between">
+      <span className="flex items-center gap-1.5 text-xs font-bold text-white">
+        <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
+        Confronto Strategie (clicca per applicare)
+      </span>
+    </div>
+
+    <div className="overflow-x-auto">
+      <table className="w-full text-left text-xs">
+        <thead>
+          <tr className="border-b border-slate-800/80 text-[10px] uppercase tracking-wider text-slate-500">
+            <th className="pb-2 pr-2">Strategia</th>
+            <th className="pb-2 px-2 text-right">Punta 1</th>
+            <th className="pb-2 px-2 text-right">Coperture</th>
+            <th className="pb-2 px-2 text-right">Vince P1</th>
+            <th className="pb-2 pl-2 text-right">Vince Cop.</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-800/60">
+          {rows.map((row) => {
+            const isActive = Math.abs(balanceBias - row.bias) < 0.05;
+            const p1Profit = row.res.profits[0] ?? 0;
+            const hedgeProfit = row.res.profits[1] ?? 0;
+            return (
+              <tr
+                key={row.id}
+                data-testid={`pp-strategy-row-${row.id}`}
+                onClick={() => onSelectBias(row.bias)}
+                className={`cursor-pointer transition-colors ${
+                  isActive
+                    ? 'bg-brand-500/15 text-white'
+                    : 'text-slate-300 hover:bg-slate-800/40'
+                }`}
+              >
+                <td className="py-1.5 pr-2">
+                  <div className="flex items-center gap-1.5 font-semibold">
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        isActive ? 'bg-brand-300' : 'bg-slate-600'
+                      }`}
+                    />
+                    {row.label}
+                  </div>
+                </td>
+                <td className="px-2 py-2 text-right font-mono font-bold text-blue-200">
+                  {formatEuro(row.res.stakes[0] ?? 0)}
+                </td>
+                <td className="px-2 py-2 text-right font-mono font-bold text-white">
+                  {formatEuro(row.res.hedgeTotal)}
+                </td>
+                <td
+                  className={`px-2 py-2 text-right font-mono font-bold ${
+                    p1Profit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatEuro(p1Profit, true)}
+                </td>
+                <td
+                  className={`pl-2 py-2 text-right font-mono font-bold ${
+                    hedgeProfit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {formatEuro(hedgeProfit, true)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  </div>
+);
+
 export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
-  ({ defaultStake, defaultCommission, soundEnabled, onSaveTrackedBet }) => {
+  ({ defaultStake, defaultCommission, soundEnabled, snapshot, onSaveTrackedBet }) => {
     const initialCommPct = Math.round(defaultCommission * 1000) / 10;
+    const baseStake = defaultStake || 50;
 
     const [calcType, setCalcType] = useState<'punta-banca' | 'punta-punta'>('punta-banca');
     const [mode, setMode] = useState<BetMode>('normal');
-    const [stake, setStake] = useState<number>(defaultStake || 50);
+    const [stake, setStake] = useState<number>(baseStake);
     const [backOdds, setBackOdds] = useState<number>(2.0);
     const [layOdds, setLayOdds] = useState<number>(2.04);
     const [commissionPct, setCommissionPct] = useState<number>(initialCommPct || 4.5);
-    const [refundAmount, setRefundAmount] = useState<number>(defaultStake || 50);
+    const [refundAmount, setRefundAmount] = useState<number>(baseStake);
     const [refundRetention, setRefundRetention] = useState<number>(70);
     const [balanceBias, setBalanceBias] = useState<number>(0);
+
+    // Rollover state
+    const [realBalance, setRealBalance] = useState<number>(baseStake);
+    const [bonusBalance, setBonusBalance] = useState<number>(baseStake);
+    const [rolloverRemaining, setRolloverRemaining] = useState<number>(baseStake * 6);
+    const [autoEstimatedRating, setAutoEstimatedRating] = useState<boolean>(true);
+    const [manualEstimatedRating, setManualEstimatedRating] = useState<number>(96);
+    const [rolloverWalletRule, setRolloverWalletRule] = useState<RolloverWalletRule>('mixed');
 
     // Punta-Punta state
     const [ppOutcomesCount, setPpOutcomesCount] = useState<2 | 3 | 4>(2);
@@ -177,8 +346,41 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
     const [copiedLay, setCopiedLay] = useState(false);
     const [copiedSummary, setCopiedSummary] = useState(false);
     const [savedFeedback, setSavedFeedback] = useState(false);
+    const [showStrategies, setShowStrategies] = useState(false);
 
     const activeModeMeta = MODES.find((m) => m.id === mode) ?? MODES[0];
+
+    const activePpOdds = useMemo(
+      () => ppOdds.slice(0, ppOutcomesCount),
+      [ppOdds, ppOutcomesCount]
+    );
+
+    const pbAutoRatingInfo = useMemo(
+      () =>
+        computeAutoRolloverRating({
+          rows: snapshot?.rows,
+          currentBackOdds: backOdds,
+          currentLayOdds: layOdds,
+          currentCommission: commissionPct / 100,
+        }),
+      [snapshot?.rows, backOdds, layOdds, commissionPct]
+    );
+
+    const ppAutoRatingInfo = useMemo(
+      () =>
+        computeAutoPuntaPuntaRolloverRating({
+          dutcherRows: snapshot?.dutcherRows,
+          currentOdds: activePpOdds,
+        }),
+      [snapshot?.dutcherRows, activePpOdds]
+    );
+
+    const effectivePbRating = autoEstimatedRating
+      ? pbAutoRatingInfo.estimatedRating
+      : manualEstimatedRating;
+    const effectivePpRating = autoEstimatedRating
+      ? ppAutoRatingInfo.estimatedRating
+      : manualEstimatedRating;
 
     const calc = useMemo(
       () =>
@@ -190,14 +392,28 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           commission: commissionPct / 100,
           refundAmount,
           refundRetention,
+          realBalance,
+          bonusBalance,
+          rolloverRemaining,
+          estimatedRating: effectivePbRating,
+          rolloverWalletRule,
           balanceBias,
         }),
-      [mode, stake, backOdds, layOdds, commissionPct, refundAmount, refundRetention, balanceBias]
-    );
-
-    const activePpOdds = useMemo(
-      () => ppOdds.slice(0, ppOutcomesCount),
-      [ppOdds, ppOutcomesCount]
+      [
+        mode,
+        stake,
+        backOdds,
+        layOdds,
+        commissionPct,
+        refundAmount,
+        refundRetention,
+        realBalance,
+        bonusBalance,
+        rolloverRemaining,
+        effectivePbRating,
+        rolloverWalletRule,
+        balanceBias,
+      ]
     );
 
     const ppCalc = useMemo(
@@ -209,9 +425,27 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           anchorMode: mode === 'normal' ? ppAnchorMode : 'leg0',
           refundAmount,
           refundRetention,
+          realBalance,
+          bonusBalance,
+          rolloverRemaining,
+          estimatedRating: effectivePpRating,
+          rolloverWalletRule,
           balanceBias,
         }),
-      [mode, stake, activePpOdds, ppAnchorMode, refundAmount, refundRetention, balanceBias]
+      [
+        mode,
+        stake,
+        activePpOdds,
+        ppAnchorMode,
+        refundAmount,
+        refundRetention,
+        realBalance,
+        bonusBalance,
+        rolloverRemaining,
+        effectivePpRating,
+        rolloverWalletRule,
+        balanceBias,
+      ]
     );
 
     const updatePpOdds = (idx: number, val: number) => {
@@ -239,10 +473,28 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           commission: commissionPct / 100,
           refundAmount,
           refundRetention,
+          realBalance,
+          bonusBalance,
+          rolloverRemaining,
+          estimatedRating: effectivePbRating,
+          rolloverWalletRule,
           balanceBias: s.bias,
         }),
       }));
-    }, [mode, stake, backOdds, layOdds, commissionPct, refundAmount, refundRetention]);
+    }, [
+      mode,
+      stake,
+      backOdds,
+      layOdds,
+      commissionPct,
+      refundAmount,
+      refundRetention,
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      effectivePbRating,
+      rolloverWalletRule,
+    ]);
 
     const ppStrategyRows = useMemo(() => {
       const strategies = [
@@ -259,10 +511,27 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           anchorMode: mode === 'normal' ? ppAnchorMode : 'leg0',
           refundAmount,
           refundRetention,
+          realBalance,
+          bonusBalance,
+          rolloverRemaining,
+          estimatedRating: effectivePpRating,
+          rolloverWalletRule,
           balanceBias: s.bias,
         }),
       }));
-    }, [mode, stake, activePpOdds, ppAnchorMode, refundAmount, refundRetention]);
+    }, [
+      mode,
+      stake,
+      activePpOdds,
+      ppAnchorMode,
+      refundAmount,
+      refundRetention,
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      effectivePpRating,
+      rolloverWalletRule,
+    ]);
 
     const effectiveRefundValue = useMemo(
       () => (mode === 'rf' ? (Math.max(0, refundAmount) * Math.max(0, refundRetention)) / 100 : 0),
@@ -297,12 +566,18 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
 
     const handleReset = () => {
       setMode('normal');
-      setStake(defaultStake || 50);
+      setStake(baseStake);
       setBackOdds(2.0);
       setLayOdds(2.04);
       setCommissionPct(initialCommPct || 4.5);
-      setRefundAmount(defaultStake || 50);
+      setRefundAmount(baseStake);
       setRefundRetention(70);
+      setRealBalance(baseStake);
+      setBonusBalance(baseStake);
+      setRolloverRemaining(baseStake * 6);
+      setAutoEstimatedRating(true);
+      setManualEstimatedRating(96);
+      setRolloverWalletRule('mixed');
       setBalanceBias(0);
       setPpOutcomesCount(2);
       setPpAnchorMode('leg0');
@@ -334,11 +609,15 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
     };
 
     const handleCopySummary = async () => {
+      const rolloverSuffix =
+        mode === 'rollover'
+          ? ` | Real €${realBalance.toFixed(2)} + Bonus €${bonusBalance.toFixed(2)} | Rollover €${rolloverRemaining.toFixed(2)}→€${(calc.rollover?.rolloverAfter ?? Math.max(0, rolloverRemaining - stake)).toFixed(2)} @ ${(calcType === 'punta-punta' ? effectivePpRating : effectivePbRating).toFixed(1)}%`
+          : '';
       const summary =
         calcType === 'punta-punta'
           ? `[Punta-Punta • ${activeModeMeta.label}] ${activePpOdds
               .map((o, i) => `P${i + 1}: €${(ppCalc.stakes[i] ?? 0).toFixed(2)} @ ${o.toFixed(2)}`)
-              .join(' | ')} | Esborso €${ppCalc.totalCashOutlay.toFixed(
+              .join(' | ')}${rolloverSuffix} | Esborso €${ppCalc.totalCashOutlay.toFixed(
               2
             )} | Rating ${ppCalc.rating.toFixed(2)}% | Profitto ${formatEuro(
               ppCalc.guaranteedProfit,
@@ -348,7 +627,7 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
               2
             )} @ ${backOdds.toFixed(2)} | Banca €${calc.layStake.toFixed(
               2
-            )} @ ${layOdds.toFixed(2)} (Comm ${commissionPct}%) | Resp €${calc.liability.toFixed(
+            )} @ ${layOdds.toFixed(2)} (Comm ${commissionPct}%)${rolloverSuffix} | Resp €${calc.liability.toFixed(
               2
             )} | Rating ${calc.rating.toFixed(2)}% | Profitto ${formatEuro(
               calc.expectedProfit,
@@ -373,7 +652,10 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           league: 'Calcolatore Punta-Punta',
           sport: 'football',
           marketLabel: `${ppOutcomesCount} Esiti • ${activeModeMeta.label}`,
-          selectionLabel: activePpOdds.map((o, i) => `P${i + 1} @${o.toFixed(2)}`).join(' / '),
+          selectionLabel:
+            mode === 'rollover'
+              ? `Rollover €${rolloverRemaining.toFixed(0)}→€${(ppCalc.rollover?.rolloverAfter ?? 0).toFixed(0)} • Real €${realBalance} + Bonus €${bonusBalance}`
+              : activePpOdds.map((o, i) => `P${i + 1} @${o.toFixed(2)}`).join(' / '),
           type: 'dutcher',
           mode,
           bookmakerName: 'Bookmaker 1',
@@ -399,6 +681,8 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           selectionLabel:
             mode === 'rf'
               ? `Rimborso €${refundAmount} (${refundRetention}%)`
+              : mode === 'rollover'
+              ? `Rollover €${rolloverRemaining.toFixed(0)}→€${(calc.rollover?.rolloverAfter ?? 0).toFixed(0)} • Real €${realBalance} + Bonus €${bonusBalance}`
               : `Punta @${backOdds.toFixed(2)} / Banca @${layOdds.toFixed(2)}`,
           type: 'single',
           mode,
@@ -446,7 +730,7 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                 <p className="text-[11px] text-slate-400">
                   {calcType === 'punta-punta'
                     ? 'Calcola le puntate di copertura tra 2, 3 o 4 bookmaker senza Exchange per qualsiasi tipologia di bonus.'
-                    : 'Calcola istantaneamente puntata, bancata, responsabilità e profitti su qualsiasi quota per Normale, Freebet SNR, Bonus SR e Rimborso RF.'}
+                    : 'Calcola istantaneamente puntata, bancata, responsabilità e profitti su qualsiasi quota per Normale, Freebet SNR, Bonus SR, Rimborso RF e Rollover.'}
                 </p>
               </div>
             </div>
@@ -499,7 +783,7 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
           <SlidingPillTrack
             activeKey={mode}
             pillClassName="rounded-lg bg-gradient-to-r from-brand-300 to-accent-400 shadow-glow"
-            className="mt-2.5 grid grid-cols-2 gap-1.5 rounded-xl border border-slate-800/90 bg-slate-950/90 p-1 sm:grid-cols-4"
+            className="mt-2.5 grid grid-cols-2 gap-1.5 rounded-xl border border-slate-800/90 bg-slate-950/90 p-1 sm:grid-cols-5"
           >
             {MODES.map((m) => {
               const isSelected = mode === m.id;
@@ -564,6 +848,8 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                       ? 'Valore Freebet SNR (€)'
                       : mode === 'sr'
                       ? 'Valore Bonus SR (€)'
+                      : mode === 'rollover'
+                      ? 'Puntata Rollover (€)'
                       : 'Puntata Bookmaker (€)'}
                   </label>
                   <span className="text-[10px] text-slate-500">Importi rapidi</span>
@@ -819,6 +1105,41 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                   </motion.div>
                 )}
               </AnimatePresence>
+
+              {/* Extra Rollover Parameters */}
+              <AnimatePresence initial={false}>
+                {mode === 'rollover' && (
+                  <motion.div
+                    key="standalone-pb-rollover"
+                    data-testid="standalone-rollover-panel"
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                    className="overflow-hidden"
+                  >
+                    <RolloverParamsPanel
+                      stake={stake}
+                      realBalance={realBalance}
+                      bonusBalance={bonusBalance}
+                      rolloverRemaining={rolloverRemaining}
+                      estimatedRating={effectivePbRating}
+                      autoEstimatedRating={autoEstimatedRating}
+                      autoRatingInfo={pbAutoRatingInfo}
+                      walletRule={rolloverWalletRule}
+                      rolloverDetails={calc.rollover}
+                      onChangeStake={setStake}
+                      onChangeRealBalance={setRealBalance}
+                      onChangeBonusBalance={setBonusBalance}
+                      onChangeRolloverRemaining={setRolloverRemaining}
+                      onChangeEstimatedRating={setManualEstimatedRating}
+                      onToggleAutoRating={setAutoEstimatedRating}
+                      onChangeWalletRule={setRolloverWalletRule}
+                      testIdPrefix="pb-rollover"
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
             {/* Underlay / Balanced / Overlay Slider */}
@@ -872,6 +1193,18 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                         ALTA CONVERSIONE
                       </span>
                     )}
+                    {mode === 'rollover' && calc.rollover?.completesRolloverOnThisBet && (
+                      <span className="rounded-full border border-emerald-400/40 bg-emerald-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-200">
+                        SBLOCCO DIRETTO
+                      </span>
+                    )}
+                    {mode === 'rollover' &&
+                      !calc.rollover?.completesRolloverOnThisBet &&
+                      calc.expectedProfit > 0 && (
+                        <span className="rounded-full border border-amber-400/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-200">
+                          EV POSITIVO
+                        </span>
+                      )}
                   </div>
 
                   <div className="mt-1 flex items-baseline gap-3">
@@ -916,7 +1249,7 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
 
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                    Profitto Medio
+                    {mode === 'rollover' ? 'Profitto Finale Stimato' : 'Profitto Medio'}
                   </div>
                   <AnimatedNumber
                     value={calc.expectedProfit}
@@ -930,7 +1263,11 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
 
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                    Rating Netto
+                    {mode === 'rollover'
+                      ? bonusBalance > 0
+                        ? 'Estrazione Bonus'
+                        : 'Rating Rollover'
+                      : 'Rating Netto'}
                   </div>
                   <AnimatedNumber
                     value={calc.rating}
@@ -939,7 +1276,9 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                     className={`mt-0.5 block font-mono text-base font-extrabold ${
                       calc.rating >= 100
                         ? 'text-brand-300'
-                        : calc.rating >= 95 || (mode === 'snr' && calc.rating >= 70)
+                        : calc.rating >= 95 ||
+                          (mode === 'snr' && calc.rating >= 70) ||
+                          (mode === 'rollover' && calc.rating >= 60)
                         ? 'text-emerald-400'
                         : 'text-amber-300'
                     }`}
@@ -948,10 +1287,14 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
 
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                    Rating Lordo
+                    {mode === 'rollover' ? 'Rating Singola' : 'Rating Lordo'}
                   </div>
                   <div className="mt-0.5 font-mono text-base font-bold text-slate-300">
-                    {formatPct(calc.rawRating)}
+                    {formatPct(
+                      mode === 'rollover'
+                        ? calc.rollover?.matchRating ?? calc.rawRating
+                        : calc.rawRating
+                    )}
                   </div>
                 </div>
               </div>
@@ -996,6 +1339,26 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                         -{formatEuro(calc.liability)}
                       </span>
                     </div>
+                    {mode === 'rollover' && calc.rollover && (
+                      <>
+                        <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                          <span className="truncate">
+                            Rollover ({formatEuro(calc.rollover.rolloverAfter)} @ {calc.rollover.estimatedRating}%)
+                          </span>
+                          <span className="shrink-0 font-mono text-amber-300">
+                            {calc.rollover.futureRolloverCostIfWin > 0.005
+                              ? `-${formatEuro(calc.rollover.futureRolloverCostIfWin)}`
+                              : '€0,00 (Chiuso)'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                          <span>Saldo Bookmaker</span>
+                          <span className="font-mono text-slate-200">
+                            {formatEuro(calc.rollover.bookieBalanceIfWin)}
+                          </span>
+                        </div>
+                      </>
+                    )}
                   </div>
                   <div className="mt-2.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-900">
                     <div
@@ -1037,6 +1400,28 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                         <span className="font-mono text-rose-300">-{formatEuro(stake)}</span>
                       </div>
                     )}
+                    {mode === 'rollover' && calc.rollover && (
+                      <>
+                        <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                          <span>Puntata Bookmaker</span>
+                          <span className="font-mono text-rose-300">-{formatEuro(stake)}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                          <span>Rollover residuo</span>
+                          <span className="font-mono text-emerald-300">
+                            {calc.rollover.clearsRolloverOnLose
+                              ? '€0,00 (Sbloccato!)'
+                              : `-${formatEuro(calc.rollover.futureRolloverCostIfLose)}`}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                          <span>Saldo Bookmaker</span>
+                          <span className="font-mono text-slate-200">
+                            {formatEuro(calc.rollover.bookieBalanceIfLose)}
+                          </span>
+                        </div>
+                      </>
+                    )}
                     {mode === 'rf' && (
                       <div className="flex justify-between text-slate-400">
                         <span>Rimborso stimato ({refundRetention}%)</span>
@@ -1068,154 +1453,91 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
               </div>
             </div>
 
-            {/* Strategy Comparison Table (Click any row to apply!) */}
-            <div className="glass-panel overflow-hidden rounded-2xl p-3.5">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="flex items-center gap-1.5 text-xs font-bold text-white">
-                  <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
-                  Confronto Strategie (clicca per applicare)
-                </span>
+            {/* Strategy Comparison Tables (Hidden behind collapsible toggle) */}
+            <StrategyComparisonAccordion
+              open={showStrategies}
+              onToggle={() => setShowStrategies((prev) => !prev)}
+            >
+              <div className="glass-panel overflow-hidden rounded-2xl p-3.5">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-xs font-bold text-white">
+                    <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
+                    Confronto Strategie (clicca per applicare)
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-800/80 text-[10px] uppercase tracking-wider text-slate-500">
+                        <th className="pb-2 pr-2">Strategia</th>
+                        <th className="pb-2 px-2 text-right">Bancata</th>
+                        <th className="pb-2 px-2 text-right">Resp.</th>
+                        <th className="pb-2 px-2 text-right">Vince Book</th>
+                        <th className="pb-2 pl-2 text-right">Vince Exch</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {strategyRows.map((row) => {
+                        const isActive = Math.abs(balanceBias - row.bias) < 0.05;
+                        return (
+                          <tr
+                            key={row.id}
+                            onClick={() => setBalanceBias(row.bias)}
+                            className={`cursor-pointer transition-colors ${
+                              isActive
+                                ? 'bg-brand-500/15 text-white'
+                                : 'text-slate-300 hover:bg-slate-800/40'
+                            }`}
+                          >
+                            <td className="py-1.5 pr-2">
+                              <div className="flex items-center gap-1.5 font-semibold">
+                                <span
+                                  className={`h-1.5 w-1.5 rounded-full ${
+                                    isActive ? 'bg-brand-300' : 'bg-slate-600'
+                                  }`}
+                                />
+                                {row.label}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2 text-right font-mono font-bold text-white">
+                              {formatEuro(row.res.layStake)}
+                            </td>
+                            <td className="px-2 py-2 text-right font-mono text-rose-300">
+                              {formatEuro(row.res.liability)}
+                            </td>
+                            <td
+                              className={`px-2 py-2 text-right font-mono font-bold ${
+                                row.res.bookieWinProfit >= -0.005
+                                  ? 'text-emerald-400'
+                                  : 'text-rose-400'
+                              }`}
+                            >
+                              {formatEuro(row.res.bookieWinProfit, true)}
+                            </td>
+                            <td
+                              className={`pl-2 py-2 text-right font-mono font-bold ${
+                                row.res.exchangeWinProfit >= -0.005
+                                  ? 'text-emerald-400'
+                                  : 'text-rose-400'
+                              }`}
+                            >
+                              {formatEuro(row.res.exchangeWinProfit, true)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800/80 text-[10px] uppercase tracking-wider text-slate-500">
-                      <th className="pb-2 pr-2">Strategia</th>
-                      <th className="pb-2 px-2 text-right">Bancata</th>
-                      <th className="pb-2 px-2 text-right">Resp.</th>
-                      <th className="pb-2 px-2 text-right">Vince Book</th>
-                      <th className="pb-2 pl-2 text-right">Vince Exch</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {strategyRows.map((row) => {
-                      const isActive = Math.abs(balanceBias - row.bias) < 0.05;
-                      return (
-                        <tr
-                          key={row.id}
-                          onClick={() => setBalanceBias(row.bias)}
-                          className={`cursor-pointer transition-colors ${
-                            isActive
-                              ? 'bg-brand-500/15 text-white'
-                              : 'text-slate-300 hover:bg-slate-800/40'
-                          }`}
-                        >
-                          <td className="py-1.5 pr-2">
-                            <div className="flex items-center gap-1.5 font-semibold">
-                              <span
-                                className={`h-1.5 w-1.5 rounded-full ${
-                                  isActive ? 'bg-brand-300' : 'bg-slate-600'
-                                }`}
-                              />
-                              {row.label}
-                            </div>
-                          </td>
-                          <td className="px-2 py-2 text-right font-mono font-bold text-white">
-                            {formatEuro(row.res.layStake)}
-                          </td>
-                          <td className="px-2 py-2 text-right font-mono text-rose-300">
-                            {formatEuro(row.res.liability)}
-                          </td>
-                          <td
-                            className={`px-2 py-2 text-right font-mono font-bold ${
-                              row.res.bookieWinProfit >= -0.005
-                                ? 'text-emerald-400'
-                                : 'text-rose-400'
-                            }`}
-                          >
-                            {formatEuro(row.res.bookieWinProfit, true)}
-                          </td>
-                          <td
-                            className={`pl-2 py-2 text-right font-mono font-bold ${
-                              row.res.exchangeWinProfit >= -0.005
-                                ? 'text-emerald-400'
-                                : 'text-rose-400'
-                            }`}
-                          >
-                            {formatEuro(row.res.exchangeWinProfit, true)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Strategy Comparison Table (Click any row to apply!) */}
-            <div className="glass-panel overflow-hidden rounded-2xl p-3.5">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="flex items-center gap-1.5 text-xs font-bold text-white">
-                  <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
-                  Confronto Strategie (clicca per applicare)
-                </span>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800/80 text-[10px] uppercase tracking-wider text-slate-500">
-                      <th className="pb-2 pr-2">Strategia</th>
-                      <th className="pb-2 px-2 text-right">Punta 1</th>
-                      <th className="pb-2 px-2 text-right">Coperture</th>
-                      <th className="pb-2 px-2 text-right">Vince P1</th>
-                      <th className="pb-2 pl-2 text-right">Vince Cop.</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {ppStrategyRows.map((row) => {
-                      const isActive = Math.abs(balanceBias - row.bias) < 0.05;
-                      const p1Profit = row.res.profits[0] ?? 0;
-                      const hedgeProfit = row.res.profits[1] ?? 0;
-                      return (
-                        <tr
-                          key={row.id}
-                          data-testid={`pp-strategy-row-${row.id}`}
-                          onClick={() => setBalanceBias(row.bias)}
-                          className={`cursor-pointer transition-colors ${
-                            isActive
-                              ? 'bg-brand-500/15 text-white'
-                              : 'text-slate-300 hover:bg-slate-800/40'
-                          }`}
-                        >
-                          <td className="py-1.5 pr-2">
-                            <div className="flex items-center gap-1.5 font-semibold">
-                              <span
-                                className={`h-1.5 w-1.5 rounded-full ${
-                                  isActive ? 'bg-brand-300' : 'bg-slate-600'
-                                }`}
-                              />
-                              {row.label}
-                            </div>
-                          </td>
-                          <td className="px-2 py-2 text-right font-mono font-bold text-blue-200">
-                            {formatEuro(row.res.stakes[0] ?? 0)}
-                          </td>
-                          <td className="px-2 py-2 text-right font-mono font-bold text-white">
-                            {formatEuro(row.res.hedgeTotal)}
-                          </td>
-                          <td
-                            className={`px-2 py-2 text-right font-mono font-bold ${
-                              p1Profit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
-                            }`}
-                          >
-                            {formatEuro(p1Profit, true)}
-                          </td>
-                          <td
-                            className={`pl-2 py-2 text-right font-mono font-bold ${
-                              hedgeProfit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
-                            }`}
-                          >
-                            {formatEuro(hedgeProfit, true)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+              <PpStrategyComparisonCard
+                rows={ppStrategyRows}
+                balanceBias={balanceBias}
+                onSelectBias={setBalanceBias}
+              />
+            </StrategyComparisonAccordion>
 
             {/* Action Buttons */}
             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
@@ -1354,6 +1676,8 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                       ? 'Valore Freebet SNR — Punta 1 (€)'
                       : mode === 'sr'
                       ? 'Valore Bonus SR — Punta 1 (€)'
+                      : mode === 'rollover'
+                      ? 'Puntata Rollover — Punta 1 (€)'
                       : 'Puntata 1 — Bookmaker Promo (€)'}
                   </label>
                   <span className="text-[10px] text-slate-500">Importi rapidi</span>
@@ -1583,6 +1907,41 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                   </motion.div>
                 )}
               </AnimatePresence>
+
+              {/* Extra Rollover Parameters (Punta-Punta) */}
+              <AnimatePresence initial={false}>
+                {mode === 'rollover' && (
+                  <motion.div
+                    key="standalone-pp-rollover"
+                    data-testid="standalone-pp-rollover-panel"
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                    className="overflow-hidden"
+                  >
+                    <RolloverParamsPanel
+                      stake={stake}
+                      realBalance={realBalance}
+                      bonusBalance={bonusBalance}
+                      rolloverRemaining={rolloverRemaining}
+                      estimatedRating={effectivePpRating}
+                      autoEstimatedRating={autoEstimatedRating}
+                      autoRatingInfo={ppAutoRatingInfo}
+                      walletRule={rolloverWalletRule}
+                      rolloverDetails={ppCalc.rollover}
+                      onChangeStake={setStake}
+                      onChangeRealBalance={setRealBalance}
+                      onChangeBonusBalance={setBonusBalance}
+                      onChangeRolloverRemaining={setRolloverRemaining}
+                      onChangeEstimatedRating={setManualEstimatedRating}
+                      onToggleAutoRating={setAutoEstimatedRating}
+                      onChangeWalletRule={setRolloverWalletRule}
+                      testIdPrefix="pp-rollover"
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
             {/* Underlay / Balanced / Overlay Slider */}
@@ -1635,6 +1994,18 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                       ALTA CONVERSIONE
                     </span>
                   )}
+                  {mode === 'rollover' && ppCalc.rollover?.completesRolloverOnThisBet && (
+                    <span className="rounded-full border border-emerald-400/40 bg-emerald-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-200">
+                      SBLOCCO DIRETTO
+                    </span>
+                  )}
+                  {mode === 'rollover' &&
+                    !ppCalc.rollover?.completesRolloverOnThisBet &&
+                    ppCalc.guaranteedProfit > 0 && (
+                      <span className="rounded-full border border-amber-400/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-200">
+                        EV POSITIVO
+                      </span>
+                    )}
                 </div>
               </div>
 
@@ -1714,7 +2085,7 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
 
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                    Profitto Medio
+                    {mode === 'rollover' ? 'Profitto Finale Stimato' : 'Profitto Medio'}
                   </div>
                   <AnimatedNumber
                     value={ppCalc.guaranteedProfit}
@@ -1728,7 +2099,11 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
 
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                    Rating Netto
+                    {mode === 'rollover'
+                      ? bonusBalance > 0
+                        ? 'Estrazione Bonus'
+                        : 'Rating Rollover'
+                      : 'Rating Netto'}
                   </div>
                   <AnimatedNumber
                     value={ppCalc.rating}
@@ -1737,7 +2112,9 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                     className={`mt-0.5 block font-mono text-base font-extrabold ${
                       ppCalc.rating >= 100
                         ? 'text-brand-300'
-                        : ppCalc.rating >= 95 || (mode === 'snr' && ppCalc.rating >= 70)
+                        : ppCalc.rating >= 95 ||
+                          (mode === 'snr' && ppCalc.rating >= 70) ||
+                          (mode === 'rollover' && ppCalc.rating >= 60)
                         ? 'text-emerald-400'
                         : 'text-amber-300'
                     }`}
@@ -1813,12 +2190,35 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
                             </span>
                           </div>
                         )}
-                        <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
-                          <span>Spesa Reale Totale</span>
-                          <span className="font-mono text-rose-300">
-                            -{formatEuro(ppCalc.totalCashOutlay)}
-                          </span>
-                        </div>
+                        {mode === 'rollover' && ppCalc.rollover ? (
+                          <>
+                            <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                              <span>Coperture esterne</span>
+                              <span className="font-mono text-rose-300">
+                                -{formatEuro(ppCalc.hedgeTotal)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                              <span>Rollover residuo</span>
+                              <span className="font-mono text-amber-300">
+                                {idx === 0
+                                  ? ppCalc.rollover.futureRolloverCostIfWin > 0.005
+                                    ? `-${formatEuro(ppCalc.rollover.futureRolloverCostIfWin)}`
+                                    : '€0,00 (Chiuso)'
+                                  : ppCalc.rollover.clearsRolloverOnLose
+                                  ? '€0,00 (Sbloccato!)'
+                                  : `-${formatEuro(ppCalc.rollover.futureRolloverCostIfLose)}`}
+                              </span>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex items-center justify-between gap-2 whitespace-nowrap text-slate-400">
+                            <span>Spesa Reale Totale</span>
+                            <span className="font-mono text-rose-300">
+                              -{formatEuro(ppCalc.totalCashOutlay)}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-900">
@@ -1839,79 +2239,17 @@ export const CalculatorView: React.FC<CalculatorViewProps> = React.memo(
               </div>
             </div>
 
-            {/* Strategy Comparison Table (Click any row to apply!) */}
-            <div className="glass-panel overflow-hidden rounded-2xl p-3.5">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="flex items-center gap-1.5 text-xs font-bold text-white">
-                  <TrendingUp className="h-3.5 w-3.5 text-accent-300" />
-                  Confronto Strategie (clicca per applicare)
-                </span>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800/80 text-[10px] uppercase tracking-wider text-slate-500">
-                      <th className="pb-2 pr-2">Strategia</th>
-                      <th className="pb-2 px-2 text-right">Punta 1</th>
-                      <th className="pb-2 px-2 text-right">Coperture</th>
-                      <th className="pb-2 px-2 text-right">Vince P1</th>
-                      <th className="pb-2 pl-2 text-right">Vince Cop.</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {ppStrategyRows.map((row) => {
-                      const isActive = Math.abs(balanceBias - row.bias) < 0.05;
-                      const p1Profit = row.res.profits[0] ?? 0;
-                      const hedgeProfit = row.res.profits[1] ?? 0;
-                      return (
-                        <tr
-                          key={row.id}
-                          data-testid={`pp-strategy-row-${row.id}`}
-                          onClick={() => setBalanceBias(row.bias)}
-                          className={`cursor-pointer transition-colors ${
-                            isActive
-                              ? 'bg-brand-500/15 text-white'
-                              : 'text-slate-300 hover:bg-slate-800/40'
-                          }`}
-                        >
-                          <td className="py-1.5 pr-2">
-                            <div className="flex items-center gap-1.5 font-semibold">
-                              <span
-                                className={`h-1.5 w-1.5 rounded-full ${
-                                  isActive ? 'bg-brand-300' : 'bg-slate-600'
-                                }`}
-                              />
-                              {row.label}
-                            </div>
-                          </td>
-                          <td className="px-2 py-2 text-right font-mono font-bold text-blue-200">
-                            {formatEuro(row.res.stakes[0] ?? 0)}
-                          </td>
-                          <td className="px-2 py-2 text-right font-mono font-bold text-white">
-                            {formatEuro(row.res.hedgeTotal)}
-                          </td>
-                          <td
-                            className={`px-2 py-2 text-right font-mono font-bold ${
-                              p1Profit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
-                            }`}
-                          >
-                            {formatEuro(p1Profit, true)}
-                          </td>
-                          <td
-                            className={`pl-2 py-2 text-right font-mono font-bold ${
-                              hedgeProfit >= -0.005 ? 'text-emerald-400' : 'text-rose-400'
-                            }`}
-                          >
-                            {formatEuro(hedgeProfit, true)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            {/* Strategy Comparison Table (Hidden behind collapsible toggle) */}
+            <StrategyComparisonAccordion
+              open={showStrategies}
+              onToggle={() => setShowStrategies((prev) => !prev)}
+            >
+              <PpStrategyComparisonCard
+                rows={ppStrategyRows}
+                balanceBias={balanceBias}
+                onSelectBias={setBalanceBias}
+              />
+            </StrategyComparisonAccordion>
 
             {/* Action Buttons */}
             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">

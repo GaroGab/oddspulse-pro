@@ -4,7 +4,7 @@ import {
   resolveScrapeDateWindow,
   toLocalDateKey,
 } from './dateRange';
-import { calculateSingleMatch } from './math';
+import { calculateSingleMatch, quickRatings } from './math';
 import {
   SOURCE_CATALOG,
   type AppSettings,
@@ -27,7 +27,16 @@ export const ADM_BATCH_SOURCES = new Set<SourceId>([
   'betflag_it',
   'eurobet_it',
   'goldbet_it',
+  'lottomatica_it',
+  'planetwin365_it',
+  'bet365_it',
+  'betsson_it',
+  'domusbet_it',
+  'daznbet_it',
+  'williamhill_it',
 ]);
+
+export const XSPORT_SOURCES = new Set<SourceId>(['netbet_it', 'stanleybet_it']);
 
 export const KAMBI_SOURCES = new Set<SourceId>([
   '888sport_it',
@@ -848,6 +857,16 @@ export function matchesWatchEvent(
 }
 
 /**
+ * Returns true when an Oddsmatcher row represents a surebet (normal rating >= 100%).
+ */
+export function isRowSurebet(
+  row: Pick<OddsmatcherRow, 'isSurebet' | 'backOdds' | 'layOdds' | 'commission'>
+): boolean {
+  if (row.isSurebet) return true;
+  return quickRatings(row.backOdds, row.layOdds, row.commission).isSurebet;
+}
+
+/**
  * Evaluates a single RatingWatch against current Oddsmatcher rows and determines
  * the best qualifying quote plus whether an alert should fire right now.
  */
@@ -883,6 +902,7 @@ export function evaluateRatingWatch(
     if (exSet && !exSet.has(row.exchangeId)) continue;
     if (row.liquidity < watch.minLiquidity) continue;
     if (row.backOdds < watch.minBackOdds || row.backOdds > watch.maxBackOdds) continue;
+    if (watch.excludeSurebets && isRowSurebet(row)) continue;
 
     const calc = calculateSingleMatch({
       mode: watch.mode,
@@ -1260,5 +1280,7 @@ export function betModeLabelIt(mode: BetMode): string {
       return 'Bonus SR';
     case 'rf':
       return 'Rimborso RF';
+    case 'rollover':
+      return 'Rollover';
   }
 }

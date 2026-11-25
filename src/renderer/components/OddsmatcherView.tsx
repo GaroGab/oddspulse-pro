@@ -4,10 +4,13 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Ban,
   BellPlus,
   Calculator,
+  Coins,
   Filter,
   Flame,
+  Gift,
   LayoutGrid,
   Layers,
   Lock,
@@ -16,6 +19,7 @@ import {
   RotateCcw,
   Search,
   Sparkles,
+  Target,
   TrendingUp,
   Trophy,
   X,
@@ -31,6 +35,7 @@ import {
   formatFittingListSummary,
   getTopCompetitionValues,
   inferSportFromLeague,
+  isRowSurebet,
   matchesWatchLeagues,
 } from '../../shared/ratingWatch';
 import {
@@ -44,6 +49,7 @@ import {
 import {
   formatEuro,
   formatEventTime,
+  formatExchangeShortName,
   formatOdds,
   formatPct,
   formatQuoteAge,
@@ -64,6 +70,7 @@ import {
   type DateRangeValue,
 } from './DateRangeCalendar';
 import { SlidingPillTrack } from './SlidingPillTrack';
+import { QuickPresetsMenu, type QuickPresetItem } from './QuickPresetsMenu';
 import {
   buildBookmakerSourceOptions,
   buildExchangeSourceOptions,
@@ -133,6 +140,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
   const [minLiquidity, setMinLiquidity] = useState<number>(5);
   const [dateRange, setDateRange] = useState<DateRangeValue>(EMPTY_DATE_RANGE);
   const [onlySurebets, setOnlySurebets] = useState(false);
+  const [noSurebets, setNoSurebets] = useState(false);
   const [showFilters, setShowFilters] = useState(true);
   const [sortBy, setSortBy] = useState<SortKey>('rating');
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
@@ -275,7 +283,8 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
       if (exchanges.length > 0 && !exchanges.includes(row.exchangeId)) continue;
       if (row.backOdds < minBack || row.backOdds > maxBack) continue;
       if (row.liquidity < minLiquidity) continue;
-      if (onlySurebets && !row.isSurebet) continue;
+      if (onlySurebets && !isRowSurebet(row)) continue;
+      if (noSurebets && isRowSurebet(row)) continue;
 
       if (!matchesDateRange(row.startTime, dateRange, nowMs)) continue;
 
@@ -340,6 +349,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     minLiquidity,
     dateRange,
     onlySurebets,
+    noSurebets,
     mode,
     stake,
     sortBy,
@@ -400,6 +410,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     setMinLiquidity(5);
     handleDateRangeChange(EMPTY_DATE_RANGE);
     setOnlySurebets(false);
+    setNoSurebets(false);
     setSearch('');
   };
 
@@ -505,6 +516,14 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
       });
     }
 
+    if (noSurebets) {
+      chips.push({
+        id: 'noSurebet',
+        label: 'No Surebet',
+        onClear: () => setNoSurebets(false),
+      });
+    }
+
     return chips;
   }, [
     leagues,
@@ -519,6 +538,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
     minLiquidity,
     dateRange,
     onlySurebets,
+    noSurebets,
   ]);
 
   return (
@@ -587,7 +607,13 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          onClick={() => setOnlySurebets((v) => !v)}
+          onClick={() =>
+            setOnlySurebets((v) => {
+              const next = !v;
+              if (next) setNoSurebets(false);
+              return next;
+            })
+          }
           className={`glass-card glass-card-hover cursor-pointer rounded-2xl p-3.5 ${
             onlySurebets ? 'border-brand-400/60 bg-brand-500/10' : ''
           }`}
@@ -819,80 +845,143 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
               className="overflow-hidden"
             >
               <div className="mt-3 space-y-2.5 border-t border-slate-800/80 pt-3">
-            {/* Quick Matched Betting Presets */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
-                Preset Rapidi:
-              </span>
-              <button
-                onClick={() => {
-                  onChangeMode('normal');
-                  setMinBack(1.5);
-                  setMaxBack(5.0);
-                  setMinRating(95);
-                  setMinLiquidity(25);
-                  setOnlySurebets(false);
-                }}
-                className="rounded-lg border border-brand-400/25 bg-brand-500/10 px-2.5 py-1 text-[10px] font-semibold text-brand-200 transition hover:bg-brand-500/20"
-              >
-                Qualificante (&ge;95%)
-              </button>
-              <button
-                onClick={() => {
-                  onChangeMode('snr');
-                  setMinBack(4.0);
-                  setMaxBack(12.0);
-                  setMinRating(65);
-                  setMinLiquidity(20);
-                  setOnlySurebets(false);
-                }}
-                className="rounded-lg border border-accent-400/25 bg-accent-500/10 px-2.5 py-1 text-[10px] font-semibold text-accent-200 transition hover:bg-accent-500/20"
-              >
-                Freebet SNR (Q &ge; 4.0)
-              </button>
-              <button
-                onClick={() => {
-                  onChangeMode('normal');
-                  setMinBack(1.1);
-                  setMaxBack(20);
-                  setMinRating(100);
-                  setMinLiquidity(10);
-                  setOnlySurebets(true);
-                }}
-                className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-200 transition hover:bg-emerald-500/20"
-              >
-                Solo Surebet (&ge;100%)
-              </button>
-              <button
-                onClick={() => {
-                  setMinLiquidity(100);
-                  setOnlySurebets(false);
-                }}
-                className="rounded-lg border border-amber-400/25 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold text-amber-200 transition hover:bg-amber-500/20"
-              >
-                Alta Liquidità (&ge;100€)
-              </button>
+            {/* Compact Filter Toolbar: Preset Rapidi popover trigger + No Surebet ON/OFF + Reset */}
+            <div className="flex flex-wrap items-center gap-2">
+              <QuickPresetsMenu
+                data-testid="om-quick-presets-btn"
+                menuTestId="om-quick-presets-menu"
+                activeCount={
+                  (isTopCompetitionsActive ? 1 : 0) +
+                  (onlySurebets ? 1 : 0)
+                }
+                items={[
+                  {
+                    id: 'qualifier',
+                    label: 'Qualificante (≥95%)',
+                    description: 'Normale · Rating ≥95% · Quota 1.50–5.00 · Liq ≥25€',
+                    tone: 'brand',
+                    icon: <Target className="h-3 w-3" />,
+                    active:
+                      mode === 'normal' &&
+                      !onlySurebets &&
+                      Math.abs(minBack - 1.5) < 0.005 &&
+                      Math.abs(maxBack - 5.0) < 0.005 &&
+                      Math.abs(minRating - 95) < 0.005 &&
+                      Math.abs(minLiquidity - 25) < 0.005,
+                    onSelect: () => {
+                      onChangeMode('normal');
+                      setMinBack(1.5);
+                      setMaxBack(5.0);
+                      setMinRating(95);
+                      setMinLiquidity(25);
+                      setOnlySurebets(false);
+                    },
+                  },
+                  {
+                    id: 'snr',
+                    label: 'Freebet SNR (Q ≥ 4.0)',
+                    description: 'Freebet SNR · Rating ≥65% · Quota 4.00–12.00 · Liq ≥20€',
+                    tone: 'accent',
+                    icon: <Gift className="h-3 w-3" />,
+                    active:
+                      mode === 'snr' &&
+                      !onlySurebets &&
+                      Math.abs(minBack - 4.0) < 0.005 &&
+                      Math.abs(maxBack - 12.0) < 0.005 &&
+                      Math.abs(minRating - 65) < 0.005 &&
+                      Math.abs(minLiquidity - 20) < 0.005,
+                    onSelect: () => {
+                      onChangeMode('snr');
+                      setMinBack(4.0);
+                      setMaxBack(12.0);
+                      setMinRating(65);
+                      setMinLiquidity(20);
+                      setOnlySurebets(false);
+                    },
+                  },
+                  {
+                    id: 'surebet',
+                    label: 'Solo Surebet (≥100%)',
+                    description: 'Normale · Solo Surebet ≥100% · Quota 1.10–20.00 · Liq ≥10€',
+                    tone: 'emerald',
+                    icon: <Flame className="h-3 w-3" />,
+                    active: onlySurebets,
+                    onSelect: () => {
+                      onChangeMode('normal');
+                      setMinBack(1.1);
+                      setMaxBack(20);
+                      setMinRating(100);
+                      setMinLiquidity(10);
+                      setOnlySurebets(true);
+                      setNoSurebets(false);
+                    },
+                  },
+                  {
+                    id: 'high-liquidity',
+                    label: 'Alta Liquidità (≥100€)',
+                    description: 'Filtra solo mercati Exchange con almeno 100€ disponibili',
+                    tone: 'amber',
+                    icon: <Coins className="h-3 w-3" />,
+                    active: !onlySurebets && minLiquidity >= 100,
+                    onSelect: () => {
+                      setMinLiquidity(100);
+                      setOnlySurebets(false);
+                    },
+                  },
+                  {
+                    id: 'top-competitions',
+                    label: 'Top Competizioni',
+                    description: 'Serie A/B, Premier, LaLiga, Bundesliga, UEFA, ATP/WTA, NBA',
+                    tone: 'sky',
+                    icon: <Trophy className="h-3 w-3" />,
+                    active: isTopCompetitionsActive,
+                    onSelect: () => {
+                      setLeagues(isTopCompetitionsActive ? [] : topCompetitionsForSport);
+                    },
+                  },
+                ] satisfies QuickPresetItem[]}
+                onReset={resetAllFilters}
+                resetLabel="Reset tutti i filtri"
+              />
+
               <button
                 type="button"
-                data-testid="om-preset-top-competitions"
-                aria-pressed={isTopCompetitionsActive}
-                title="Seleziona le competizioni principali: top 2 leghe calcio (Serie A/B, Premier/Championship, LaLiga 1/2, Bundesliga 1/2, Ligue 1/2, Eredivisie/Eerste Divisie, Liga Portugal 1/2, coppe UEFA e nazionali), Tennis (ATP, WTA, Grand Slam, Internazionali) e Basket (NBA, Eurolega, Serie A)"
-                onClick={() => {
-                  setLeagues(isTopCompetitionsActive ? [] : topCompetitionsForSport);
-                }}
-                className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[10px] font-semibold transition ${
-                  isTopCompetitionsActive
-                    ? 'border-sky-400/70 bg-sky-500/25 text-white shadow-[0_0_12px_-4px_rgba(56,189,248,0.55)]'
-                    : 'border-sky-400/30 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20'
+                data-testid="om-no-surebet-toggle"
+                aria-pressed={noSurebets}
+                onClick={() =>
+                  setNoSurebets((v) => {
+                    const next = !v;
+                    if (next) setOnlySurebets(false);
+                    return next;
+                  })
+                }
+                title="Esclude automaticamente tutte le surebet recuperate (Rating Normale ≥ 100%)"
+                className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${
+                  noSurebets
+                    ? 'border-rose-400/60 bg-rose-500/15 text-rose-100 shadow-[0_0_12px_-4px_rgba(244,63,94,0.45)]'
+                    : 'border-slate-700/80 bg-slate-900/90 text-slate-300 hover:border-slate-600 hover:text-white'
                 }`}
               >
-                <Trophy className="h-3 w-3" />
-                Top Competizioni
+                <Ban className={`h-3.5 w-3.5 ${noSurebets ? 'text-rose-300' : 'text-slate-400'}`} />
+                <span>No Surebet</span>
+                <span
+                  className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider ${
+                    noSurebets
+                      ? 'bg-rose-400/25 text-rose-200'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {noSurebets ? 'ON' : 'OFF'}
+                </span>
               </button>
+
               <button
+                type="button"
+                data-testid="om-reset-filters-btn"
                 onClick={resetAllFilters}
-                className="ml-auto rounded-lg border border-slate-700/80 bg-slate-900 px-2.5 py-1 text-[10px] font-medium text-slate-400 transition hover:text-white"
+                className="ml-auto inline-flex items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900 px-2.5 py-1 text-[10px] font-medium text-slate-400 transition hover:text-white"
               >
+                <RotateCcw className="h-3 w-3" />
                 Reset Filtri
               </button>
             </div>
@@ -936,6 +1025,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                 data-testid="om-bookmaker-select"
                 values={bookmakers}
                 allLabel="Tutti i Bookmaker"
+                searchPlaceholder="Cerca bookmaker per nome..."
                 options={bookmakerOptions}
                 onChange={setBookmakers}
               />
@@ -1082,8 +1172,8 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                 <h3 className="font-display text-base font-bold text-white">
                   Scraping Quote Live in Corso...
                 </h3>
-                <p className="mt-1 max-w-md text-xs text-slate-400">
-                  Connessione simultanea a Betfair Exchange IT, Smarkets, Sisal.it, SNAI.it, Betflag.it, Eurobet.it, GoldBet.it, 888sport.it, LeoVegas.it, Betfair Sportsbook, Unibet, Paf e Pinnacle.
+                <p className="mt-1 max-w-lg text-xs text-slate-400">
+                  Connessione simultanea a Betfair Exchange IT, Betflag Exchange, Smarkets e 20+ Bookmaker ADM/EU (Sisal, SNAI, Betflag, Eurobet, GoldBet, Lottomatica, Planetwin365, bet365, Betsson, DomusBet, DAZN Bet, WilliamHill, Gioco Digitale, PokerStars, NetBet, Stanleybet, 888sport, LeoVegas, Betfair SB, Unibet, Paf e Pinnacle).
                 </p>
               </div>
               <div className="flex flex-wrap justify-center gap-2">
@@ -1231,7 +1321,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                       Punta (Book) <ArrowUpDown className="h-3 w-3" />
                     </span>
                   </th>
-                  <th className="min-w-[162px] cursor-pointer whitespace-nowrap px-2.5 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('layOdds')}>
+                  <th className="min-w-[172px] cursor-pointer whitespace-nowrap px-2.5 py-3 text-right hover:text-brand-300" onClick={() => toggleSort('layOdds')}>
                     <span className="inline-flex items-center gap-1">
                       Banca (Exch) <ArrowUpDown className="h-3 w-3" />
                     </span>
@@ -1345,7 +1435,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                         }`}
                       >
                         <div className="flex w-full min-w-0 items-center justify-end gap-2.5">
-                          <div className="flex min-w-0 flex-1 flex-col items-end">
+                          <div className="flex min-w-0 flex-1 flex-col items-end overflow-hidden">
                             <span className="inline-flex items-center gap-1 rounded-md border border-blue-500/35 bg-blue-500/15 px-2 py-0.5 font-mono text-xs font-bold text-blue-200">
                               {row.backDelta === 'up' && <ArrowUp className="h-3 w-3 text-emerald-400" />}
                               {row.backDelta === 'down' && <ArrowDown className="h-3 w-3 text-rose-400" />}
@@ -1353,7 +1443,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                             </span>
                             <span
                               title={row.bookmakerName}
-                              className="mt-1 max-w-[145px] truncate text-[10px] font-medium text-slate-300"
+                              className="mt-1 max-w-full truncate text-[10px] font-medium text-slate-300"
                             >
                               {row.bookmakerName}
                             </span>
@@ -1376,7 +1466,7 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                         }`}
                       >
                         <div className="flex w-full min-w-0 items-center justify-end gap-2.5">
-                          <div className="flex min-w-0 flex-1 flex-col items-end">
+                          <div className="flex min-w-0 flex-1 flex-col items-end overflow-hidden">
                             <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/35 bg-rose-500/15 px-2 py-0.5 font-mono text-xs font-bold text-rose-200">
                               {row.layDelta === 'up' && <ArrowUp className="h-3 w-3 text-rose-400" />}
                               {row.layDelta === 'down' && <ArrowDown className="h-3 w-3 text-emerald-400" />}
@@ -1384,9 +1474,9 @@ export const OddsmatcherView: React.FC<OddsmatcherViewProps> = React.memo(({
                             </span>
                             <span
                               title={`${row.exchangeName} (${(row.commission * 100).toFixed(1)}%)`}
-                              className="mt-1 max-w-[160px] truncate text-[10px] font-medium text-slate-300"
+                              className="mt-1 max-w-full truncate text-[10px] font-medium text-slate-300"
                             >
-                              {row.exchangeName} ({(row.commission * 100).toFixed(1)}%)
+                              {formatExchangeShortName(row.exchangeName)} ({(row.commission * 100).toFixed(1)}%)
                             </span>
                           </div>
                           <BookmakerIcon

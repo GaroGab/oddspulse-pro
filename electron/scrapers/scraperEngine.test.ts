@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { addDays, resolveScrapeDateWindow, toLocalDateKey } from '../../src/shared/dateRange';
-import { DEFAULT_SETTINGS, type AppSettings, type RawScrapedMarket } from '../../src/shared/types';
+import {
+  DEFAULT_SETTINGS,
+  type AppSettings,
+  type RawScrapedMarket,
+  type SourceId,
+} from '../../src/shared/types';
+import { scrapeGiocoDigitale, verifyGiocoDigitaleEvent } from './giocoDigitaleBookmaker';
 import {
   appendCacheBuster,
   computeEffectiveScrapedAt,
@@ -12,8 +18,26 @@ import {
 import { scrapeItalianAdmBookmakers } from './italianAdmScraper';
 import { KAMBI_BRANDS, scrapeKambiBrand } from './kambiBookmaker';
 import { linkScrapedMarkets, teamSimilarity } from './matchLinker';
+import { scrapePokerstars, verifyPokerstarsEvent } from './pokerstarsBookmaker';
 import { ScraperEngine } from './scraperEngine';
 import { scrapeSmarketsExchange } from './smarketsExchange';
+import {
+  parseRomeWallClockToIso,
+  scrapeXSportBrand,
+  verifyXSportEvent,
+  XSPORT_BRANDS,
+} from './xsportBookmaker';
+
+function onlyEnabledSources(...enabled: SourceId[]): Record<SourceId, boolean> {
+  const out = {} as Record<SourceId, boolean>;
+  for (const key of Object.keys(DEFAULT_SETTINGS.enabledSources) as SourceId[]) {
+    out[key] = false;
+  }
+  for (const id of enabled) {
+    out[id] = true;
+  }
+  return out;
+}
 
 describe('ScraperEngine Stop & Restart Lifecycle', () => {
   afterEach(() => {
@@ -78,24 +102,7 @@ describe('ScraperEngine Stop & Restart Lifecycle', () => {
     const engine = new ScraperEngine(undefined, () => true);
     const settings: AppSettings = {
       ...DEFAULT_SETTINGS,
-      enabledSources: {
-        ...DEFAULT_SETTINGS.enabledSources,
-        betfair_exchange: true,
-        smarkets_exchange: false,
-        betflag_exchange: false,
-        sisal_it: false,
-        snai_it: false,
-        betflag_it: false,
-        eurobet_it: false,
-        goldbet_it: false,
-        betfair_sportsbook: false,
-        '888sport_it': false,
-        leovegas_it: false,
-        unibet: false,
-        paf: false,
-        pinnacle: false,
-        the_odds_api: false,
-      },
+      enabledSources: onlyEnabledSources('betfair_exchange'),
     };
 
     const cyclePromise = engine.runCycle(settings);
@@ -298,24 +305,7 @@ describe('ScraperEngine Stop & Restart Lifecycle', () => {
 
     const settings: AppSettings = {
       ...DEFAULT_SETTINGS,
-      enabledSources: {
-        ...DEFAULT_SETTINGS.enabledSources,
-        betfair_exchange: true,
-        pinnacle: true,
-        smarkets_exchange: false,
-        betflag_exchange: false,
-        sisal_it: false,
-        snai_it: false,
-        betflag_it: false,
-        eurobet_it: false,
-        goldbet_it: false,
-        betfair_sportsbook: false,
-        '888sport_it': false,
-        leovegas_it: false,
-        unibet: false,
-        paf: false,
-        the_odds_api: false,
-      },
+      enabledSources: onlyEnabledSources('betfair_exchange', 'pinnacle'),
     };
 
     const engine = new ScraperEngine(undefined, () => true);
@@ -925,24 +915,7 @@ describe('Odds Alignment, Freshness & Live Verification', () => {
 
     const settings: AppSettings = {
       ...DEFAULT_SETTINGS,
-      enabledSources: {
-        ...DEFAULT_SETTINGS.enabledSources,
-        betfair_exchange: true,
-        '888sport_it': true,
-        smarkets_exchange: false,
-        betflag_exchange: false,
-        sisal_it: false,
-        snai_it: false,
-        betflag_it: false,
-        eurobet_it: false,
-        goldbet_it: false,
-        betfair_sportsbook: false,
-        leovegas_it: false,
-        unibet: false,
-        paf: false,
-        pinnacle: false,
-        the_odds_api: false,
-      },
+      enabledSources: onlyEnabledSources('betfair_exchange', '888sport_it'),
     };
 
     const engine = new ScraperEngine(undefined, () => true);
@@ -1015,5 +988,397 @@ describe('Odds Alignment, Freshness & Live Verification', () => {
 
     expect(suspRes.exchange.status).toBe('suspended');
     expect(engine.getSnapshot().rows.some((r) => r.id === interHome.id)).toBe(false);
+  });
+});
+
+describe('New Italian ADM Bookmakers (Diretta ADM, Gioco Digitale, PokerStars, NetBet, Stanleybet)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('extracts Bet365, Betsson, DomusBet, DAZN Bet, Lottomatica, Planetwin365 and WilliamHill in one shared Diretta ADM batch', async () => {
+    const startSec = Math.floor((Date.now() + 3 * 3600_000) / 1000);
+    const admIds = [
+      { id: 'bet365_it' as const, bkId: 419, homeOdd: '2.15' },
+      { id: 'betsson_it' as const, bkId: 773, homeOdd: '2.12' },
+      { id: 'domusbet_it' as const, bkId: 548, homeOdd: '2.10' },
+      { id: 'daznbet_it' as const, bkId: 1185, homeOdd: '2.14' },
+      { id: 'lottomatica_it' as const, bkId: 335, homeOdd: '2.11' },
+      { id: 'planetwin365_it' as const, bkId: 467, homeOdd: '2.13' },
+      { id: 'williamhill_it' as const, bkId: 372, homeOdd: '2.16' },
+    ];
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('400.flashscore.ninja')) {
+        return new Response(
+          `ZA÷ITALIA: Serie A~AA÷evAdm10¬AB÷1¬AD÷${startSec}¬AE÷Juventus¬AF÷Napoli¬JA÷pJuv¬JB÷pNap~`,
+          { status: 200 }
+        );
+      }
+      if (url.includes('global.ds.lsapp.eu/odds/pq_graphql')) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              findOddsByEventId: {
+                odds: admIds.map((b) => ({
+                  bookmakerId: b.bkId,
+                  bettingType: 'HOME_DRAW_AWAY',
+                  bettingScope: 'FULL_TIME',
+                  odds: [
+                    { eventParticipantId: 'pJuv', value: b.homeOdd, active: true, handicap: null, selection: null, bothTeamsToScore: null, result: 'NONE' },
+                    { eventParticipantId: null, value: '3.25', active: true, handicap: null, selection: null, bothTeamsToScore: null, result: 'NONE' },
+                    { eventParticipantId: 'pNap', value: '3.40', active: true, handicap: null, selection: null, bothTeamsToScore: null, result: 'NONE' },
+                  ],
+                })),
+              },
+            },
+          }),
+          { status: 200, headers: { Age: '0' } }
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    const res = await scrapeItalianAdmBookmakers({
+      exchangeMarkets: [],
+      enabledSourceIds: admIds.map((b) => b.id),
+      includeLive: false,
+      filter: { sports: ['football'], eventHints: [{ eventName: 'Juventus - Napoli', sport: 'football' }] },
+    });
+
+    for (const b of admIds) {
+      const mkts = res.marketsBySource.get(b.id) ?? [];
+      expect(mkts).toHaveLength(1);
+      expect(mkts[0].marketType).toBe('1X2');
+      expect(mkts[0].isAggregator).toBe(true);
+      expect(mkts[0].selections.find((s) => s.canonicalKey === 'HOME')?.backOdds).toBe(Number(b.homeOdd));
+    }
+  });
+
+  it('scrapes and live-verifies Gioco Digitale via direct Entain CDS API while rejecting non-Full-Time traps', async () => {
+    const kickoff = new Date(Date.now() + 3 * 3600_000).toISOString();
+    let verifyOdds = 2.08;
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/clientconfig')) {
+        return new Response(
+          JSON.stringify({ msConnection: { pushAccessId: 'TEST_ACCESS_ID_1234567890' } }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('/cds-api/bettingoffer/fixtures')) {
+        return new Response(
+          JSON.stringify({
+            totalCount: 2,
+            fixtures: [
+              // Trap: Scorecast competition
+              {
+                id: '2:999',
+                name: { value: 'Inter - Milan (Scorecast)' },
+                startDate: kickoff,
+                stage: 'PreMatch',
+                competition: { name: { value: 'Serie A - Scorecast' } },
+                participants: [{ name: { value: 'Inter' } }, { name: { value: 'Milan' } }],
+                optionMarkets: [],
+              },
+              {
+                id: '2:7919001',
+                name: { value: 'Inter - Milan' },
+                startDate: kickoff,
+                stage: 'PreMatch',
+                competition: { name: { value: 'Serie A' } },
+                participants: [{ name: { value: 'Inter' } }, { name: { value: 'Milan' } }],
+                optionMarkets: [
+                  // Trap: 1st half result
+                  {
+                    id: 1,
+                    name: { value: '1° tempo - risultato' },
+                    status: 'Visible',
+                    options: [
+                      { name: { value: 'Inter' }, price: { odds: 2.8 }, status: 'Visible' },
+                      { name: { value: 'X' }, price: { odds: 2.1 }, status: 'Visible' },
+                      { name: { value: 'Milan' }, price: { odds: 4.0 }, status: 'Visible' },
+                    ],
+                  },
+                  // Valid 1X2
+                  {
+                    id: 2,
+                    name: { value: 'Risultato della partita' },
+                    status: 'Visible',
+                    options: [
+                      { name: { value: 'Inter' }, price: { odds: 2.05 }, status: 'Visible' },
+                      { name: { value: 'X' }, price: { odds: 3.3 }, status: 'Visible' },
+                      { name: { value: 'Milan' }, price: { odds: 3.7 }, status: 'Visible' },
+                    ],
+                  },
+                  // Valid O/U 2.5 (comma attr)
+                  {
+                    id: 3,
+                    name: { value: 'Over/Under' },
+                    attr: '2,5',
+                    status: 'Visible',
+                    options: [
+                      { name: { value: 'Over 2,5' }, price: { odds: 1.92 }, status: 'Visible' },
+                      { name: { value: 'Under 2,5' }, price: { odds: 1.84 }, status: 'Visible' },
+                    ],
+                  },
+                  // Valid BTTS
+                  {
+                    id: 4,
+                    name: { value: 'Gol/Gol' },
+                    status: 'Visible',
+                    options: [
+                      { name: { value: 'Sì' }, price: { odds: 1.78 }, status: 'Visible' },
+                      { name: { value: 'No' }, price: { odds: 1.95 }, status: 'Visible' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('/cds-api/bettingoffer/fixture-view')) {
+        return new Response(
+          JSON.stringify({
+            fixture: {
+              id: '2:7919001',
+              name: { value: 'Inter - Milan' },
+              startDate: kickoff,
+              stage: 'PreMatch',
+              competition: { name: { value: 'Serie A' } },
+              participants: [{ name: { value: 'Inter' } }, { name: { value: 'Milan' } }],
+              optionMarkets: [
+                {
+                  id: 2,
+                  name: { value: 'Risultato della partita' },
+                  status: 'Visible',
+                  options: [
+                    { name: { value: 'Inter' }, price: { odds: verifyOdds }, status: 'Visible' },
+                    { name: { value: 'X' }, price: { odds: 3.3 }, status: 'Visible' },
+                    { name: { value: 'Milan' }, price: { odds: 3.7 }, status: 'Visible' },
+                  ],
+                },
+              ],
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    const scraped = await scrapeGiocoDigitale(false, { sports: ['football'] });
+    expect(scraped.markets).toHaveLength(3);
+    expect(scraped.markets.every((m) => m.sourceId === 'giocodigitale_it' && !m.isAggregator)).toBe(true);
+    expect(scraped.markets.find((m) => m.marketType === '1X2')?.selections.find((s) => s.canonicalKey === 'HOME')?.backOdds).toBe(2.05);
+    expect(scraped.markets.find((m) => m.marketType === 'OVER_UNDER_25')?.selections.find((s) => s.canonicalKey === 'OVER_25')?.backOdds).toBe(1.92);
+    expect(scraped.markets.find((m) => m.marketType === 'BTTS')?.selections.find((s) => s.canonicalKey === 'BTTS_YES')?.backOdds).toBe(1.78);
+
+    verifyOdds = 2.18;
+    const ver = await verifyGiocoDigitaleEvent({
+      eventId: '2:7919001',
+      sport: 'football',
+      marketType: '1X2',
+      includeLive: false,
+    });
+    expect(ver.market?.selections.find((s) => s.canonicalKey === 'HOME')?.backOdds).toBe(2.18);
+  });
+
+  it('scrapes and live-verifies PokerStars.it direct sportsbook API across Football 1X2/OU2.5/BTTS', async () => {
+    const kickoff = new Date(Date.now() + 3 * 3600_000).toISOString();
+    let homeQuota = 225;
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/alberaturaPrematch')) {
+        return new Response(
+          JSON.stringify({
+            manifestazioneMap: {
+              '1-209': { descrizione: 'ITA Serie A', codiceDisciplina: 1, codiceManifestazione: 209, posizione: 1 },
+            },
+            manifestazioneListByDisciplinaOggiEDomani: { '1': ['1-209'] },
+            manifestazioneListByDisciplinaTutti: { '1': ['1-209'] },
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('/v1/schedaManifestazione/0/1-209')) {
+        return new Response(
+          JSON.stringify({
+            avvenimentoFeList: [
+              {
+                key: '36481-100',
+                descrizione: 'Roma - Lazio',
+                data: kickoff,
+                codiceDisciplina: 1,
+                codiceManifestazione: 209,
+                codicePalinsesto: 36481,
+                codiceAvvenimento: 100,
+                stato: 1,
+              },
+            ],
+            infoAggiuntivaMap: {
+              '36481-100-3-0': {
+                codicePalinsesto: 36481,
+                codiceAvvenimento: 100,
+                codiceScommessa: 3,
+                idInfoAggiuntiva: 0,
+                descrizione: 'ESITO FINALE 1X2',
+                esitoList: [
+                  { codiceEsito: 1, descrizione: '1', quota: homeQuota, stato: 1 },
+                  { codiceEsito: 2, descrizione: 'X', quota: 320, stato: 1 },
+                  { codiceEsito: 3, descrizione: '2', quota: 330, stato: 1 },
+                ],
+              },
+              '36481-100-7989-250': {
+                codicePalinsesto: 36481,
+                codiceAvvenimento: 100,
+                codiceScommessa: 7989,
+                idInfoAggiuntiva: 250,
+                soglia: '2.5',
+                esitoList: [
+                  { codiceEsito: 1, descrizione: 'UNDER', quota: 185, stato: 1 },
+                  { codiceEsito: 2, descrizione: 'OVER', quota: 195, stato: 1 },
+                ],
+              },
+              '36481-100-18-0': {
+                codicePalinsesto: 36481,
+                codiceAvvenimento: 100,
+                codiceScommessa: 18,
+                idInfoAggiuntiva: 0,
+                esitoList: [
+                  { codiceEsito: 1, descrizione: 'GOAL', quota: 172, stato: 1 },
+                  { codiceEsito: 2, descrizione: 'NOGOAL', quota: 205, stato: 1 },
+                ],
+              },
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    const scraped = await scrapePokerstars(false, { sports: ['football'] });
+    expect(scraped.markets).toHaveLength(3);
+    const m1x2 = scraped.markets.find((m) => m.marketType === '1X2')!;
+    expect(m1x2.eventId).toBe('36481-100');
+    expect(m1x2.sourceMetadata?.manifestationKey).toBe('1-209');
+    expect(m1x2.selections.find((s) => s.canonicalKey === 'HOME')?.backOdds).toBe(2.25);
+    expect(scraped.markets.find((m) => m.marketType === 'OVER_UNDER_25')?.selections.find((s) => s.canonicalKey === 'UNDER_25')?.backOdds).toBe(1.85);
+    expect(scraped.markets.find((m) => m.marketType === 'BTTS')?.selections.find((s) => s.canonicalKey === 'BTTS_YES')?.backOdds).toBe(1.72);
+
+    homeQuota = 238;
+    const ver = await verifyPokerstarsEvent({
+      eventId: '36481-100',
+      sport: 'football',
+      marketType: '1X2',
+      manifestationKey: '1-209',
+    });
+    expect(ver.market?.selections.find((s) => s.canonicalKey === 'HOME')?.backOdds).toBe(2.38);
+  });
+
+  it('converts Europe/Rome XSport timestamps across CET/CEST, skips Alta Quota specials, and verifies NetBet & Stanleybet', async () => {
+    // CET (+1) in November, CEST (+2) in July
+    expect(parseRomeWallClockToIso('20261125 20:30:00')).toBe('2026-11-25T19:30:00.000Z');
+    expect(parseRomeWallClockToIso('20260715 20:30:00')).toBe('2026-07-15T18:30:00.000Z');
+
+    const futureDate = addDays(new Date(), 1);
+    const ymd = `${futureDate.getFullYear()}${String(futureDate.getMonth() + 1).padStart(2, '0')}${String(
+      futureDate.getDate()
+    ).padStart(2, '0')}`;
+    const tsRome = `${ymd} 20:45:00`;
+    let stanleyHome = 195;
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/XSportDatastore/getPalinsestoDelGiorno')) {
+        return new Response(
+          JSON.stringify({
+            dts: { IT_33: 'Serie A', IT_999: 'Alta Quota' },
+            avs: {
+              g1: [
+                // Trap: date-suffixed Alta Quota special
+                {
+                  p: 36484,
+                  a: 99999,
+                  dsl: { IT: 'Inter 26/11 - Milan 26/11' },
+                  ts: tsRome,
+                  lv: false,
+                  it: 999,
+                  scs: [{ cs: 3, h: 0, eqs: [{ ce: 1, q: 300 }, { ce: 2, q: 320 }, { ce: 3, q: 250 }] }],
+                },
+                // Valid Serie A match
+                {
+                  p: 36481,
+                  a: 55501,
+                  dsl: { IT: 'Atalanta - Fiorentina' },
+                  ts: tsRome,
+                  lv: false,
+                  it: 33,
+                  scs: [
+                    { cs: 3, h: 0, eqs: [{ ce: 1, q: stanleyHome }, { ce: 2, q: 345 }, { ce: 3, q: 390 }] },
+                    { cs: 7989, h: 250, eqs: [{ ce: 1, q: 215 }, { ce: 2, q: 168 }] },
+                    { cs: 18, h: 0, eqs: [{ ce: 1, q: 162 }, { ce: 2, q: 220 }] },
+                  ],
+                },
+              ],
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('/XSportDatastore/getEvento')) {
+        return new Response(
+          JSON.stringify({
+            p: 36481,
+            a: 55501,
+            ts: tsRome,
+            lv: false,
+            scs: [{ cs: 3, h: 0, eqs: [{ ce: 1, q: stanleyHome }, { ce: 2, q: 345 }, { ce: 3, q: 390 }] }],
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    const nbRes = await scrapeXSportBrand(XSPORT_BRANDS.netbet_it, false, { sports: ['football'] });
+    expect(nbRes.markets).toHaveLength(3);
+    expect(nbRes.markets.every((m) => m.eventName === 'Atalanta - Fiorentina')).toBe(true);
+    expect(nbRes.markets.find((m) => m.marketType === 'OVER_UNDER_25')?.selections.find((s) => s.canonicalKey === 'UNDER_25')?.backOdds).toBe(2.15);
+    expect(nbRes.markets.find((m) => m.marketType === 'OVER_UNDER_25')?.selections.find((s) => s.canonicalKey === 'OVER_25')?.backOdds).toBe(1.68);
+    expect(nbRes.markets.find((m) => m.marketType === 'BTTS')?.selections.find((s) => s.canonicalKey === 'BTTS_YES')?.backOdds).toBe(1.62);
+
+    stanleyHome = 205;
+    const sbVer = await verifyXSportEvent({
+      spec: XSPORT_BRANDS.stanleybet_it,
+      eventId: '36481-55501',
+      sport: 'football',
+      marketType: '1X2',
+      homeTeam: 'Atalanta',
+      awayTeam: 'Fiorentina',
+      startTime: parseRomeWallClockToIso(tsRome)!,
+      includeLive: false,
+      metadata: { pal: '36481', avv: '55501', dateKey: ymd, idSport: '1', idAggregata: '319' },
+    });
+    expect(sbVer.market?.selections.find((s) => s.canonicalKey === 'HOME')?.backOdds).toBe(2.05);
+
+    const nbVer = await verifyXSportEvent({
+      spec: XSPORT_BRANDS.netbet_it,
+      eventId: '36481-55501',
+      sport: 'football',
+      marketType: '1X2',
+      homeTeam: 'Atalanta',
+      awayTeam: 'Fiorentina',
+      startTime: parseRomeWallClockToIso(tsRome)!,
+      includeLive: false,
+      metadata: { pal: '36481', avv: '55501', dateKey: ymd, idSport: '1', idAggregata: '319' },
+    });
+    expect(nbVer.market?.selections.find((s) => s.canonicalKey === 'HOME')?.backOdds).toBe(2.05);
   });
 });

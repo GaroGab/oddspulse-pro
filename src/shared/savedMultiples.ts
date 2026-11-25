@@ -2,10 +2,13 @@ import type {
   BetMode,
   MultioddsPlan,
   OddsmatcherRow,
+  RolloverCalcDetails,
+  RolloverWalletRule,
   SavedMultipleLeg,
   SavedMultiplePlan,
   SavedMultiplePlanInput,
 } from './types';
+import { computeMultioddsModeParams, computeMultioddsRating } from './math';
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -56,22 +59,7 @@ export interface EvaluatedSavedMultiplePlan {
   settledOutcome: 'in_progress' | 'won_all' | 'lost_at_leg';
   completedLegsCount: number;
   laidLegsCount: number;
-}
-
-function computeRating(
-  mode: BetMode,
-  stake: number,
-  refundAmount: number,
-  profit: number
-): number {
-  if (mode === 'normal') {
-    return stake > 0 ? round2((1 + profit / stake) * 100) : 0;
-  }
-  if (mode === 'snr' || mode === 'sr') {
-    return stake > 0 ? round2((profit / stake) * 100) : 0;
-  }
-  const base = refundAmount > 0 ? refundAmount : stake;
-  return base > 0 ? round2((profit / base) * 100) : 0;
+  rollover?: RolloverCalcDetails;
 }
 
 function computeBaselineRating(plan: SavedMultiplePlan): number {
@@ -86,15 +74,20 @@ function computeBaselineRating(plan: SavedMultiplePlan): number {
   );
   const boostFactor = 1 + Math.max(0, plan.bonusBoostPct) / 100;
   const boostedBack = 1 + (combinedBack - 1) * boostFactor;
-  const winPayout =
-    plan.mode === 'snr'
-      ? plan.stake * (combinedBack - 1) * boostFactor
-      : plan.stake * boostedBack;
-  const initialOutlay = plan.mode === 'normal' || plan.mode === 'rf' ? plan.stake : 0;
-  const effectiveRefund =
-    plan.mode === 'rf'
-      ? Math.max(0, plan.refundAmount) * (Math.max(0, plan.refundRetention) / 100)
-      : 0;
+  const { winPayout, initialOutlay, effectiveRefund, rolloverCtx } = computeMultioddsModeParams({
+    mode: plan.mode,
+    stake: plan.stake,
+    combinedBackOdds: combinedBack,
+    boostedBackOdds: boostedBack,
+    bonusBoostPct: plan.bonusBoostPct,
+    refundAmount: plan.refundAmount,
+    refundRetention: plan.refundRetention,
+    realBalance: plan.realBalance,
+    bonusBalance: plan.bonusBalance,
+    rolloverRemaining: plan.rolloverRemaining,
+    estimatedRating: plan.estimatedRating,
+    rolloverWalletRule: plan.rolloverWalletRule,
+  });
 
   let nextValue = winPayout;
   for (let i = sorted.length - 1; i >= 0; i--) {
@@ -105,12 +98,13 @@ function computeBaselineRating(plan: SavedMultiplePlan): number {
     nextValue = y * (1 - c) + effectiveRefund;
   }
 
-  return computeRating(
-    plan.mode,
-    plan.stake,
-    plan.refundAmount,
-    round2(nextValue - initialOutlay)
-  );
+  return computeMultioddsRating({
+    mode: plan.mode,
+    stake: plan.stake,
+    refundAmount: plan.refundAmount,
+    guaranteedProfit: round2(nextValue - initialOutlay),
+    bonusBalance: rolloverCtx?.bonusBalance ?? 0,
+  });
 }
 
 /**
@@ -141,12 +135,20 @@ export function evaluateSavedMultiplePlan(plan: SavedMultiplePlan): EvaluatedSav
   );
   const boostFactor = 1 + bonusBoostPct / 100;
   const boostedBackOdds = 1 + (combinedBackOdds - 1) * boostFactor;
-  const winPayout =
-    plan.mode === 'snr'
-      ? stake * (combinedBackOdds - 1) * boostFactor
-      : stake * boostedBackOdds;
-  const initialOutlay = plan.mode === 'normal' || plan.mode === 'rf' ? stake : 0;
-  const effectiveRefund = plan.mode === 'rf' ? refundAmount * (refundRetention / 100) : 0;
+  const { winPayout, initialOutlay, effectiveRefund, rolloverCtx } = computeMultioddsModeParams({
+    mode: plan.mode,
+    stake,
+    combinedBackOdds,
+    boostedBackOdds,
+    bonusBoostPct,
+    refundAmount,
+    refundRetention,
+    realBalance: plan.realBalance,
+    bonusBalance: plan.bonusBalance,
+    rolloverRemaining: plan.rolloverRemaining,
+    estimatedRating: plan.estimatedRating,
+    rolloverWalletRule: plan.rolloverWalletRule,
+  });
 
   const lostAtIndex = sorted.findIndex((l) => l.status === 'lost_bookie');
   const activeLimit = lostAtIndex >= 0 ? lostAtIndex + 1 : n;
@@ -264,9 +266,51 @@ export function evaluateSavedMultiplePlan(plan: SavedMultiplePlan): EvaluatedSav
     projectedProfit = profitIfAllWin;
   }
 
-  const rating = computeRating(plan.mode, stake, refundAmount, projectedProfit);
+  const rating = computeMultioddsRating({
+    mode: plan.mode,
+    stake,
+    refundAmount,
+    guaranteedProfit: projectedProfit,
+    bonusBalance: rolloverCtx?.bonusBalance ?? 0,
+  });
   const initialRating = computeBaselineRating(plan);
   const safeMinGap = Number.isFinite(minGapMinutes) ? minGapMinutes : 999;
+
+  const effectiveCombinedLayOdds = sorted.reduce((acc, leg, idx) => {
+    if (idx >= activeLimit) return acc;
+    const L = Math.max(1.01, Number.isFinite(leg.layOdds) ? leg.layOdds : 1.01);
+    const c = Math.max(0, Math.min(0.25, Number.isFinite(leg.commission) ? leg.commission : 0));
+    return acc * ((L - c) / Math.max(0.01, 1 - c));
+  }, 1);
+  const firstComm = Math.max(
+    0,
+    Math.min(0.25, Number.isFinite(sorted[0]?.commission) ? sorted[0].commission : 0)
+  );
+  const rollover: RolloverCalcDetails | undefined = rolloverCtx
+    ? {
+        stake: round2(rolloverCtx.stake),
+        realBalance: round2(rolloverCtx.realBalance),
+        bonusBalance: round2(rolloverCtx.bonusBalance),
+        extraRealUsed: round2(rolloverCtx.extraRealUsed),
+        totalBalanceBefore: round2(rolloverCtx.totalBalanceBefore),
+        rolloverBefore: round2(rolloverCtx.rolloverBefore),
+        rolloverAfter: round2(rolloverCtx.rolloverAfter),
+        estimatedRating: round2(rolloverCtx.estimatedRating),
+        walletRule: rolloverCtx.walletRule,
+        bookieBalanceIfWin: round2(rolloverCtx.bookieBalanceIfWin),
+        bookieBalanceIfLose: round2(rolloverCtx.bookieBalanceIfLose),
+        futureRolloverCostIfWin: round2(rolloverCtx.futureRolloverCostIfWin),
+        futureRolloverCostIfLose: round2(rolloverCtx.futureRolloverCostIfLose),
+        singleBetBookieProfit: round2(stake * (boostedBackOdds - 1) - cumLiab),
+        singleBetExchangeProfit: round2((effectiveStakes[0] ?? 0) * (1 - firstComm) - stake),
+        matchRating: round2(
+          effectiveCombinedLayOdds > 0 ? (boostedBackOdds / effectiveCombinedLayOdds) * 100 : 0
+        ),
+        clearsRolloverOnLose: rolloverCtx.clearsRolloverOnLose,
+        completesRolloverOnThisBet: rolloverCtx.completesRolloverOnThisBet,
+        baselineExpectedValue: round2(rolloverCtx.baselineExpectedValue),
+      }
+    : undefined;
 
   return {
     steps,
@@ -289,6 +333,7 @@ export function evaluateSavedMultiplePlan(plan: SavedMultiplePlan): EvaluatedSav
     settledOutcome,
     completedLegsCount,
     laidLegsCount,
+    rollover,
   };
 }
 
@@ -303,6 +348,11 @@ export function buildSavedMultipleInputFromPlan(params: {
   bonusBoostPct: number;
   refundAmount: number;
   refundRetention: number;
+  realBalance?: number;
+  bonusBalance?: number;
+  rolloverRemaining?: number;
+  estimatedRating?: number;
+  rolloverWalletRule?: RolloverWalletRule;
   minGapMinutes: number;
   customName?: string;
 }): SavedMultiplePlanInput {
@@ -313,6 +363,11 @@ export function buildSavedMultipleInputFromPlan(params: {
     bonusBoostPct,
     refundAmount,
     refundRetention,
+    realBalance,
+    bonusBalance,
+    rolloverRemaining,
+    estimatedRating,
+    rolloverWalletRule,
     minGapMinutes,
     customName,
   } = params;
@@ -357,6 +412,11 @@ export function buildSavedMultipleInputFromPlan(params: {
     bonusBoostPct,
     refundAmount,
     refundRetention,
+    realBalance,
+    bonusBalance,
+    rolloverRemaining,
+    estimatedRating,
+    rolloverWalletRule,
     minGapMinutes,
     bookmakerId: plan.bookmakerId,
     bookmakerName: plan.bookmakerName,

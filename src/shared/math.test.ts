@@ -4,6 +4,8 @@ import {
   calculatePuntaPunta,
   calculateSequentialMultiodds,
   calculateSingleMatch,
+  computeAutoPuntaPuntaRolloverRating,
+  computeAutoRolloverRating,
   findBestMultiodds,
 } from './math';
 import { linkScrapedMarkets, matchesEventHints, normalizeTeamName, teamSimilarity } from '../../electron/scrapers/matchLinker';
@@ -35,6 +37,7 @@ import {
   extractMatchEventKey,
   formatFittingListSummary,
   getTopCompetitionValues,
+  isRowSurebet,
   isWatchExpired,
   matchesWatchLeague,
   matchesWatchLeagues,
@@ -276,6 +279,145 @@ describe('Multiodds Sequential Lay Engine', () => {
         expect(leg.row.exchangeId).not.toBe('smarkets_exchange');
       }
     }
+  });
+
+  it('supports Oddsmatcher filters (sport, market, search, minRating, onlySurebets, noSurebets, dateRange) in findBestMultiodds', () => {
+    const fb1 = makeRow({
+      id: 'fb1',
+      eventKey: 'ev_fb1',
+      sport: 'football',
+      league: 'Serie A',
+      eventName: 'Inter - Milan',
+      marketType: '1X2',
+      selectionLabel: 'Inter (1)',
+      startTime: '2026-11-22T12:00:00Z',
+      backOdds: 2.0,
+      layOdds: 2.02,
+      ratingNormal: 96.5,
+      isSurebet: false,
+    });
+    const fb2 = makeRow({
+      id: 'fb2',
+      eventKey: 'ev_fb2',
+      sport: 'football',
+      league: 'Serie A',
+      eventName: 'Juventus - Roma',
+      marketType: '1X2',
+      selectionLabel: 'Juventus (1)',
+      startTime: '2026-11-22T16:00:00Z',
+      backOdds: 2.0,
+      layOdds: 2.02,
+      ratingNormal: 96.5,
+      isSurebet: false,
+    });
+    const fbSure = makeRow({
+      id: 'fb_sure',
+      eventKey: 'ev_fb_sure',
+      sport: 'football',
+      league: 'Premier League',
+      eventName: 'Arsenal - Chelsea',
+      marketType: 'OVER_UNDER_25',
+      selectionLabel: 'Over 2.5',
+      startTime: '2026-11-22T20:00:00Z',
+      backOdds: 2.2,
+      layOdds: 2.0,
+      ratingNormal: 109.5,
+      isSurebet: true,
+    });
+    const fbSure2 = makeRow({
+      id: 'fb_sure2',
+      eventKey: 'ev_fb_sure2',
+      sport: 'football',
+      league: 'Premier League',
+      eventName: 'Liverpool - City',
+      marketType: 'OVER_UNDER_25',
+      selectionLabel: 'Over 2.5',
+      startTime: '2026-11-23T12:00:00Z',
+      backOdds: 2.2,
+      layOdds: 2.0,
+      ratingNormal: 109.5,
+      isSurebet: true,
+    });
+    const tn1 = makeRow({
+      id: 'tn1',
+      eventKey: 'ev_tn1',
+      sport: 'tennis',
+      league: 'ATP Finals',
+      eventName: 'Sinner - Alcaraz',
+      marketType: 'H2H',
+      selectionLabel: 'Sinner (1)',
+      startTime: '2026-11-22T12:00:00Z',
+      backOdds: 2.0,
+      layOdds: 2.02,
+      ratingNormal: 96.5,
+      isSurebet: false,
+    });
+    const tn2 = makeRow({
+      id: 'tn2',
+      eventKey: 'ev_tn2',
+      sport: 'tennis',
+      league: 'ATP Finals',
+      eventName: 'Zverev - Fritz',
+      marketType: 'H2H',
+      selectionLabel: 'Zverev (1)',
+      startTime: '2026-11-22T18:00:00Z',
+      backOdds: 2.0,
+      layOdds: 2.02,
+      ratingNormal: 96.5,
+      isSurebet: false,
+    });
+
+    const baseCfg = {
+      rows: [fb1, fb2, fbSure, fbSure2, tn1, tn2],
+      legsCount: 2,
+      mode: 'normal' as const,
+      stake: 50,
+      minLegOdds: 1.2,
+      maxLegOdds: 5,
+      minCombinedOdds: 2.0,
+      maxCombinedOdds: 20,
+      minLiquidity: 10,
+      minGapMinutes: 120,
+      bonusBoostPct: 0,
+      refundAmount: 0,
+      refundRetention: 70,
+    };
+
+    // Sport filter
+    const tennisPlans = findBestMultiodds({ ...baseCfg, sport: 'tennis' });
+    expect(tennisPlans.length).toBe(1);
+    expect(tennisPlans[0].legs.every((l) => l.row.sport === 'tennis')).toBe(true);
+
+    // Market filter
+    const ouPlans = findBestMultiodds({ ...baseCfg, market: 'OVER_UNDER_25' });
+    expect(ouPlans.length).toBe(1);
+    expect(ouPlans[0].legs.every((l) => l.row.marketType === 'OVER_UNDER_25')).toBe(true);
+
+    // noSurebets excludes single-leg surebets
+    const noSurePlans = findBestMultiodds({ ...baseCfg, sport: 'football', noSurebets: true });
+    expect(noSurePlans.length).toBe(1);
+    expect(noSurePlans[0].legs.every((l) => !l.row.isSurebet)).toBe(true);
+
+    // onlySurebets keeps only multiples with plan rating >= 100%
+    const onlySurePlans = findBestMultiodds({ ...baseCfg, onlySurebets: true });
+    expect(onlySurePlans.length).toBeGreaterThan(0);
+    expect(onlySurePlans.every((p) => p.rating >= 100)).toBe(true);
+
+    // minRating filters resulting plan rating
+    const highRatingPlans = findBestMultiodds({ ...baseCfg, minRating: 105 });
+    expect(highRatingPlans.length).toBe(1);
+    expect(highRatingPlans[0].rating).toBeGreaterThanOrEqual(105);
+
+    // search filters legs by text
+    const searchPlans = findBestMultiodds({ ...baseCfg, search: 'Inter' });
+    expect(searchPlans.length).toBe(0); // Only 1 matching event < 2 legs
+
+    // dateRange filters by calendar window
+    const dateFiltered = findBestMultiodds({
+      ...baseCfg,
+      dateRange: { mode: 'range', startDate: '2026-11-23', endDate: '2026-11-23' },
+    });
+    expect(dateFiltered.length).toBe(0); // Only 1 event on 2026-11-23
   });
 });
 
@@ -1373,6 +1515,74 @@ describe('Rating Watch Engine & Adaptive Interval', () => {
     );
     expect(restoredEval.bestMatch?.eventName).toBe('Inter - Milan');
   });
+
+  it('excludes surebet rows when excludeSurebets (No Surebet) is enabled', () => {
+    const nowMs = new Date('2026-11-22T15:00:00Z').getTime();
+    const surebetRow = makeRow({
+      id: 'r_surebet',
+      eventKey: 'football:2026-11-22:inter__milan',
+      eventName: 'Inter - Milan',
+      homeTeam: 'Inter',
+      awayTeam: 'Milan',
+      startTime: '2026-11-22T20:00:00Z',
+      bookmakerId: 'sisal_it',
+      exchangeId: 'betfair_exchange',
+      backOdds: 3.5,
+      layOdds: 3.3,
+      commission: 0.045,
+      isSurebet: true,
+      liquidity: 150,
+    });
+    const qualifyingRow = makeRow({
+      id: 'r_qualifying',
+      eventKey: 'football:2026-11-22:inter__milan',
+      eventName: 'Inter - Milan',
+      homeTeam: 'Inter',
+      awayTeam: 'Milan',
+      startTime: '2026-11-22T20:00:00Z',
+      selectionKey: 'DRAW',
+      selectionLabel: 'Pareggio (X)',
+      bookmakerId: 'sisal_it',
+      exchangeId: 'betfair_exchange',
+      backOdds: 3.1,
+      layOdds: 3.05,
+      commission: 0.045,
+      isSurebet: false,
+      liquidity: 150,
+    });
+
+    expect(isRowSurebet(surebetRow)).toBe(true);
+    expect(isRowSurebet(qualifyingRow)).toBe(false);
+    // Also detects surebet via odds/commission even when isSurebet flag was omitted on synthetic row
+    expect(isRowSurebet({ ...surebetRow, isSurebet: false })).toBe(true);
+
+    // Without excludeSurebets, the surebet wins
+    const withSurebet = evaluateRatingWatch(
+      makeWatch({ targetRating: 95, excludeSurebets: false }),
+      [surebetRow, qualifyingRow],
+      { nowMs }
+    );
+    expect(withSurebet.bestMatch?.rowId).toBe('r_surebet');
+    expect(withSurebet.shouldTrigger).toBe(true);
+
+    // With excludeSurebets, the surebet is filtered out and qualifyingRow is selected
+    const withoutSurebet = evaluateRatingWatch(
+      makeWatch({ targetRating: 95, excludeSurebets: true }),
+      [surebetRow, qualifyingRow],
+      { nowMs }
+    );
+    expect(withoutSurebet.bestMatch?.rowId).toBe('r_qualifying');
+    expect(withoutSurebet.shouldTrigger).toBe(true);
+
+    // If only surebets exist, bestMatch is null and shouldTrigger is false
+    const onlySurebetsRes = evaluateRatingWatch(
+      makeWatch({ mode: 'snr', targetRating: 65, excludeSurebets: true }),
+      [surebetRow],
+      { nowMs }
+    );
+    expect(onlySurebetsRes.bestMatch).toBeNull();
+    expect(onlySurebetsRes.shouldTrigger).toBe(false);
+  });
 });
 
 describe('Saved Multiple Progressive Engine', () => {
@@ -1874,5 +2084,367 @@ describe('Future Date Range Scraping Helpers', () => {
     expect(
       formatScrapeDateWindowLabel({ startDate: '2026-11-29', endDate: '2026-11-29' })
     ).toBe('29/11');
+  });
+});
+
+describe('Bonus Rollover Calculator & Auto Rating Engine', () => {
+  it('equalizes net campaign profit for all-in Rollover with future wagering cost', () => {
+    // R=100, B=100, S=200 (all-in), W=600 -> W_after=400 @ 95% => C_win=20, C_lose=0
+    // y = (200 * 5 - 20) / (5 - 0.05) = 980 / 4.95 = 197.98
+    const res = calculateSingleMatch({
+      mode: 'rollover',
+      stake: 200,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 600,
+      estimatedRating: 95,
+      backOdds: 5.0,
+      layOdds: 5.0,
+      commission: 0.05,
+    });
+
+    expect(res.layStake).toBeCloseTo(197.98, 2);
+    expect(res.bookieWinProfit).toBeCloseTo(88.08, 1);
+    expect(res.exchangeWinProfit).toBeCloseTo(88.08, 1);
+    expect(Math.abs(res.bookieWinProfit - res.exchangeWinProfit)).toBeLessThan(0.05);
+    expect(res.rating).toBeCloseTo(88.08, 1);
+    expect(res.rollover?.rolloverAfter).toBe(400);
+    expect(res.rollover?.futureRolloverCostIfWin).toBe(20);
+    expect(res.rollover?.futureRolloverCostIfLose).toBe(0);
+    expect(res.rollover?.clearsRolloverOnLose).toBe(true);
+    expect(res.rollover?.completesRolloverOnThisBet).toBe(false);
+    expect(res.rollover?.bookieBalanceIfWin).toBe(1000);
+    expect(res.rollover?.bookieBalanceIfLose).toBe(0);
+  });
+
+  it('distinguishes mixed vs bonus_first wallet rules on partial rollover stakes', () => {
+    // Partial stake S=100 out of R=100 + B=100, W=600, est=95% -> W_after=500 -> future cost=25
+    const mixed = calculateSingleMatch({
+      mode: 'rollover',
+      stake: 100,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 600,
+      estimatedRating: 95,
+      rolloverWalletRule: 'mixed',
+      backOdds: 2.0,
+      layOdds: 2.04,
+      commission: 0.045,
+    });
+    expect(mixed.rollover?.clearsRolloverOnLose).toBe(false);
+    expect(mixed.rollover?.futureRolloverCostIfWin).toBe(25);
+    expect(mixed.rollover?.futureRolloverCostIfLose).toBe(25);
+    expect(mixed.layStake).toBeCloseTo((100 * 2.0) / (2.04 - 0.045), 2);
+    expect(Math.abs(mixed.bookieWinProfit - mixed.exchangeWinProfit)).toBeLessThan(0.05);
+
+    // Under bonus_first, staking S=100 wipes out the €100 bonus on loss -> C_lose = 0
+    const bonusFirst = calculateSingleMatch({
+      mode: 'rollover',
+      stake: 100,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 600,
+      estimatedRating: 95,
+      rolloverWalletRule: 'bonus_first',
+      backOdds: 2.0,
+      layOdds: 2.04,
+      commission: 0.045,
+    });
+    expect(bonusFirst.rollover?.clearsRolloverOnLose).toBe(true);
+    expect(bonusFirst.rollover?.futureRolloverCostIfWin).toBe(25);
+    expect(bonusFirst.rollover?.futureRolloverCostIfLose).toBe(0);
+    expect(bonusFirst.layStake).toBeCloseTo((100 * 2.0 - 25) / (2.04 - 0.045), 2);
+    expect(Math.abs(bonusFirst.bookieWinProfit - bonusFirst.exchangeWinProfit)).toBeLessThan(0.05);
+    expect(bonusFirst.expectedProfit).toBeGreaterThan(mixed.expectedProfit);
+  });
+
+  it('completes rollover with zero future cost when stake >= rolloverRemaining and matches normal/sr boundary limits', () => {
+    const finish = calculateSingleMatch({
+      mode: 'rollover',
+      stake: 200,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 150,
+      estimatedRating: 94,
+      backOdds: 2.5,
+      layOdds: 2.54,
+      commission: 0.045,
+    });
+    expect(finish.rollover?.completesRolloverOnThisBet).toBe(true);
+    expect(finish.rollover?.rolloverAfter).toBe(0);
+    expect(finish.rollover?.futureRolloverCostIfWin).toBe(0);
+    expect(finish.rollover?.futureRolloverCostIfLose).toBe(0);
+    expect(Math.abs(finish.bookieWinProfit - finish.exchangeWinProfit)).toBeLessThan(0.05);
+
+    // Pure Real (B=0, W=0) matches normal mode
+    const asNormal = calculateSingleMatch({
+      mode: 'rollover',
+      stake: 100,
+      realBalance: 100,
+      bonusBalance: 0,
+      rolloverRemaining: 0,
+      backOdds: 2.0,
+      layOdds: 2.0,
+      commission: 0.05,
+    });
+    const norm = calculateSingleMatch({
+      mode: 'normal',
+      stake: 100,
+      backOdds: 2.0,
+      layOdds: 2.0,
+      commission: 0.05,
+    });
+    expect(asNormal.layStake).toBe(norm.layStake);
+    expect(asNormal.expectedProfit).toBe(norm.expectedProfit);
+    expect(asNormal.rating).toBe(norm.rating);
+
+    // Pure Bonus (R=0, B=100, W=0) matches sr mode
+    const asSr = calculateSingleMatch({
+      mode: 'rollover',
+      stake: 100,
+      realBalance: 0,
+      bonusBalance: 100,
+      rolloverRemaining: 0,
+      backOdds: 3.0,
+      layOdds: 3.1,
+      commission: 0.05,
+    });
+    const sr = calculateSingleMatch({
+      mode: 'sr',
+      stake: 100,
+      backOdds: 3.0,
+      layOdds: 3.1,
+      commission: 0.05,
+    });
+    expect(asSr.layStake).toBe(sr.layStake);
+    expect(asSr.expectedProfit).toBe(sr.expectedProfit);
+  });
+
+  it('supports Underlay and Overlay bias in Rollover mode', () => {
+    const baseCfg = {
+      mode: 'rollover' as const,
+      stake: 200,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 600,
+      estimatedRating: 95,
+      backOdds: 5.0,
+      layOdds: 5.0,
+      commission: 0.05,
+    };
+    const under = calculateSingleMatch({ ...baseCfg, balanceBias: -1 });
+    const bal = calculateSingleMatch({ ...baseCfg, balanceBias: 0 });
+    const over = calculateSingleMatch({ ...baseCfg, balanceBias: 1 });
+
+    expect(under.layStake).toBeLessThan(bal.layStake);
+    expect(over.layStake).toBeGreaterThan(bal.layStake);
+    expect(under.bookieWinProfit).toBeGreaterThan(under.exchangeWinProfit);
+    expect(over.exchangeWinProfit).toBeGreaterThan(over.bookieWinProfit);
+    expect(under.exchangeWinProfit).toBeCloseTo(0, 1);
+    expect(over.bookieWinProfit).toBeCloseTo(0, 1);
+  });
+
+  it('computes Punta-Punta Rollover across 2-way and 3-way markets', () => {
+    const pp2 = calculatePuntaPunta({
+      mode: 'rollover',
+      stake: 200,
+      odds: [4.0, 1.35],
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 600,
+      estimatedRating: 95,
+    });
+    expect(pp2.stakes[0]).toBe(200);
+    // Target hedge return = 200*4 - 20 = 780 -> P2 stake = 780/1.35 = 577.78
+    expect(pp2.stakes[1]).toBeCloseTo(577.78, 2);
+    expect(Math.abs(pp2.profits[0] - pp2.profits[1])).toBeLessThan(0.05);
+    expect(pp2.guaranteedProfit).toBeGreaterThan(90);
+
+    const pp3 = calculatePuntaPunta({
+      mode: 'rollover',
+      stake: 200,
+      odds: [4.0, 3.2, 2.3],
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 600,
+      estimatedRating: 95,
+    });
+    expect(Math.abs(Math.max(...pp3.profits) - Math.min(...pp3.profits))).toBeLessThan(0.05);
+  });
+
+  it('automatically estimates Rollover rating from Oddsmatcher rows while ignoring surebet spikes', () => {
+    const rows: OddsmatcherRow[] = [
+      makeRow({ id: 'sure', backOdds: 2.5, layOdds: 2.0, liquidity: 500, ratingNormal: 118.0, startTime: '2026-11-26T12:00:00Z' }),
+      makeRow({ id: 'lowOdds', backOdds: 1.1, layOdds: 1.11, liquidity: 500, ratingNormal: 98.5, startTime: '2026-11-26T12:00:00Z' }),
+      makeRow({ id: 'lowLiq', backOdds: 2.0, layOdds: 2.02, liquidity: 2, ratingNormal: 98.8, startTime: '2026-11-26T12:00:00Z' }),
+      makeRow({ id: 'r1', backOdds: 2.0, layOdds: 2.02, liquidity: 100, ratingNormal: 97.6, startTime: '2026-11-26T12:00:00Z' }),
+      makeRow({ id: 'r2', backOdds: 2.2, layOdds: 2.24, liquidity: 120, ratingNormal: 96.4, startTime: '2026-11-26T12:00:00Z' }),
+      makeRow({ id: 'r3', backOdds: 1.8, layOdds: 1.84, liquidity: 80, ratingNormal: 95.8, startTime: '2026-11-26T12:00:00Z' }),
+    ];
+
+    const auto = computeAutoRolloverRating({ rows });
+    expect(auto.source).toBe('oddsmatcher');
+    expect(auto.sampleCount).toBe(3);
+    expect(auto.estimatedRating).toBe(96.4);
+
+    // Fallback to current quote when fewer than 3 Oddsmatcher rows qualify
+    const fromQuote = computeAutoRolloverRating({
+      rows: [],
+      currentBackOdds: 2.0,
+      currentLayOdds: 2.04,
+      currentCommission: 0.045,
+    });
+    expect(fromQuote.source).toBe('current_quote');
+    expect(fromQuote.estimatedRating).toBeCloseTo(95.74, 2);
+
+    // Default fallback
+    const def = computeAutoRolloverRating({ rows: [] });
+    expect(def.source).toBe('default');
+    expect(def.estimatedRating).toBe(96);
+
+    const ppFromQuote = computeAutoPuntaPuntaRolloverRating({ currentOdds: [1.92, 1.96] });
+    expect(ppFromQuote.source).toBe('current_quote');
+    expect(ppFromQuote.estimatedRating).toBeCloseTo(100 / (1 / 1.92 + 1 / 1.96), 1);
+
+    // Surebet current quote [2.0, 2.05] (>100%) is safely capped at 99.8%
+    const ppCapped = computeAutoPuntaPuntaRolloverRating({ currentOdds: [2.0, 2.05] });
+    expect(ppCapped.source).toBe('current_quote');
+    expect(ppCapped.estimatedRating).toBe(99.8);
+  });
+
+  it('computes equalized Sequential Multiodds in Rollover mode (all-in bust-out + partial mixed vs bonus_first)', () => {
+    const legs: OddsmatcherRow[] = [
+      makeRow({ id: 'mr1', startTime: '2026-11-26T12:00:00Z', backOdds: 2.0, layOdds: 2.04, commission: 0.05 }),
+      makeRow({ id: 'mr2', startTime: '2026-11-26T15:00:00Z', backOdds: 2.0, layOdds: 2.04, commission: 0.05 }),
+      makeRow({ id: 'mr3', startTime: '2026-11-26T18:00:00Z', backOdds: 2.0, layOdds: 2.04, commission: 0.05 }),
+    ];
+
+    // All-in bust-out: real=100, bonus=100, stake=200, rollover=600 -> after bet rollover=400, cost@95%=20
+    const allInPlan = calculateSequentialMultiodds({
+      rows: legs,
+      mode: 'rollover',
+      stake: 200,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 600,
+      estimatedRating: 95,
+      rolloverWalletRule: 'mixed',
+    });
+
+    expect(allInPlan.rollover).toBeDefined();
+    expect(allInPlan.rollover!.clearsRolloverOnLose).toBe(true);
+    expect(allInPlan.rollover!.futureRolloverCostIfWin).toBe(20);
+    expect(allInPlan.rollover!.futureRolloverCostIfLose).toBe(0);
+    expect(Math.abs(allInPlan.legs[0].profitIfLostHere - allInPlan.guaranteedProfit)).toBeLessThan(0.05);
+    expect(Math.abs(allInPlan.legs[1].profitIfLostHere - allInPlan.guaranteedProfit)).toBeLessThan(0.05);
+    expect(Math.abs(allInPlan.legs[2].profitIfLostHere - allInPlan.guaranteedProfit)).toBeLessThan(0.05);
+    expect(Math.abs(allInPlan.profitIfAllWin - allInPlan.guaranteedProfit)).toBeLessThan(0.05);
+    expect(allInPlan.guaranteedProfit).toBeGreaterThan(70);
+
+    // Partial stake (100 out of 200): bonus_first clears rollover on lose, mixed keeps remaining rollover
+    const partialMixed = calculateSequentialMultiodds({
+      rows: legs.slice(0, 2),
+      mode: 'rollover',
+      stake: 100,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 500,
+      estimatedRating: 95,
+      rolloverWalletRule: 'mixed',
+    });
+    const partialBonusFirst = calculateSequentialMultiodds({
+      rows: legs.slice(0, 2),
+      mode: 'rollover',
+      stake: 100,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 500,
+      estimatedRating: 95,
+      rolloverWalletRule: 'bonus_first',
+    });
+
+    expect(partialMixed.rollover!.clearsRolloverOnLose).toBe(false);
+    expect(partialMixed.rollover!.futureRolloverCostIfLose).toBe(20);
+    expect(partialBonusFirst.rollover!.clearsRolloverOnLose).toBe(true);
+    expect(partialBonusFirst.rollover!.futureRolloverCostIfLose).toBe(0);
+    expect(partialBonusFirst.guaranteedProfit).toBeGreaterThan(partialMixed.guaranteedProfit);
+  });
+
+  it('supports findBestMultiodds and SavedMultiplePlan roundtrip in Rollover mode', () => {
+    const rows: OddsmatcherRow[] = [
+      makeRow({ id: 'fbm1', startTime: '2026-11-26T12:00:00Z', backOdds: 2.1, layOdds: 2.12, ratingNormal: 96.5, liquidity: 200 }),
+      makeRow({ id: 'fbm2', startTime: '2026-11-26T16:00:00Z', backOdds: 2.2, layOdds: 2.22, ratingNormal: 96.8, liquidity: 200 }),
+      makeRow({ id: 'fbm3', startTime: '2026-11-26T20:00:00Z', backOdds: 2.0, layOdds: 2.04, ratingNormal: 95.8, liquidity: 200 }),
+    ];
+
+    const best = findBestMultiodds({
+      rows,
+      legsCount: 2,
+      mode: 'rollover',
+      stake: 200,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 500,
+      estimatedRating: 96,
+      rolloverWalletRule: 'mixed',
+      minLegOdds: 1.5,
+      maxLegOdds: 4.0,
+      minCombinedOdds: 2.0,
+      maxCombinedOdds: 20,
+      minLiquidity: 50,
+      minGapMinutes: 120,
+      bonusBoostPct: 0,
+      refundAmount: 0,
+      refundRetention: 70,
+    });
+
+    expect(best.length).toBeGreaterThan(0);
+    const top = best[0];
+    expect(top.rollover).toBeDefined();
+    expect(top.rollover!.rolloverAfter).toBe(300);
+
+    const savedInput = buildSavedMultipleInputFromPlan({
+      plan: top,
+      mode: 'rollover',
+      stake: 200,
+      bonusBoostPct: 0,
+      refundAmount: 0,
+      refundRetention: 70,
+      realBalance: 100,
+      bonusBalance: 100,
+      rolloverRemaining: 500,
+      estimatedRating: 96,
+      rolloverWalletRule: 'mixed',
+      minGapMinutes: 120,
+    });
+    expect(savedInput.mode).toBe('rollover');
+    expect(savedInput.bonusBalance).toBe(100);
+    expect(savedInput.rolloverRemaining).toBe(500);
+
+    const savedPlan: SavedMultiplePlan = {
+      ...savedInput,
+      id: 'saved_roll_1',
+      createdAt: 1000,
+      updatedAt: 1000,
+    };
+    const ev0 = evaluateSavedMultiplePlan(savedPlan);
+    expect(ev0.rollover).toBeDefined();
+    expect(ev0.rating).toBeCloseTo(top.rating, 2);
+    expect(ev0.projectedProfit).toBeCloseTo(top.guaranteedProfit, 2);
+    expect(ev0.ratingDelta).toBeCloseTo(0, 2);
+
+    // Advance step 1 as won_bookie and settle step 2 as lost_bookie -> realized profit matches projection
+    const settledPlan: SavedMultiplePlan = {
+      ...savedPlan,
+      status: 'completed',
+      legs: savedPlan.legs.map((l, idx) =>
+        idx === 0
+          ? { ...l, status: 'won_bookie', lockedLayStake: top.legs[0].layStake }
+          : { ...l, status: 'lost_bookie', lockedLayStake: top.legs[1].layStake }
+      ),
+    };
+    const evSettled = evaluateSavedMultiplePlan(settledPlan);
+    expect(evSettled.settledOutcome).toBe('lost_at_leg');
+    expect(evSettled.projectedProfit).toBeCloseTo(top.guaranteedProfit, 2);
   });
 });

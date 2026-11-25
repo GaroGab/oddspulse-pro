@@ -2,20 +2,31 @@ import React from 'react';
 import type { SourceId } from '../../shared/types';
 
 import logo888Sport from '../assets/bookmakers/888sport_it.png';
+import logoBet365 from '../assets/bookmakers/bet365_it.png';
 import logoBetfairExchange from '../assets/bookmakers/betfair_exchange.png';
 import logoBetfairSportsbook from '../assets/bookmakers/betfair_sportsbook.png';
 import logoBetflagExchange from '../assets/bookmakers/betflag_exchange.png';
 import logoBetflagIt from '../assets/bookmakers/betflag_it.png';
+import logoBetsson from '../assets/bookmakers/betsson_it.png';
+import logoDaznbet from '../assets/bookmakers/daznbet_it.png';
+import logoDomusbet from '../assets/bookmakers/domusbet_it.png';
 import logoEurobet from '../assets/bookmakers/eurobet_it.png';
+import logoGiocodigitale from '../assets/bookmakers/giocodigitale_it.png';
 import logoGoldbet from '../assets/bookmakers/goldbet_it.png';
 import logoLeovegas from '../assets/bookmakers/leovegas_it.png';
+import logoLottomatica from '../assets/bookmakers/lottomatica_it.png';
+import logoNetbet from '../assets/bookmakers/netbet_it.png';
 import logoPaf from '../assets/bookmakers/paf.png';
 import logoPinnacle from '../assets/bookmakers/pinnacle.png';
+import logoPlanetwin365 from '../assets/bookmakers/planetwin365_it.png';
+import logoPokerstars from '../assets/bookmakers/pokerstars_it.png';
 import logoSisal from '../assets/bookmakers/sisal_it.png';
 import logoSmarkets from '../assets/bookmakers/smarkets_exchange.png';
 import logoSnai from '../assets/bookmakers/snai_it.png';
+import logoStanleybet from '../assets/bookmakers/stanleybet_it.png';
 import logoTheOddsApi from '../assets/bookmakers/the_odds_api.png';
 import logoUnibet from '../assets/bookmakers/unibet.png';
+import logoWilliamhill from '../assets/bookmakers/williamhill_it.png';
 
 const OFFICIAL_LOGOS: Record<SourceId, string> = {
   betfair_exchange: logoBetfairExchange,
@@ -27,6 +38,17 @@ const OFFICIAL_LOGOS: Record<SourceId, string> = {
   snai_it: logoSnai,
   eurobet_it: logoEurobet,
   goldbet_it: logoGoldbet,
+  lottomatica_it: logoLottomatica,
+  planetwin365_it: logoPlanetwin365,
+  bet365_it: logoBet365,
+  betsson_it: logoBetsson,
+  domusbet_it: logoDomusbet,
+  daznbet_it: logoDaznbet,
+  williamhill_it: logoWilliamhill,
+  giocodigitale_it: logoGiocodigitale,
+  pokerstars_it: logoPokerstars,
+  netbet_it: logoNetbet,
+  stanleybet_it: logoStanleybet,
   '888sport_it': logo888Sport,
   leovegas_it: logoLeovegas,
   unibet: logoUnibet,

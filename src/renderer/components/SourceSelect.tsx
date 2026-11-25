@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertCircle, AlertTriangle, Check, ChevronDown, Globe, X } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Check, ChevronDown, Globe, Search, X } from 'lucide-react';
 import { formatFriendlyNetworkError } from '../../shared/networkHealth';
 import {
   SOURCE_CATALOG,
@@ -145,6 +145,8 @@ interface SourceSelectProps {
   options: SourceOption[];
   allLabel: string;
   disabled?: boolean;
+  searchable?: boolean;
+  searchPlaceholder?: string;
   minMenuWidth?: number;
   onChange: (value: string) => void;
   'data-testid'?: string;
@@ -159,17 +161,32 @@ export const SourceSelect: React.FC<SourceSelectProps> = ({
   options,
   allLabel,
   disabled = false,
+  searchable = true,
+  searchPlaceholder = 'Cerca per nome...',
   minMenuWidth = 210,
   onChange,
   'data-testid': dataTestId,
 }) => {
-  const { open, setOpen, coords, triggerRef, menuRef } = useDropdownPortal(minMenuWidth);
+  const { open, setOpen, coords, triggerRef, menuRef } = useDropdownPortal(minMenuWidth, 320);
   const selected = options.find((o) => o.id === value);
   const [hoveredDisabled, setHoveredDisabled] = useState<HoveredDisabledTooltip | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
-    if (!open) setHoveredDisabled(null);
+    if (!open) {
+      setHoveredDisabled(null);
+      setSearchQuery('');
+    }
   }, [open]);
+
+  const filteredOptions = useMemo(() => {
+    if (!searchable) return options;
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter(
+      (o) => o.name.toLowerCase().includes(q) || o.id.toLowerCase().includes(q)
+    );
+  }, [searchable, options, searchQuery]);
 
   return (
     <div ref={triggerRef} className="relative mt-1">
@@ -225,83 +242,118 @@ export const SourceSelect: React.FC<SourceSelectProps> = ({
                   maxHeight: coords.maxHeight,
                   transformOrigin: coords.openUpward ? 'bottom center' : 'top center',
                 }}
-                className="z-[999] overflow-y-auto rounded-xl border border-brand-400/35 bg-[var(--bg-modal-solid)] p-1 shadow-[0_18px_48px_rgba(0,0,0,0.9),0_0_24px_-10px_rgb(var(--brand-400)/0.28)]"
+                className="z-[999] flex flex-col overflow-hidden rounded-xl border border-brand-400/35 bg-[var(--bg-modal-solid)] shadow-[0_18px_48px_rgba(0,0,0,0.9),0_0_24px_-10px_rgb(var(--brand-400)/0.28)]"
               >
                 {/* "All" option */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    onChange('ALL');
-                    setOpen(false);
-                  }}
-                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
-                    value === 'ALL'
-                      ? 'bg-brand-500/20 font-semibold text-brand-200'
-                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
-                  }`}
-                >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <Globe className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                    <span className="truncate">{allLabel}</span>
-                  </span>
-                  {value === 'ALL' && <Check className="h-3.5 w-3.5 shrink-0 text-brand-300" />}
-                </button>
+                <div className="border-b border-slate-800/80 p-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onChange('ALL');
+                      setOpen(false);
+                    }}
+                    className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
+                      value === 'ALL'
+                        ? 'bg-brand-500/20 font-semibold text-brand-200'
+                        : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                    }`}
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <Globe className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                      <span className="truncate">{allLabel}</span>
+                    </span>
+                    {value === 'ALL' && <Check className="h-3.5 w-3.5 shrink-0 text-brand-300" />}
+                  </button>
+                </div>
 
-                <div className="my-1 h-px bg-slate-800/80" />
-
-                {options.map((opt) => {
-                  const isSelected = value === opt.id && !opt.disabled;
-                  const isOptDisabled = Boolean(opt.disabled);
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      aria-disabled={isOptDisabled || undefined}
-                      data-disabled={isOptDisabled ? 'true' : undefined}
-                      data-testid={dataTestId ? `${dataTestId}-opt-${opt.id}` : undefined}
-                      onClick={() => {
-                        if (isOptDisabled) return;
-                        onChange(opt.id);
-                        setOpen(false);
-                      }}
-                      onMouseEnter={(e) => {
-                        if (!isOptDisabled) return;
-                        setHoveredDisabled({
-                          name: opt.name,
-                          reason: opt.disabledReason || 'Errore nel recupero delle quote',
-                          rect: e.currentTarget.getBoundingClientRect(),
-                        });
-                      }}
-                      onMouseLeave={() => {
-                        if (isOptDisabled) setHoveredDisabled(null);
-                      }}
-                      className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
-                        isOptDisabled
-                          ? 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
-                          : isSelected
-                          ? 'bg-brand-500/20 font-semibold text-brand-200'
-                          : 'text-slate-200 hover:bg-slate-800/80 hover:text-white'
-                      }`}
-                    >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <BookmakerIcon
-                          sourceId={opt.id}
-                          size={22}
-                          className={`rounded-[5px] ${isOptDisabled ? 'grayscale opacity-75' : ''}`}
-                        />
-                        <span className="truncate">{opt.name}</span>
-                      </span>
-                      {isOptDisabled ? (
-                        <span className="inline-flex shrink-0 items-center gap-1 rounded border border-rose-500/35 bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-300">
-                          <AlertCircle className="h-2.5 w-2.5" />
-                          ERRORE
-                        </span>
-                      ) : (
-                        isSelected && <Check className="h-3.5 w-3.5 shrink-0 text-brand-300" />
+                {/* Optional Search Input */}
+                {searchable && (
+                  <div className="border-b border-slate-800/80 px-2 py-1.5">
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-500" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder={searchPlaceholder}
+                        data-testid={dataTestId ? `${dataTestId}-search` : undefined}
+                        className="w-full rounded-lg border border-slate-800 bg-slate-950 py-1 pl-6 pr-6 text-[11px] text-white placeholder-slate-500 focus:border-brand-400 focus:outline-none"
+                      />
+                      {searchQuery && (
+                        <button
+                          type="button"
+                          aria-label="Azzera ricerca"
+                          onClick={() => setSearchQuery('')}
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
                       )}
-                    </button>
-                  );
-                })}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
+                  {filteredOptions.length === 0 ? (
+                    <div className="px-2 py-3 text-center text-[11px] text-slate-500">
+                      Nessuna corrispondenza
+                    </div>
+                  ) : (
+                    filteredOptions.map((opt) => {
+                      const isSelected = value === opt.id && !opt.disabled;
+                      const isOptDisabled = Boolean(opt.disabled);
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          aria-disabled={isOptDisabled || undefined}
+                          data-disabled={isOptDisabled ? 'true' : undefined}
+                          data-testid={dataTestId ? `${dataTestId}-opt-${opt.id}` : undefined}
+                          onClick={() => {
+                            if (isOptDisabled) return;
+                            onChange(opt.id);
+                            setOpen(false);
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!isOptDisabled) return;
+                            setHoveredDisabled({
+                              name: opt.name,
+                              reason: opt.disabledReason || 'Errore nel recupero delle quote',
+                              rect: e.currentTarget.getBoundingClientRect(),
+                            });
+                          }}
+                          onMouseLeave={() => {
+                            if (isOptDisabled) setHoveredDisabled(null);
+                          }}
+                          className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
+                            isOptDisabled
+                              ? 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
+                              : isSelected
+                              ? 'bg-brand-500/20 font-semibold text-brand-200'
+                              : 'text-slate-200 hover:bg-slate-800/80 hover:text-white'
+                          }`}
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <BookmakerIcon
+                              sourceId={opt.id}
+                              size={22}
+                              className={`rounded-[5px] ${isOptDisabled ? 'grayscale opacity-75' : ''}`}
+                            />
+                            <span className="truncate">{opt.name}</span>
+                          </span>
+                          {isOptDisabled ? (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-rose-500/35 bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-300">
+                              <AlertCircle className="h-2.5 w-2.5" />
+                              ERRORE
+                            </span>
+                          ) : (
+                            isSelected && <Check className="h-3.5 w-3.5 shrink-0 text-brand-300" />
+                          )}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
               </motion.div>
             )}
           </AnimatePresence>,
@@ -317,6 +369,8 @@ interface SourceMultiSelectProps {
   options: SourceOption[];
   allLabel: string;
   disabled?: boolean;
+  searchable?: boolean;
+  searchPlaceholder?: string;
   minMenuWidth?: number;
   onChange: (values: string[]) => void;
   'data-testid'?: string;
@@ -324,23 +378,38 @@ interface SourceMultiSelectProps {
 
 /**
  * Multi-select source dropdown (Bookmaker / Exchange) with stacked icons in trigger,
- * checkboxes, quick "Tutti" / "Azzera" / "Fatto" actions, and animated portal positioning.
+ * searchable list, checkboxes, quick "Tutti" / "Azzera" / "Fatto" actions, and animated portal positioning.
  */
 export const SourceMultiSelect: React.FC<SourceMultiSelectProps> = ({
   values,
   options,
   allLabel,
   disabled = false,
+  searchable = true,
+  searchPlaceholder = 'Cerca per nome...',
   minMenuWidth = 228,
   onChange,
   'data-testid': dataTestId,
 }) => {
-  const { open, setOpen, coords, triggerRef, menuRef } = useDropdownPortal(minMenuWidth, 310);
+  const { open, setOpen, coords, triggerRef, menuRef } = useDropdownPortal(minMenuWidth, 340);
   const [hoveredDisabled, setHoveredDisabled] = useState<HoveredDisabledTooltip | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
-    if (!open) setHoveredDisabled(null);
+    if (!open) {
+      setHoveredDisabled(null);
+      setSearchQuery('');
+    }
   }, [open]);
+
+  const filteredOptions = useMemo(() => {
+    if (!searchable) return options;
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter(
+      (o) => o.name.toLowerCase().includes(q) || o.id.toLowerCase().includes(q)
+    );
+  }, [searchable, options, searchQuery]);
 
   const selectedSet = useMemo(() => new Set(values), [values]);
   const selectedOptions = useMemo(
@@ -499,72 +568,105 @@ export const SourceMultiSelect: React.FC<SourceMultiSelectProps> = ({
                   )}
                 </div>
 
+                {/* Optional Search Input */}
+                {searchable && (
+                  <div className="border-b border-slate-800/80 px-2 py-1.5">
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-500" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder={searchPlaceholder}
+                        data-testid={dataTestId ? `${dataTestId}-search` : undefined}
+                        className="w-full rounded-lg border border-slate-800 bg-slate-950 py-1 pl-6 pr-6 text-[11px] text-white placeholder-slate-500 focus:border-brand-400 focus:outline-none"
+                      />
+                      {searchQuery && (
+                        <button
+                          type="button"
+                          aria-label="Azzera ricerca"
+                          onClick={() => setSearchQuery('')}
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* Checkbox Options List */}
                 <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
-                  {options.map((opt) => {
-                    const isSelected = selectedSet.has(opt.id) && !opt.disabled;
-                    const isOptDisabled = Boolean(opt.disabled);
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        aria-disabled={isOptDisabled || undefined}
-                        data-disabled={isOptDisabled ? 'true' : undefined}
-                        data-testid={dataTestId ? `${dataTestId}-opt-${opt.id}` : undefined}
-                        onClick={() => {
-                          if (isOptDisabled) return;
-                          toggleId(opt.id);
-                        }}
-                        onMouseEnter={(e) => {
-                          if (!isOptDisabled) return;
-                          setHoveredDisabled({
-                            name: opt.name,
-                            reason: opt.disabledReason || 'Errore nel recupero delle quote',
-                            rect: e.currentTarget.getBoundingClientRect(),
-                          });
-                        }}
-                        onMouseLeave={() => {
-                          if (isOptDisabled) setHoveredDisabled(null);
-                        }}
-                        className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition ${
-                          isOptDisabled
-                            ? 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
-                            : isSelected
-                            ? 'bg-brand-500/15 font-semibold text-brand-100'
-                            : 'text-slate-200 hover:bg-slate-800/80 hover:text-white'
-                        }`}
-                      >
-                        <span className="flex min-w-0 items-center gap-2">
-                          <span
-                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
-                              isOptDisabled
-                                ? 'border-rose-500/40 bg-rose-950/60 text-rose-400'
-                                : isSelected
-                                ? 'border-brand-300 bg-brand-400 text-slate-950'
-                                : 'border-slate-700 bg-slate-900/90 text-transparent'
-                            }`}
-                          >
-                            {isOptDisabled ? (
-                              <AlertCircle className="h-3 w-3" />
-                            ) : (
-                              <Check className="h-3 w-3 stroke-[3]" />
-                            )}
+                  {filteredOptions.length === 0 ? (
+                    <div className="px-2 py-3 text-center text-[11px] text-slate-500">
+                      Nessuna corrispondenza
+                    </div>
+                  ) : (
+                    filteredOptions.map((opt) => {
+                      const isSelected = selectedSet.has(opt.id) && !opt.disabled;
+                      const isOptDisabled = Boolean(opt.disabled);
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          aria-disabled={isOptDisabled || undefined}
+                          data-disabled={isOptDisabled ? 'true' : undefined}
+                          data-testid={dataTestId ? `${dataTestId}-opt-${opt.id}` : undefined}
+                          onClick={() => {
+                            if (isOptDisabled) return;
+                            toggleId(opt.id);
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!isOptDisabled) return;
+                            setHoveredDisabled({
+                              name: opt.name,
+                              reason: opt.disabledReason || 'Errore nel recupero delle quote',
+                              rect: e.currentTarget.getBoundingClientRect(),
+                            });
+                          }}
+                          onMouseLeave={() => {
+                            if (isOptDisabled) setHoveredDisabled(null);
+                          }}
+                          className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition ${
+                            isOptDisabled
+                              ? 'cursor-not-allowed bg-rose-950/15 text-slate-500 opacity-55 hover:bg-rose-950/25'
+                              : isSelected
+                              ? 'bg-brand-500/15 font-semibold text-brand-100'
+                              : 'text-slate-200 hover:bg-slate-800/80 hover:text-white'
+                          }`}
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span
+                              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
+                                isOptDisabled
+                                  ? 'border-rose-500/40 bg-rose-950/60 text-rose-400'
+                                  : isSelected
+                                  ? 'border-brand-300 bg-brand-400 text-slate-950'
+                                  : 'border-slate-700 bg-slate-900/90 text-transparent'
+                              }`}
+                            >
+                              {isOptDisabled ? (
+                                <AlertCircle className="h-3 w-3" />
+                              ) : (
+                                <Check className="h-3 w-3 stroke-[3]" />
+                              )}
+                            </span>
+                            <BookmakerIcon
+                              sourceId={opt.id}
+                              size={22}
+                              className={`rounded-[5px] ${isOptDisabled ? 'grayscale opacity-75' : ''}`}
+                            />
+                            <span className="truncate">{opt.name}</span>
                           </span>
-                          <BookmakerIcon
-                            sourceId={opt.id}
-                            size={22}
-                            className={`rounded-[5px] ${isOptDisabled ? 'grayscale opacity-75' : ''}`}
-                          />
-                          <span className="truncate">{opt.name}</span>
-                        </span>
-                        {isOptDisabled && (
-                          <span className="shrink-0 rounded border border-rose-500/35 bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-300">
-                            ERRORE
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
+                          {isOptDisabled && (
+                            <span className="shrink-0 rounded border border-rose-500/35 bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-rose-300">
+                              ERRORE
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })
+                  )}
                 </div>
 
                 {/* Compact Footer when selections are active */}

@@ -1,11 +1,16 @@
+import { matchesDateRange, type DateRangeValue } from './dateRange';
 import type {
   BetMode,
   DutcherRow,
+  MarketType,
   MultioddsPlan,
   MultioddsStep,
   OddsmatcherRow,
+  RolloverCalcDetails,
+  RolloverWalletRule,
   SingleCalcInput,
   SingleCalcResult,
+  SportKey,
 } from './types';
 
 export function round2(n: number): number {
@@ -16,9 +21,344 @@ export function round3(n: number): number {
   return Math.round((n + Number.EPSILON) * 1000) / 1000;
 }
 
+export interface AutoRolloverRatingInput {
+  rows?: OddsmatcherRow[];
+  minBackOdds?: number;
+  minLiquidity?: number;
+  currentBackOdds?: number;
+  currentLayOdds?: number;
+  currentCommission?: number;
+}
+
+export interface AutoRolloverRatingResult {
+  estimatedRating: number;
+  source: 'oddsmatcher' | 'current_quote' | 'default';
+  sampleCount: number;
+}
+
+function clampAutoRating(val: number): number {
+  if (!Number.isFinite(val)) return 96;
+  return round2(Math.max(70, Math.min(99.8, val)));
+}
+
+function median(sortedAsc: number[]): number {
+  if (sortedAsc.length === 0) return 96;
+  const mid = Math.floor(sortedAsc.length / 2);
+  return sortedAsc.length % 2 === 1
+    ? sortedAsc[mid]
+    : (sortedAsc[mid - 1] + sortedAsc[mid]) / 2;
+}
+
+/**
+ * Estimates the expected future rollover rating (%) automatically from live Oddsmatcher rows
+ * (filtering realistic liquid non-surebet matches >= minBackOdds) with clean fallback to the
+ * active quote's normal rating or 96% default.
+ */
+export function computeAutoRolloverRating(
+  input: AutoRolloverRatingInput
+): AutoRolloverRatingResult {
+  const {
+    rows = [],
+    minBackOdds = 1.5,
+    minLiquidity = 15,
+    currentBackOdds,
+    currentLayOdds,
+    currentCommission = 0.045,
+  } = input;
+
+  const pickRatings = (oddsFloor: number, liqFloor: number): number[] => {
+    const ratings: number[] = [];
+    for (const r of rows) {
+      if (r.backOdds < oddsFloor) continue;
+      if (r.liquidity < liqFloor) continue;
+      // Exclude surebet spikes (>=100.5%) so future rollover cost isn't artificially optimistic
+      if (r.ratingNormal > 65 && r.ratingNormal < 100.5) {
+        ratings.push(Math.min(99.8, r.ratingNormal));
+      }
+    }
+    ratings.sort((a, b) => b - a);
+    return ratings;
+  };
+
+  let candidates = pickRatings(minBackOdds, minLiquidity);
+  if (candidates.length < 5) {
+    candidates = pickRatings(1.2, 5);
+  }
+
+  if (candidates.length >= 3) {
+    const topSlice = candidates.slice(0, 20).sort((a, b) => a - b);
+    return {
+      estimatedRating: clampAutoRating(median(topSlice)),
+      source: 'oddsmatcher',
+      sampleCount: topSlice.length,
+    };
+  }
+
+  if (
+    currentBackOdds !== undefined &&
+    currentLayOdds !== undefined &&
+    currentBackOdds > 1 &&
+    currentLayOdds > 1 &&
+    currentLayOdds > currentCommission
+  ) {
+    const qRating =
+      ((currentBackOdds * (1 - Math.max(0, currentCommission))) /
+        (currentLayOdds - Math.max(0, currentCommission))) *
+      100;
+    return {
+      estimatedRating: clampAutoRating(qRating),
+      source: 'current_quote',
+      sampleCount: 1,
+    };
+  }
+
+  return {
+    estimatedRating: 96,
+    source: 'default',
+    sampleCount: 0,
+  };
+}
+
+/**
+ * Estimates future rollover rating (%) for Punta-Punta from live Dutcher rows
+ * or the currently entered bookmaker odds.
+ */
+export function computeAutoPuntaPuntaRolloverRating(params: {
+  dutcherRows?: DutcherRow[];
+  currentOdds?: number[];
+}): AutoRolloverRatingResult {
+  const { dutcherRows = [], currentOdds = [] } = params;
+  const candidates = dutcherRows
+    .map((d) => d.rating)
+    .filter((r) => Number.isFinite(r) && r > 65 && r < 100.5)
+    .sort((a, b) => b - a);
+
+  if (candidates.length >= 3) {
+    const topSlice = candidates.slice(0, 15).sort((a, b) => a - b);
+    return {
+      estimatedRating: clampAutoRating(median(topSlice)),
+      source: 'oddsmatcher',
+      sampleCount: topSlice.length,
+    };
+  }
+
+  if (currentOdds.length >= 2 && currentOdds.every((o) => o > 1)) {
+    const invSum = currentOdds.reduce((acc, o) => acc + 1 / o, 0);
+    if (invSum > 0) {
+      return {
+        estimatedRating: clampAutoRating((1 / invSum) * 100),
+        source: 'current_quote',
+        sampleCount: 1,
+      };
+    }
+  }
+
+  return {
+    estimatedRating: 95,
+    source: 'default',
+    sampleCount: 0,
+  };
+}
+
+interface RolloverInternalContext {
+  stake: number;
+  realBalance: number;
+  bonusBalance: number;
+  extraRealUsed: number;
+  effectiveReal: number;
+  totalBalanceBefore: number;
+  rolloverBefore: number;
+  rolloverAfter: number;
+  estimatedRating: number;
+  walletRule: RolloverWalletRule;
+  bookieBalanceIfWin: number;
+  bookieBalanceIfLose: number;
+  futureRolloverCostIfWin: number;
+  futureRolloverCostIfLose: number;
+  clearsRolloverOnLose: boolean;
+  completesRolloverOnThisBet: boolean;
+  baselineExpectedValue: number;
+}
+
+function computeRolloverContext(params: {
+  stake: number;
+  backOdds: number;
+  realBalance?: number;
+  bonusBalance?: number;
+  rolloverRemaining?: number;
+  estimatedRating?: number;
+  rolloverWalletRule?: RolloverWalletRule;
+}): RolloverInternalContext {
+  const stake = Math.max(0, Number.isFinite(params.stake) ? params.stake : 0);
+  const realInput = Math.max(0, Number.isFinite(params.realBalance) ? (params.realBalance ?? 0) : 0);
+  const bonusBalance = Math.max(
+    0,
+    Number.isFinite(params.bonusBalance) ? (params.bonusBalance ?? 0) : 0
+  );
+  const rolloverBefore = Math.max(
+    0,
+    Number.isFinite(params.rolloverRemaining) ? (params.rolloverRemaining ?? 0) : 0
+  );
+  const estimatedRating = Math.max(
+    0,
+    Number.isFinite(params.estimatedRating) ? (params.estimatedRating ?? 96) : 96
+  );
+  const walletRule: RolloverWalletRule =
+    params.rolloverWalletRule === 'bonus_first' ? 'bonus_first' : 'mixed';
+
+  const rawTotal = realInput + bonusBalance;
+  const extraRealUsed = Math.max(0, stake - rawTotal);
+  const effectiveReal = realInput + extraRealUsed;
+  const totalBalanceBefore = rawTotal + extraRealUsed;
+
+  const rolloverAfter = Math.max(0, rolloverBefore - stake);
+  const completesRolloverOnThisBet = rolloverAfter <= 1e-9;
+
+  const bookieBalanceIfWin = totalBalanceBefore + stake * (params.backOdds - 1);
+  const bookieBalanceIfLose = Math.max(0, totalBalanceBefore - stake);
+
+  const futureFrictionRate = 1 - estimatedRating / 100;
+  const futureRolloverCostIfWin = completesRolloverOnThisBet
+    ? 0
+    : rolloverAfter * futureFrictionRate;
+
+  // Losing on bookmaker clears remaining rollover immediately if bookie balance hits 0
+  // (bust-out) or, in bonus_first mode, when the entire bonus wallet was staked & lost.
+  const bonusExhaustedOnLose =
+    walletRule === 'bonus_first' && bonusBalance > 0 && stake >= bonusBalance - 1e-9;
+  const clearsRolloverOnLose =
+    completesRolloverOnThisBet || bookieBalanceIfLose <= 1e-9 || bonusExhaustedOnLose;
+
+  const futureRolloverCostIfLose = clearsRolloverOnLose
+    ? 0
+    : rolloverAfter * futureFrictionRate;
+
+  const baselineExpectedValue = bonusBalance - rolloverBefore * futureFrictionRate;
+
+  return {
+    stake,
+    realBalance: realInput,
+    bonusBalance,
+    extraRealUsed,
+    effectiveReal,
+    totalBalanceBefore,
+    rolloverBefore,
+    rolloverAfter,
+    estimatedRating,
+    walletRule,
+    bookieBalanceIfWin,
+    bookieBalanceIfLose,
+    futureRolloverCostIfWin,
+    futureRolloverCostIfLose,
+    clearsRolloverOnLose,
+    completesRolloverOnThisBet,
+    baselineExpectedValue,
+  };
+}
+
+export interface MultioddsModeParams {
+  winPayout: number;
+  initialOutlay: number;
+  effectiveRefund: number;
+  rolloverCtx: RolloverInternalContext | null;
+}
+
+/**
+ * Computes mode-specific sequential multipla payoff boundary constants
+ * (winPayout, initialOutlay, effectiveRefund) shared by Multiodds & Saved Multiples.
+ */
+export function computeMultioddsModeParams(params: {
+  mode: BetMode;
+  stake: number;
+  combinedBackOdds: number;
+  boostedBackOdds: number;
+  bonusBoostPct: number;
+  refundAmount?: number;
+  refundRetention?: number;
+  realBalance?: number;
+  bonusBalance?: number;
+  rolloverRemaining?: number;
+  estimatedRating?: number;
+  rolloverWalletRule?: RolloverWalletRule;
+}): MultioddsModeParams {
+  const {
+    mode,
+    stake,
+    combinedBackOdds,
+    boostedBackOdds,
+    bonusBoostPct,
+    refundAmount = 0,
+    refundRetention = 70,
+    realBalance,
+    bonusBalance,
+    rolloverRemaining,
+    estimatedRating,
+    rolloverWalletRule,
+  } = params;
+  const boostFactor = 1 + Math.max(0, bonusBoostPct) / 100;
+
+  if (mode === 'rollover') {
+    const rolloverCtx = computeRolloverContext({
+      stake,
+      backOdds: boostedBackOdds,
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      estimatedRating,
+      rolloverWalletRule,
+    });
+    return {
+      winPayout: stake * boostedBackOdds - rolloverCtx.futureRolloverCostIfWin,
+      initialOutlay: stake - rolloverCtx.bonusBalance,
+      effectiveRefund: -rolloverCtx.futureRolloverCostIfLose,
+      rolloverCtx,
+    };
+  }
+
+  const winPayout =
+    mode === 'snr'
+      ? stake * (combinedBackOdds - 1) * boostFactor
+      : stake * boostedBackOdds;
+  const initialOutlay = mode === 'normal' || mode === 'rf' ? stake : 0;
+  const effectiveRefund =
+    mode === 'rf' ? Math.max(0, refundAmount) * (Math.max(0, refundRetention) / 100) : 0;
+
+  return {
+    winPayout,
+    initialOutlay,
+    effectiveRefund,
+    rolloverCtx: null,
+  };
+}
+
+export function computeMultioddsRating(params: {
+  mode: BetMode;
+  stake: number;
+  refundAmount: number;
+  guaranteedProfit: number;
+  bonusBalance?: number;
+}): number {
+  const { mode, stake, refundAmount, guaranteedProfit, bonusBalance = 0 } = params;
+  if (mode === 'normal') {
+    return stake > 0 ? round2((1 + guaranteedProfit / stake) * 100) : 0;
+  }
+  if (mode === 'rollover') {
+    if (bonusBalance > 0) {
+      return round2((guaranteedProfit / bonusBalance) * 100);
+    }
+    return stake > 0 ? round2((1 + guaranteedProfit / stake) * 100) : 0;
+  }
+  if (mode === 'snr' || mode === 'sr') {
+    return stake > 0 ? round2((guaranteedProfit / stake) * 100) : 0;
+  }
+  const base = refundAmount > 0 ? refundAmount : stake;
+  return base > 0 ? round2((guaranteedProfit / base) * 100) : 0;
+}
+
 /**
  * Computes exact Matched Betting lay stake, liability, payoffs, and rating
- * for Normale, SNR (Freebet), SR (Bonus Reale), and RF (Rimborso/Cashback),
+ * for Normale, SNR (Freebet), SR (Bonus Reale), RF (Rimborso/Cashback),
+ * and Rollover (Real + Bonus + Remaining Rollover + Estimated Rating),
  * with optional Underlay (-1) / Balanced (0) / Overlay (+1) shift.
  */
 export function calculateSingleMatch(input: SingleCalcInput): SingleCalcResult {
@@ -30,6 +370,11 @@ export function calculateSingleMatch(input: SingleCalcInput): SingleCalcResult {
     commission,
     refundAmount = 0,
     refundRetention = 70,
+    realBalance = 0,
+    bonusBalance = 0,
+    rolloverRemaining = 0,
+    estimatedRating = 96,
+    rolloverWalletRule = 'mixed',
     balanceBias = 0,
   } = input;
 
@@ -50,6 +395,18 @@ export function calculateSingleMatch(input: SingleCalcInput): SingleCalcResult {
 
   const denom = layOdds - commission;
   const effectiveRefund = mode === 'rf' ? Math.max(0, refundAmount) * (Math.max(0, refundRetention) / 100) : 0;
+  const rolloverCtx =
+    mode === 'rollover'
+      ? computeRolloverContext({
+          stake,
+          backOdds,
+          realBalance,
+          bonusBalance,
+          rolloverRemaining,
+          estimatedRating,
+          rolloverWalletRule,
+        })
+      : null;
 
   let balancedLayStake = 0;
   let underlayStake = 0;
@@ -69,11 +426,55 @@ export function calculateSingleMatch(input: SingleCalcInput): SingleCalcResult {
     balancedLayStake = (stake * backOdds) / denom;
     underlayStake = balancedLayStake * 0.85;
     overlayStake = balancedLayStake * 1.15;
-  } else {
+  } else if (mode === 'rf') {
     // RF (Rimborso / Risk-Free)
     balancedLayStake = Math.max(0, (stake * backOdds - effectiveRefund) / denom);
     underlayStake = Math.max(0, Math.min(balancedLayStake, (stake * (backOdds - 1)) / (layOdds - 1)));
     overlayStake = Math.max(balancedLayStake, Math.max(0, (stake - effectiveRefund) / (1 - commission)));
+  } else if (rolloverCtx) {
+    // Rollover: balance final campaign profit net of future rollover cost across both outcomes
+    const costDelta =
+      rolloverCtx.futureRolloverCostIfWin - rolloverCtx.futureRolloverCostIfLose;
+    balancedLayStake = Math.max(0, (stake * backOdds - costDelta) / denom);
+
+    const balLiab = balancedLayStake * (layOdds - 1);
+    const balProfit =
+      rolloverCtx.bonusBalance +
+      stake * (backOdds - 1) -
+      balLiab -
+      rolloverCtx.futureRolloverCostIfWin;
+
+    const zeroBookieLay = Math.max(
+      0,
+      (rolloverCtx.bonusBalance +
+        stake * (backOdds - 1) -
+        rolloverCtx.futureRolloverCostIfWin) /
+        Math.max(0.01, layOdds - 1)
+    );
+    const zeroExchLay = Math.max(
+      0,
+      (stake - rolloverCtx.bonusBalance + rolloverCtx.futureRolloverCostIfLose) /
+        Math.max(0.01, 1 - commission)
+    );
+
+    if (balProfit >= 0) {
+      if (rolloverCtx.effectiveReal > 0) {
+        underlayStake = Math.min(
+          balancedLayStake,
+          Math.max(balancedLayStake * 0.5, zeroExchLay)
+        );
+        overlayStake = Math.max(
+          balancedLayStake,
+          Math.min(balancedLayStake * 1.35, zeroBookieLay)
+        );
+      } else {
+        underlayStake = balancedLayStake * 0.85;
+        overlayStake = balancedLayStake * 1.15;
+      }
+    } else {
+      underlayStake = Math.min(balancedLayStake, zeroBookieLay);
+      overlayStake = Math.max(balancedLayStake, zeroExchLay);
+    }
   }
 
   const clampedBias = Math.max(-1, Math.min(1, balanceBias));
@@ -99,28 +500,70 @@ export function calculateSingleMatch(input: SingleCalcInput): SingleCalcResult {
   } else if (mode === 'sr') {
     bookieWinProfit = stake * backOdds - liability;
     exchangeWinProfit = layStake * (1 - commission);
-  } else {
+  } else if (mode === 'rf') {
     // RF
     bookieWinProfit = stake * (backOdds - 1) - liability;
     exchangeWinProfit = layStake * (1 - commission) - stake + effectiveRefund;
+  } else if (rolloverCtx) {
+    bookieWinProfit =
+      rolloverCtx.bonusBalance +
+      stake * (backOdds - 1) -
+      liability -
+      rolloverCtx.futureRolloverCostIfWin;
+    exchangeWinProfit =
+      rolloverCtx.bonusBalance -
+      stake +
+      layStake * (1 - commission) -
+      rolloverCtx.futureRolloverCostIfLose;
   }
 
   const expectedProfit = (bookieWinProfit + exchangeWinProfit) / 2;
   const rawRating = (backOdds / layOdds) * 100;
+  const matchRating = ((backOdds * (1 - commission)) / denom) * 100;
 
   let rating = 0;
   if (mode === 'normal') {
     // Standard Italian Matched Betting rating (100 + Profit/Stake*100)
-    rating = ((backOdds * (1 - commission)) / denom) * 100;
+    rating = matchRating;
   } else if (mode === 'snr') {
     rating = (((backOdds - 1) * (1 - commission)) / denom) * 100;
   } else if (mode === 'sr') {
-    rating = ((backOdds * (1 - commission)) / denom) * 100;
-  } else {
+    rating = matchRating;
+  } else if (mode === 'rf') {
     // RF rating: profit as % of refundAmount (or stake if refundAmount=0)
     const base = refundAmount > 0 ? refundAmount : stake;
     rating = (expectedProfit / base) * 100;
+  } else if (rolloverCtx) {
+    if (rolloverCtx.bonusBalance > 0) {
+      rating = (expectedProfit / rolloverCtx.bonusBalance) * 100;
+    } else {
+      rating = (1 + expectedProfit / stake) * 100;
+    }
   }
+
+  const rolloverDetails: RolloverCalcDetails | undefined = rolloverCtx
+    ? {
+        stake: round2(rolloverCtx.stake),
+        realBalance: round2(rolloverCtx.realBalance),
+        bonusBalance: round2(rolloverCtx.bonusBalance),
+        extraRealUsed: round2(rolloverCtx.extraRealUsed),
+        totalBalanceBefore: round2(rolloverCtx.totalBalanceBefore),
+        rolloverBefore: round2(rolloverCtx.rolloverBefore),
+        rolloverAfter: round2(rolloverCtx.rolloverAfter),
+        estimatedRating: round2(rolloverCtx.estimatedRating),
+        walletRule: rolloverCtx.walletRule,
+        bookieBalanceIfWin: round2(rolloverCtx.bookieBalanceIfWin),
+        bookieBalanceIfLose: round2(rolloverCtx.bookieBalanceIfLose),
+        futureRolloverCostIfWin: round2(rolloverCtx.futureRolloverCostIfWin),
+        futureRolloverCostIfLose: round2(rolloverCtx.futureRolloverCostIfLose),
+        singleBetBookieProfit: round2(stake * (backOdds - 1) - liability),
+        singleBetExchangeProfit: round2(layStake * (1 - commission) - stake),
+        matchRating: round2(matchRating),
+        clearsRolloverOnLose: rolloverCtx.clearsRolloverOnLose,
+        completesRolloverOnThisBet: rolloverCtx.completesRolloverOnThisBet,
+        baselineExpectedValue: round2(rolloverCtx.baselineExpectedValue),
+      }
+    : undefined;
 
   return {
     layStake: round2(layStake),
@@ -133,6 +576,7 @@ export function calculateSingleMatch(input: SingleCalcInput): SingleCalcResult {
     expectedProfit: round2(expectedProfit),
     rating: round2(rating),
     rawRating: round2(rawRating),
+    ...(rolloverDetails ? { rollover: rolloverDetails } : {}),
   };
 }
 
@@ -169,6 +613,11 @@ export function calculateSequentialMultiodds(params: {
   bonusBoostPct?: number; // e.g., 5 for +5% multipla bonus on winnings
   refundAmount?: number;
   refundRetention?: number;
+  realBalance?: number;
+  bonusBalance?: number;
+  rolloverRemaining?: number;
+  estimatedRating?: number;
+  rolloverWalletRule?: RolloverWalletRule;
   minGapRequiredMinutes?: number;
 }): MultioddsPlan {
   const {
@@ -179,6 +628,11 @@ export function calculateSequentialMultiodds(params: {
     bonusBoostPct = 0,
     refundAmount = 0,
     refundRetention = 70,
+    realBalance,
+    bonusBalance,
+    rolloverRemaining,
+    estimatedRating,
+    rolloverWalletRule,
     minGapRequiredMinutes = 120,
   } = params;
 
@@ -192,19 +646,23 @@ export function calculateSequentialMultiodds(params: {
   const boostFactor = 1 + Math.max(0, bonusBoostPct) / 100;
 
   // Boost applies to net winnings on Italian bookmakers (e.g. +5% multipla bonus)
-  const boostedBackOdds =
-    mode === 'snr'
-      ? 1 + (combinedBackOdds - 1) * boostFactor
-      : 1 + (combinedBackOdds - 1) * boostFactor;
+  const boostedBackOdds = 1 + (combinedBackOdds - 1) * boostFactor;
 
-  const winPayout =
-    mode === 'snr'
-      ? stake * (combinedBackOdds - 1) * boostFactor
-      : stake * boostedBackOdds;
-
-  const initialOutlay = mode === 'normal' || mode === 'rf' ? stake : 0;
-  const effectiveRefund =
-    mode === 'rf' ? Math.max(0, refundAmount) * (Math.max(0, refundRetention) / 100) : 0;
+  const { winPayout, initialOutlay, effectiveRefund, rolloverCtx } =
+    computeMultioddsModeParams({
+      mode,
+      stake,
+      combinedBackOdds,
+      boostedBackOdds,
+      bonusBoostPct,
+      refundAmount,
+      refundRetention,
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      estimatedRating,
+      rolloverWalletRule,
+    });
 
   // Backward induction from leg N-1 down to 0
   const layStakes = new Array<number>(n).fill(0);
@@ -264,18 +722,45 @@ export function calculateSequentialMultiodds(params: {
     return acc * ((r.layOdds - c) / Math.max(0.01, 1 - c));
   }, 1);
 
-  let rating = 0;
-  if (mode === 'normal') {
-    rating = stake > 0 ? round2((1 + guaranteedProfit / stake) * 100) : 0;
-  } else if (mode === 'snr' || mode === 'sr') {
-    rating = stake > 0 ? round2((guaranteedProfit / stake) * 100) : 0;
-  } else {
-    const base = refundAmount > 0 ? refundAmount : stake;
-    rating = base > 0 ? round2((guaranteedProfit / base) * 100) : 0;
-  }
+  const rating = computeMultioddsRating({
+    mode,
+    stake,
+    refundAmount,
+    guaranteedProfit,
+    bonusBalance: rolloverCtx?.bonusBalance ?? 0,
+  });
 
   const minLiquidity = Math.min(...sorted.map((r) => r.liquidity));
   const safeMinGap = Number.isFinite(minGapMinutes) ? minGapMinutes : 999;
+
+  const matchRating =
+    effectiveCombinedLayOdds > 0 ? (boostedBackOdds / effectiveCombinedLayOdds) * 100 : 0;
+
+  const rolloverDetails: RolloverCalcDetails | undefined = rolloverCtx
+    ? {
+        stake: round2(rolloverCtx.stake),
+        realBalance: round2(rolloverCtx.realBalance),
+        bonusBalance: round2(rolloverCtx.bonusBalance),
+        extraRealUsed: round2(rolloverCtx.extraRealUsed),
+        totalBalanceBefore: round2(rolloverCtx.totalBalanceBefore),
+        rolloverBefore: round2(rolloverCtx.rolloverBefore),
+        rolloverAfter: round2(rolloverCtx.rolloverAfter),
+        estimatedRating: round2(rolloverCtx.estimatedRating),
+        walletRule: rolloverCtx.walletRule,
+        bookieBalanceIfWin: round2(rolloverCtx.bookieBalanceIfWin),
+        bookieBalanceIfLose: round2(rolloverCtx.bookieBalanceIfLose),
+        futureRolloverCostIfWin: round2(rolloverCtx.futureRolloverCostIfWin),
+        futureRolloverCostIfLose: round2(rolloverCtx.futureRolloverCostIfLose),
+        singleBetBookieProfit: round2(stake * (boostedBackOdds - 1) - cumLiab),
+        singleBetExchangeProfit: round2(
+          (layStakes[0] ?? 0) * (1 - (commissions[0] ?? 0)) - stake
+        ),
+        matchRating: round2(matchRating),
+        clearsRolloverOnLose: rolloverCtx.clearsRolloverOnLose,
+        completesRolloverOnThisBet: rolloverCtx.completesRolloverOnThisBet,
+        baselineExpectedValue: round2(rolloverCtx.baselineExpectedValue),
+      }
+    : undefined;
 
   return {
     id: sorted.map((r) => r.id).join('__'),
@@ -295,6 +780,7 @@ export function calculateSequentialMultiodds(params: {
     minLiquidity: round2(minLiquidity),
     minGapMinutes: safeMinGap,
     nonOverlapping: n <= 1 || safeMinGap >= minGapRequiredMinutes,
+    rollover: rolloverDetails,
   };
 }
 
@@ -304,6 +790,14 @@ export interface MultioddsSearchConfig {
   bookmakerIds?: string[]; // Optional multi-select bookmaker filter ([] = all)
   exchangeId?: string; // 'ALL' or specific exchangeId (legacy single filter)
   exchangeIds?: string[]; // Optional multi-select exchange filter ([] = all)
+  sport?: SportKey | 'ALL';
+  market?: MarketType | 'ALL';
+  leaguePredicate?: (row: OddsmatcherRow) => boolean;
+  dateRange?: DateRangeValue;
+  search?: string;
+  minRating?: number;
+  onlySurebets?: boolean;
+  noSurebets?: boolean;
   legsCount: number; // 2..5
   mode: BetMode;
   stake: number;
@@ -316,6 +810,11 @@ export interface MultioddsSearchConfig {
   bonusBoostPct: number;
   refundAmount: number;
   refundRetention: number;
+  realBalance?: number;
+  bonusBalance?: number;
+  rolloverRemaining?: number;
+  estimatedRating?: number;
+  rolloverWalletRule?: RolloverWalletRule;
   commissionOverride?: number;
   lockedRowIds?: string[];
   maxResults?: number;
@@ -333,6 +832,14 @@ export function findBestMultiodds(cfg: MultioddsSearchConfig): MultioddsPlan[] {
     bookmakerIds,
     exchangeId = 'ALL',
     exchangeIds,
+    sport = 'ALL',
+    market = 'ALL',
+    leaguePredicate,
+    dateRange,
+    search,
+    minRating = 0,
+    onlySurebets = false,
+    noSurebets = false,
     legsCount,
     mode,
     stake,
@@ -345,15 +852,25 @@ export function findBestMultiodds(cfg: MultioddsSearchConfig): MultioddsPlan[] {
     bonusBoostPct,
     refundAmount,
     refundRetention,
+    realBalance,
+    bonusBalance,
+    rolloverRemaining,
+    estimatedRating,
+    rolloverWalletRule,
     commissionOverride,
     lockedRowIds = [],
     maxResults = 40,
   } = cfg;
 
   const targetLegs = Math.max(2, Math.min(5, Math.floor(legsCount)));
+  const q = search?.trim().toLowerCase() ?? '';
+  const nowMs = Date.now();
 
   // Filter candidate rows
   const filtered = rows.filter((r) => {
+    if (sport !== 'ALL' && r.sport !== sport) return false;
+    if (leaguePredicate && !leaguePredicate(r)) return false;
+    if (market !== 'ALL' && r.marketType !== market) return false;
     if (bookmakerIds && bookmakerIds.length > 0) {
       if (!bookmakerIds.includes(r.bookmakerId)) return false;
     } else if (bookmakerId && bookmakerId !== 'ALL' && r.bookmakerId !== bookmakerId) {
@@ -366,6 +883,16 @@ export function findBestMultiodds(cfg: MultioddsSearchConfig): MultioddsPlan[] {
     }
     if (r.backOdds < minLegOdds || r.backOdds > maxLegOdds) return false;
     if (r.liquidity < minLiquidity) return false;
+    if (dateRange && dateRange.mode !== 'all' && !matchesDateRange(r.startTime, dateRange, nowMs)) {
+      return false;
+    }
+    if (noSurebets && (r.isSurebet || quickRatings(r.backOdds, r.layOdds, r.commission).isSurebet)) {
+      return false;
+    }
+    if (q) {
+      const hay = `${r.eventName} ${r.league} ${r.selectionLabel} ${r.bookmakerName}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
     return true;
   });
 
@@ -449,8 +976,17 @@ export function findBestMultiodds(cfg: MultioddsSearchConfig): MultioddsPlan[] {
           bonusBoostPct,
           refundAmount,
           refundRetention,
+          realBalance,
+          bonusBalance,
+          rolloverRemaining,
+          estimatedRating,
+          rolloverWalletRule,
           minGapRequiredMinutes: minGapMinutes,
         });
+        if (minRating > 0 && plan.rating < minRating) return;
+        if (onlySurebets && (plan.rollover ? plan.rollover.matchRating < 100 : plan.rating < 100)) {
+          return;
+        }
         allPlans.push(plan);
         return;
       }
@@ -572,12 +1108,18 @@ export function calculateDutcher(params: {
 }
 
 export interface PuntaPuntaCalcInput {
-  mode: BetMode; // 'normal' | 'snr' | 'sr' | 'rf'
+  mode: BetMode; // 'normal' | 'snr' | 'sr' | 'rf' | 'rollover'
   stake: number; // Stake on leg 0 (or total budget when mode==='normal' && anchorMode==='total')
   odds: number[]; // length 2..4, odds[0] = primary/promo bookmaker, odds[1..k-1] = hedge bookmakers
   anchorMode?: 'leg0' | 'total'; // 'total' only applies when mode === 'normal'
   refundAmount?: number; // RF mode: bonus refunded if leg 0 loses (any leg i>=1 wins)
   refundRetention?: number; // RF mode: 0..100%
+  /** Rollover mode inputs (leg 0 = rollover bookmaker) */
+  realBalance?: number;
+  bonusBalance?: number;
+  rolloverRemaining?: number;
+  estimatedRating?: number;
+  rolloverWalletRule?: RolloverWalletRule;
   /** -1 = full underlay (favor leg 0), 0 = balanced, +1 = full overlay (favor hedge legs) */
   balanceBias?: number;
 }
@@ -590,16 +1132,17 @@ export interface PuntaPuntaCalcResult {
   balancedHedgeTotal: number; // sum(stakes[1..]) at balanceBias = 0
   underlayHedgeTotal: number; // sum(stakes[1..]) at balanceBias = -1
   overlayHedgeTotal: number; // sum(stakes[1..]) at balanceBias = +1
-  totalCashOutlay: number; // stakes[0] + hedgeTotal for normal/rf; hedgeTotal for snr/sr
+  totalCashOutlay: number; // stakes[0] + hedgeTotal for normal/rf; hedgeTotal for snr/sr; effectiveReal + hedgeTotal for rollover
   effectiveRefund: number; // refundAmount * (refundRetention/100) for rf, else 0
   guaranteedProfit: number; // average net profit across outcomes
-  rating: number; // normal: (1/invSum)*100; snr/sr: (profit/stake)*100; rf: (profit/(refundAmount||stake))*100
+  rating: number; // normal: (1/invSum)*100; snr/sr: (profit/stake)*100; rf: (profit/(refundAmount||stake))*100; rollover: (profit/bonusBalance)*100
   impliedProbSum: number; // sum(1 / odds[i])
+  rollover?: RolloverCalcDetails;
 }
 
 /**
  * Standalone Punta-Punta (Bookmaker vs Bookmaker / Dutching) calculator across
- * Normale, Freebet SNR, Bonus SR, and Rimborso RF for 2..4 outcomes,
+ * Normale, Freebet SNR, Bonus SR, Rimborso RF, and Rollover for 2..4 outcomes,
  * with optional Underlay (-1) / Balanced (0) / Overlay (+1) shift.
  */
 export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcResult {
@@ -610,6 +1153,11 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
     anchorMode = 'leg0',
     refundAmount = 0,
     refundRetention = 70,
+    realBalance = 0,
+    bonusBalance = 0,
+    rolloverRemaining = 0,
+    estimatedRating = 95,
+    rolloverWalletRule = 'mixed',
     balanceBias = 0,
   } = input;
 
@@ -745,6 +1293,129 @@ export function calculatePuntaPunta(input: PuntaPuntaCalcInput): PuntaPuntaCalcR
       guaranteedProfit,
       rating: round2((guaranteedProfit / stake) * 100),
       impliedProbSum: round3(invSum),
+    };
+  }
+
+  if (mode === 'rollover') {
+    const rolloverCtx = computeRolloverContext({
+      stake,
+      backOdds: odds[0],
+      realBalance,
+      bonusBalance,
+      rolloverRemaining,
+      estimatedRating,
+      rolloverWalletRule,
+    });
+    const costDelta =
+      rolloverCtx.futureRolloverCostIfWin - rolloverCtx.futureRolloverCostIfLose;
+    const targetHedgeReturnBal = Math.max(0, stake * odds[0] - costDelta);
+    const balancedHedge = targetHedgeReturnBal * hedgeInvSum;
+
+    const balProfit =
+      rolloverCtx.bonusBalance +
+      stake * (odds[0] - 1) -
+      balancedHedge -
+      rolloverCtx.futureRolloverCostIfWin;
+
+    const zeroP0Hedge = Math.max(
+      0,
+      rolloverCtx.bonusBalance + stake * (odds[0] - 1) - rolloverCtx.futureRolloverCostIfWin
+    );
+
+    let underlayHedge = balancedHedge;
+    let overlayHedge = balancedHedge;
+
+    if (balProfit >= 0) {
+      if (rolloverCtx.effectiveReal > 0 && hedgeInvSum < 1) {
+        const zeroExchHedge = Math.max(
+          0,
+          (stake - rolloverCtx.bonusBalance + rolloverCtx.futureRolloverCostIfLose) /
+            (1 / hedgeInvSum - 1)
+        );
+        underlayHedge = Math.min(balancedHedge, Math.max(balancedHedge * 0.5, zeroExchHedge));
+        overlayHedge = Math.max(balancedHedge, Math.min(balancedHedge * 1.35, zeroP0Hedge));
+      } else {
+        underlayHedge = balancedHedge * 0.85;
+        overlayHedge = balancedHedge * 1.15;
+      }
+    } else {
+      if (hedgeInvSum < 1) {
+        const zeroExchHedge = Math.max(
+          0,
+          (stake - rolloverCtx.bonusBalance + rolloverCtx.futureRolloverCostIfLose) /
+            (1 / hedgeInvSum - 1)
+        );
+        underlayHedge = Math.min(balancedHedge, zeroP0Hedge);
+        overlayHedge = Math.max(balancedHedge, zeroExchHedge);
+      } else {
+        underlayHedge = Math.min(balancedHedge, zeroP0Hedge);
+        overlayHedge = balancedHedge * 1.15;
+      }
+    }
+
+    const hedgeTarget = interpolateHedge(balancedHedge, underlayHedge, overlayHedge);
+    const targetHedgeReturn = hedgeTarget / hedgeInvSum;
+    const stakes = odds.map((o, i) =>
+      i === 0 ? round2(stake) : round2(targetHedgeReturn / o)
+    );
+    const hedgeTotal = round2(stakes.slice(1).reduce((a, b) => a + b, 0));
+    const totalCashOutlay = round2(rolloverCtx.effectiveReal + hedgeTotal);
+    const returns = odds.map((o, i) => round2(stakes[i] * o));
+    const profits = returns.map((r, i) =>
+      round2(
+        i === 0
+          ? rolloverCtx.bonusBalance +
+              stakes[0] * (odds[0] - 1) -
+              hedgeTotal -
+              rolloverCtx.futureRolloverCostIfWin
+          : rolloverCtx.bonusBalance -
+              stakes[0] +
+              r -
+              hedgeTotal -
+              rolloverCtx.futureRolloverCostIfLose
+      )
+    );
+    const guaranteedProfit = round2(profits.reduce((a, b) => a + b, 0) / k);
+    const matchRating = round2((1 / invSum) * 100);
+    const rating =
+      rolloverCtx.bonusBalance > 0
+        ? round2((guaranteedProfit / rolloverCtx.bonusBalance) * 100)
+        : round2((1 + guaranteedProfit / stake) * 100);
+
+    return {
+      stakes,
+      returns,
+      profits,
+      hedgeTotal,
+      balancedHedgeTotal: round2(balancedHedge),
+      underlayHedgeTotal: round2(underlayHedge),
+      overlayHedgeTotal: round2(overlayHedge),
+      totalCashOutlay,
+      effectiveRefund: 0,
+      guaranteedProfit,
+      rating,
+      impliedProbSum: round3(invSum),
+      rollover: {
+        stake: round2(rolloverCtx.stake),
+        realBalance: round2(rolloverCtx.realBalance),
+        bonusBalance: round2(rolloverCtx.bonusBalance),
+        extraRealUsed: round2(rolloverCtx.extraRealUsed),
+        totalBalanceBefore: round2(rolloverCtx.totalBalanceBefore),
+        rolloverBefore: round2(rolloverCtx.rolloverBefore),
+        rolloverAfter: round2(rolloverCtx.rolloverAfter),
+        estimatedRating: round2(rolloverCtx.estimatedRating),
+        walletRule: rolloverCtx.walletRule,
+        bookieBalanceIfWin: round2(rolloverCtx.bookieBalanceIfWin),
+        bookieBalanceIfLose: round2(rolloverCtx.bookieBalanceIfLose),
+        futureRolloverCostIfWin: round2(rolloverCtx.futureRolloverCostIfWin),
+        futureRolloverCostIfLose: round2(rolloverCtx.futureRolloverCostIfLose),
+        singleBetBookieProfit: round2(stakes[0] * (odds[0] - 1) - hedgeTotal),
+        singleBetExchangeProfit: round2((returns[1] ?? 0) - hedgeTotal - stakes[0]),
+        matchRating,
+        clearsRolloverOnLose: rolloverCtx.clearsRolloverOnLose,
+        completesRolloverOnThisBet: rolloverCtx.completesRolloverOnThisBet,
+        baselineExpectedValue: round2(rolloverCtx.baselineExpectedValue),
+      },
     };
   }
 

@@ -103,15 +103,23 @@ export function formatQuoteAge(
   return { label: `${hrs}h`, ageSec, tone };
 }
 
-export function ratingTone(rating: number, mode: 'normal' | 'snr' | 'sr' | 'rf' = 'normal'): string {
-  if (mode === 'snr') {
+export function ratingTone(
+  rating: number,
+  mode: 'normal' | 'snr' | 'sr' | 'rf' | 'rollover' = 'normal'
+): string {
+  if (mode === 'snr' || mode === 'rollover') {
     if (rating >= 75) return 'text-brand-300';
-    if (rating >= 68) return 'text-emerald-400';
-    if (rating >= 60) return 'text-amber-300';
+    if (rating >= 60) return 'text-emerald-400';
+    if (rating >= 40) return 'text-amber-300';
     return 'text-slate-400';
   }
   if (rating >= 100) return 'text-brand-200';
   if (rating >= 96) return 'text-emerald-400';
   if (rating >= 92) return 'text-amber-300';
   return 'text-rose-400';
+}
+
+/** Abbrevia "Exchange" in "Ex." per le colonne compatte dell'Oddsmatcher. */
+export function formatExchangeShortName(name: string): string {
+  return name.replace(/\bExchange\b/gi, 'Ex.');
 }

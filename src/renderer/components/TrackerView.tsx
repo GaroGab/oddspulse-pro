@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import { BarChart3, CheckCircle2, Clock, Trash2, TrendingUp, Wallet } from 'lucide-react';
 import { THEME_CATALOG, type ThemeId, type TrackedBet } from '../../shared/types';
+import { betModeLabelIt } from '../../shared/ratingWatch';
 import { formatEuro, formatOdds, formatPct } from '../utils/format';
 import { AnimatedNumber } from './AnimatedNumber';
 import { CustomSelect } from './CustomSelect';
@@ -279,7 +280,7 @@ export const TrackerView: React.FC<TrackerViewProps> = ({
                         {b.type}
                       </span>{' '}
                       <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">
-                        {b.mode}
+                        {betModeLabelIt(b.mode)}
                       </span>
                     </td>
                     <td className="max-w-[260px] px-4 py-2.5">

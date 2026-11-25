@@ -626,7 +626,7 @@ export const App: React.FC = () => {
               ...(patch.enabled === true && !w.enabled ? { lastTriggeredAt: null } : {}),
               updatedAt: Date.now(),
             };
-            if (patch.ignoredEvents !== undefined) {
+            if (patch.ignoredEvents !== undefined || patch.excludeSurebets !== undefined) {
               nextWatch.lastTriggeredAt = null;
               nextWatch.lastBestMatch = evaluateRatingWatch(nextWatch, snapshot.rows, {
                 includeLiveEvents: settings.includeLiveEvents,
@@ -924,6 +924,7 @@ export const App: React.FC = () => {
                   onSaveTrackedBet={(bet) => void handleSaveBet(bet)}
                   onSaveMultiplePlan={handleSaveMultiplePlan}
                   onDeleteSavedMultiple={(id) => void handleDeleteSavedMultiple(id)}
+                  onDateRangeFilterChange={handleDateRangeFilterChange}
                   onRetryScrape={handleRunScrape}
                   onRestartAutoScrape={() => void handleStartAutoScrape()}
                   onOpenScrapers={() => setActiveTab('scrapers')}
@@ -952,6 +953,7 @@ export const App: React.FC = () => {
                   defaultStake={settings.defaultStake}
                   defaultCommission={settings.betfairCommission}
                   soundEnabled={settings.soundEnabled}
+                  snapshot={snapshot}
                   onSaveTrackedBet={(bet) => void handleSaveBet(bet)}
                 />
               )}
@@ -1019,6 +1021,7 @@ export const App: React.FC = () => {
         initialStake={stake}
         drawerWidth={settings.drawerWidth}
         soundEnabled={settings.soundEnabled}
+        snapshotRows={snapshot.rows}
         onClose={() => setSelectedRow(null)}
         onSaveBet={(bet) => void handleSaveBet(bet)}
         onLockToMultiodds={handleLockAndGoMultiodds}
