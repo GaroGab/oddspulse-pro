@@ -1,13 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
+  ArrowLeft,
   ArrowRight,
   Ban,
   BookOpen,
   Calculator,
   Check,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   Circle,
   Clock,
@@ -18,6 +20,7 @@ import {
   Gift,
   Info,
   Layers,
+  Maximize2,
   RotateCcw,
   Search,
   ShieldCheck,
@@ -28,11 +31,13 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import type {
-  BetMode,
-  WelcomeBonusProgressEntry,
-  WelcomeBonusProgressMap,
-  WelcomeBonusProgressStatus,
+import {
+  SOURCE_CATALOG,
+  type BetMode,
+  type SourceId,
+  type WelcomeBonusProgressEntry,
+  type WelcomeBonusProgressMap,
+  type WelcomeBonusProgressStatus,
 } from '../../shared/types';
 import {
   EXCLUDED_WELCOME_SITES,
@@ -148,6 +153,10 @@ const STATUS_META: Record<
   },
 };
 
+const SOURCE_COLOR_MAP: Partial<Record<SourceId, string>> = Object.fromEntries(
+  SOURCE_CATALOG.map((src) => [src.id, src.color])
+);
+
 function categoryBadge(cat: WelcomeBonusCategory): {
   label: string;
   className: string;
@@ -190,14 +199,14 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   const [difficultyFilter, setDifficultyFilter] = useState<'all' | WelcomeBonusDifficulty>('all');
   const [sortKey, setSortKey] = useState<SortKey>('profit_desc');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [selectedGuideId, setSelectedGuideId] = useState<string>(
-    WELCOME_BONUS_GUIDES[0]?.id ?? ''
-  );
+  const [openedGuideId, setOpenedGuideId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>('guide');
   const [showExcludedModal, setShowExcludedModal] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
-  // Stato del simulatore interattivo (si resetta quando cambia la guida selezionata)
+  const detailScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Stato del simulatore interattivo (si resetta quando si apre una nuova offerta)
   const [simDeposit, setSimDeposit] = useState<number>(500);
   const [simSingleRating, setSimSingleRating] = useState<number>(96.5);
   const [simLegRating, setSimLegRating] = useState<number>(96.5);
@@ -207,7 +216,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   const [simRollover, setSimRollover] = useState<number>(3);
   const [simCasinoScale, setSimCasinoScale] = useState<number>(1.0);
 
-  // Precalcola i 3 scenari standard per tutte le 19 guide (veloce + deterministico)
+  // Precalcola i 3 scenari standard per tutte le guide (veloce + deterministico)
   const guideSimulations = useMemo(() => {
     const map = new Map<string, ReturnType<typeof simulateThreeScenarios>>();
     for (const guide of WELCOME_BONUS_GUIDES) {
@@ -216,34 +225,54 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
     return map;
   }, []);
 
-  const selectedGuide: WelcomeBonusGuide = useMemo(() => {
-    return (
-      WELCOME_BONUS_GUIDES.find((g) => g.id === selectedGuideId) ?? WELCOME_BONUS_GUIDES[0]
-    );
-  }, [selectedGuideId]);
+  const openedGuide: WelcomeBonusGuide | null = useMemo(() => {
+    if (!openedGuideId) return null;
+    return WELCOME_BONUS_GUIDES.find((g) => g.id === openedGuideId) ?? null;
+  }, [openedGuideId]);
 
-  // Sincronizza i parametri del simulatore quando si seleziona una nuova guida
+  // Sincronizza i parametri del simulatore quando si apre una guida in dettaglio
   useEffect(() => {
-    if (!selectedGuide) return;
-    setSimDeposit(selectedGuide.simulationModel.defaultDeposit);
+    if (!openedGuide) return;
+    setSimDeposit(openedGuide.simulationModel.defaultDeposit);
     setSimSingleRating(DEFAULT_SIMULATION_SCENARIOS.realistic.singleRatingPct);
     setSimLegRating(DEFAULT_SIMULATION_SCENARIOS.realistic.multiLegRatingPct);
     setSimCommission(Math.round(defaultExchangeCommission * 1000) / 10);
-    setSimRollover(selectedGuide.simulationModel.variableRollover?.defaultValue ?? 3);
+    setSimRollover(openedGuide.simulationModel.variableRollover?.defaultValue ?? 3);
     setSimCasinoScale(1.0);
-  }, [selectedGuide, defaultExchangeCommission]);
+  }, [openedGuide, defaultExchangeCommission]);
 
-  // KPI Globali
+  // Riporta lo scroll in alto al cambio offerta o tab nel dettaglio a schermo intero
+  useEffect(() => {
+    if (openedGuideId && detailScrollRef.current) {
+      detailScrollRef.current.scrollTop = 0;
+    }
+  }, [openedGuideId, detailTab]);
+
+  // Tasto ESC per chiudere la modale esclusi o tornare dalla scheda dettaglio ai banner
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (showExcludedModal) {
+        setShowExcludedModal(false);
+        return;
+      }
+      if (!openedGuideId) return;
+      const activeTag = (document.activeElement?.tagName ?? '').toUpperCase();
+      if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
+      setOpenedGuideId(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [openedGuideId, showExcludedModal]);
+
+  // Statistiche globali per la barra superiore della prima pagina
   const globalStats = useMemo(() => {
     let totalConservative = 0;
     let totalRealistic = 0;
     let totalOptimal = 0;
     let sportCount = 0;
-    let sportRealistic = 0;
     let casinoCount = 0;
-    let casinoRealistic = 0;
     let completedCount = 0;
-    let inProgressCount = 0;
     let remainingRealistic = 0;
     let realizedActualProfit = 0;
 
@@ -255,10 +284,8 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
 
       if (g.category === 'casino_fallback') {
         casinoCount++;
-        casinoRealistic += sim.realistic.netProfit;
       } else {
         sportCount++;
-        sportRealistic += sim.realistic.netProfit;
       }
 
       const prog = progressMap[g.id];
@@ -269,7 +296,6 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
             ? prog.actualProfit
             : sim.realistic.netProfit;
       } else {
-        if (prog?.status === 'in_progress') inProgressCount++;
         remainingRealistic += sim.realistic.netProfit;
       }
     }
@@ -280,17 +306,14 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
       totalRealistic,
       totalOptimal,
       sportCount,
-      sportRealistic,
       casinoCount,
-      casinoRealistic,
       completedCount,
-      inProgressCount,
       remainingRealistic,
       realizedActualProfit,
     };
   }, [guideSimulations, progressMap]);
 
-  // Elenco filtrato e ordinato
+  // Elenco banner filtrato e ordinato
   const filteredGuides = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return WELCOME_BONUS_GUIDES.filter((g) => {
@@ -325,39 +348,36 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
         const diffDelta = DIFFICULTY_RANK[a.difficulty] - DIFFICULTY_RANK[b.difficulty];
         return diffDelta !== 0 ? diffDelta : simB.netProfit - simA.netProfit;
       }
-      // deposit_asc
       const depDelta = a.simulationModel.defaultDeposit - b.simulationModel.defaultDeposit;
       return depDelta !== 0 ? depDelta : simB.netProfit - simA.netProfit;
     });
   }, [categoryFilter, difficultyFilter, searchQuery, sortKey, progressMap, guideSimulations]);
 
-  // Simulazioni del pannello dettaglio per la guida selezionata
+  // Simulazioni del pannello dettaglio per la guida aperta
   const selectedThreeScenarios = useMemo(() => {
-    return simulateThreeScenarios(selectedGuide.simulationModel, {
+    if (!openedGuide) return null;
+    return simulateThreeScenarios(openedGuide.simulationModel, {
       deposit: simDeposit,
-      rolloverMultiplier: selectedGuide.simulationModel.variableRollover
-        ? simRollover
-        : undefined,
+      rolloverMultiplier: openedGuide.simulationModel.variableRollover ? simRollover : undefined,
     });
-  }, [selectedGuide, simDeposit, simRollover]);
+  }, [openedGuide, simDeposit, simRollover]);
 
   const customSimulation = useMemo(() => {
+    if (!openedGuide) return null;
     return simulateWelcomeBonus(
-      selectedGuide.simulationModel,
+      openedGuide.simulationModel,
       DEFAULT_SIMULATION_SCENARIOS.realistic,
       {
         deposit: simDeposit,
         singleRatingPct: simSingleRating,
         multiLegRatingPct: simLegRating,
         exchangeCommissionPct: simCommission,
-        rolloverMultiplier: selectedGuide.simulationModel.variableRollover
-          ? simRollover
-          : undefined,
+        rolloverMultiplier: openedGuide.simulationModel.variableRollover ? simRollover : undefined,
         casinoVarianceScale: simCasinoScale,
       }
     );
   }, [
-    selectedGuide,
+    openedGuide,
     simDeposit,
     simSingleRating,
     simLegRating,
@@ -366,26 +386,37 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
     simCasinoScale,
   ]);
 
-  const activeProgress: WelcomeBonusProgressEntry = useMemo(() => {
-    const existing = progressMap[selectedGuide.id];
+  const activeProgress: WelcomeBonusProgressEntry | null = useMemo(() => {
+    if (!openedGuide) return null;
+    const existing = progressMap[openedGuide.id];
     if (existing) return existing;
     return {
-      guideId: selectedGuide.id,
+      guideId: openedGuide.id,
       status: 'todo',
       completedStepIds: [],
       actualProfit: null,
       updatedAt: 0,
     };
-  }, [progressMap, selectedGuide.id]);
+  }, [progressMap, openedGuide]);
+
+  const handleOpenGuide = (guideId: string) => {
+    setDetailTab('guide');
+    setOpenedGuideId(guideId);
+  };
+
+  const handleCloseGuide = () => {
+    setOpenedGuideId(null);
+  };
 
   const handleToggleStep = (stepId: string) => {
+    if (!openedGuide || !activeProgress) return;
     const exists = activeProgress.completedStepIds.includes(stepId);
     const nextSteps = exists
       ? activeProgress.completedStepIds.filter((id) => id !== stepId)
       : [...activeProgress.completedStepIds, stepId];
 
     let nextStatus: WelcomeBonusProgressStatus = activeProgress.status;
-    if (nextSteps.length === selectedGuide.steps.length) {
+    if (nextSteps.length === openedGuide.steps.length) {
       nextStatus = 'completed';
     } else if (nextSteps.length > 0 && nextStatus === 'todo') {
       nextStatus = 'in_progress';
@@ -395,7 +426,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
 
     onSaveProgress({
       ...activeProgress,
-      guideId: selectedGuide.id,
+      guideId: openedGuide.id,
       status: nextStatus,
       completedStepIds: nextSteps,
       updatedAt: Date.now(),
@@ -403,15 +434,16 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   };
 
   const handleSetStatus = (status: WelcomeBonusProgressStatus) => {
+    if (!openedGuide || !activeProgress) return;
     const nextSteps =
       status === 'completed'
-        ? selectedGuide.steps.map((s) => s.id)
+        ? openedGuide.steps.map((s) => s.id)
         : status === 'todo'
         ? []
         : activeProgress.completedStepIds;
     onSaveProgress({
       ...activeProgress,
-      guideId: selectedGuide.id,
+      guideId: openedGuide.id,
       status,
       completedStepIds: nextSteps,
       updatedAt: Date.now(),
@@ -419,9 +451,10 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   };
 
   const handleSetActualProfit = (val: number) => {
+    if (!openedGuide || !activeProgress) return;
     onSaveProgress({
       ...activeProgress,
-      guideId: selectedGuide.id,
+      guideId: openedGuide.id,
       actualProfit: val,
       updatedAt: Date.now(),
     });
@@ -436,11 +469,12 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   };
 
   const handleResetSimulator = () => {
-    setSimDeposit(selectedGuide.simulationModel.defaultDeposit);
+    if (!openedGuide) return;
+    setSimDeposit(openedGuide.simulationModel.defaultDeposit);
     setSimSingleRating(DEFAULT_SIMULATION_SCENARIOS.realistic.singleRatingPct);
     setSimLegRating(DEFAULT_SIMULATION_SCENARIOS.realistic.multiLegRatingPct);
     setSimCommission(Math.round(defaultExchangeCommission * 1000) / 10);
-    setSimRollover(selectedGuide.simulationModel.variableRollover?.defaultValue ?? 3);
+    setSimRollover(openedGuide.simulationModel.variableRollover?.defaultValue ?? 3);
     setSimCasinoScale(1.0);
   };
 
@@ -448,396 +482,201 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
     globalStats.totalCount > 0
       ? Math.round((globalStats.completedCount / globalStats.totalCount) * 100)
       : 0;
-  const completedStepsCount = activeProgress.completedStepIds.length;
-  const totalStepsCount = selectedGuide.steps.length;
 
-  return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
-      {/* Header + Azioni Audit */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-brand-400/40 bg-brand-400/15 text-brand-300 shadow-[0_0_20px_-6px_rgb(var(--brand-400)/0.6)]">
-            <Gift className="h-5 w-5" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="truncate text-lg font-extrabold tracking-tight text-white">
-                Bonus Benvenuto
-              </h1>
-              <span className="rounded-md border border-brand-400/35 bg-brand-400/15 px-2 py-0.5 font-mono text-[10px] font-bold text-brand-200">
-                {globalStats.totalCount} GUIDE PROFITTEVOLI
-              </span>
-              <span className="rounded-md border border-slate-700/80 bg-slate-900/80 px-2 py-0.5 font-mono text-[10px] text-slate-400">
-                Audit T&amp;C: {WELCOME_BONUSES_LAST_UPDATED}
-              </span>
-            </div>
-            <p className="truncate text-xs text-slate-400">
-              Analisi profonda T&amp;C, simulazioni di profitto e guide operative step-by-step per tutti i siti dell’app
-            </p>
-          </div>
-        </div>
+  // Navigazione rapida tra offerte in vista dettaglio a schermo intero
+  const navList = useMemo(() => {
+    if (!openedGuide) return filteredGuides;
+    return filteredGuides.some((g) => g.id === openedGuide.id)
+      ? filteredGuides
+      : WELCOME_BONUS_GUIDES;
+  }, [filteredGuides, openedGuide]);
 
-        <button
-          type="button"
-          onClick={() => setShowExcludedModal(true)}
-          data-testid="open-excluded-sites"
-          className="flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-300 transition-colors hover:border-brand-400/45 hover:bg-slate-800/80 hover:text-white"
-        >
-          <Ban className="h-3.5 w-3.5 text-rose-400" />
-          <span>Siti Esclusi ({EXCLUDED_WELCOME_SITES.length})</span>
-        </button>
-      </div>
+  const currentNavIndex = openedGuide ? navList.findIndex((g) => g.id === openedGuide.id) : -1;
+  const prevGuide = currentNavIndex > 0 ? navList[currentNavIndex - 1] : null;
+  const nextGuide =
+    currentNavIndex >= 0 && currentNavIndex < navList.length - 1
+      ? navList[currentNavIndex + 1]
+      : null;
 
-      {/* KPI Strip — 4 Card Glass */}
-      <div className="grid grid-cols-2 gap-2.5 xl:grid-cols-4">
-        <div className="glass-card rounded-xl p-3">
-          <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
-            <span>Profitto Totale Stimato</span>
-            <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
-          </div>
-          <div className="mt-1 flex items-baseline gap-2">
-            <AnimatedNumber
-              value={globalStats.totalRealistic}
-              formatter={(v) => formatEuro(v, true)}
-              className="font-mono text-xl font-extrabold text-emerald-400"
-            />
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-              realistico
-            </span>
-          </div>
-          <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400">
-            <span>Cons: {formatEuro(globalStats.totalConservative, true)}</span>
-            <span className="text-brand-300">Ott: {formatEuro(globalStats.totalOptimal, true)}</span>
-          </div>
-        </div>
+  // =========================================================================
+  // VISTA 2 — DETTAGLIO OFFERTA A SCHERMO INTERO NELLA PAGINA
+  // =========================================================================
+  if (openedGuide && selectedThreeScenarios && customSimulation && activeProgress) {
+    const completedStepsCount = activeProgress.completedStepIds.length;
+    const totalStepsCount = openedGuide.steps.length;
+    const brandColor = SOURCE_COLOR_MAP[openedGuide.sourceId] ?? '#f59e0b';
+    const cat = categoryBadge(openedGuide.category);
+    const diff = DIFFICULTY_META[openedGuide.difficulty];
 
-        <div className="glass-card rounded-xl p-3">
-          <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
-            <span>Avanzamento Personale</span>
-            <Trophy className="h-3.5 w-3.5 text-brand-300" />
-          </div>
-          <div className="mt-1 flex items-baseline justify-between gap-2">
-            <span className="font-mono text-xl font-extrabold text-white">
-              {globalStats.completedCount}
-              <span className="text-sm font-semibold text-slate-500">
-                /{globalStats.totalCount}
-              </span>
-            </span>
-            <span className="font-mono text-xs font-bold text-brand-300">
-              {globalStats.realizedActualProfit > 0
-                ? `${formatEuro(globalStats.realizedActualProfit, true)} incassati`
-                : `Restano ${formatEuro(globalStats.remainingRealistic, true)}`}
-            </span>
-          </div>
-          <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
-            <div
-              style={{ width: `${progressPct}%` }}
-              className="h-full rounded-full bg-gradient-to-r from-brand-500 to-emerald-400 transition-all duration-300"
-            />
-          </div>
-        </div>
+    return (
+      <div
+        key={`detail-${openedGuide.id}`}
+        data-testid="bonus-fullscreen-detail"
+        className="view-enter flex h-full min-h-0 flex-col overflow-hidden"
+      >
+        <div className="glass-panel relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl">
+          {/* Accento colore brand superiore */}
+          <div
+            aria-hidden="true"
+            style={{
+              background: `linear-gradient(90deg, ${brandColor} 0%, ${brandColor}55 45%, transparent 100%)`,
+            }}
+            className="h-[2px] w-full shrink-0"
+          />
 
-        <div className="glass-card rounded-xl p-3">
-          <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
-            <span>Sport &amp; Exchange (MB)</span>
-            <SlidersHorizontal className="h-3.5 w-3.5 text-brand-300" />
-          </div>
-          <div className="mt-1 flex items-baseline gap-2">
-            <AnimatedNumber
-              value={globalStats.sportRealistic}
-              formatter={(v) => formatEuro(v, true)}
-              className="font-mono text-xl font-extrabold text-brand-300"
-            />
-            <span className="rounded bg-brand-400/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-brand-200">
-              {globalStats.sportCount} siti
-            </span>
-          </div>
-          <div className="mt-1 text-[10px] text-slate-400">
-            Matched Betting matematico (Singole, Multiodds, Bust-Out)
-          </div>
-        </div>
-
-        <div className="glass-card rounded-xl p-3">
-          <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
-            <span>Fallback Casinò +EV</span>
-            <Dices className="h-3.5 w-3.5 text-fuchsia-300" />
-          </div>
-          <div className="mt-1 flex items-baseline gap-2">
-            <AnimatedNumber
-              value={globalStats.casinoRealistic}
-              formatter={(v) => formatEuro(v, true)}
-              className="font-mono text-xl font-extrabold text-fuchsia-300"
-            />
-            <span className="rounded bg-fuchsia-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-fuchsia-200">
-              {globalStats.casinoCount} siti
-            </span>
-          </div>
-          <div className="mt-1 text-[10px] text-slate-400">
-            Solo rischio 0,00€ (SPID/CIE) dove lo Sport è -EV/assente
-          </div>
-        </div>
-      </div>
-
-      {/* Toolbar Filtri + Ricerca */}
-      <div className="glass-panel flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2">
-        <SlidingPillTrack
-          activeKey={categoryFilter}
-          measureDep={globalStats.completedCount}
-          pillClassName="rounded-lg border border-brand-400/45 bg-brand-400/20 shadow-[0_0_16px_-6px_rgb(var(--brand-400)/0.7)]"
-          className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-slate-800/90 bg-slate-950/75 p-1"
-        >
-          {[
-            { key: 'all', label: `Tutti (${globalStats.totalCount})` },
-            { key: 'sport_exchange', label: `Sport & Exchange (${globalStats.sportCount})` },
-            { key: 'casino_fallback', label: `Casinò +EV (${globalStats.casinoCount})` },
-            {
-              key: 'pending',
-              label: `Da Completare (${globalStats.totalCount - globalStats.completedCount})`,
-            },
-          ].map((tab) => {
-            const active = categoryFilter === tab.key;
-            return (
+          {/* Barra Navigazione + Azioni Rapide */}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-950/75 px-5 py-2.5">
+            <div className="flex items-center gap-2.5">
               <button
-                key={tab.key}
                 type="button"
-                data-pill-key={tab.key}
-                onClick={() => setCategoryFilter(tab.key as CategoryFilter)}
-                className={`relative z-10 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
-                  active ? 'text-white' : 'text-slate-400 hover:text-slate-200'
-                }`}
+                onClick={handleCloseGuide}
+                data-testid="back-to-bonuses"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-slate-200 transition-colors hover:border-brand-400/55 hover:bg-slate-800/90 hover:text-white"
               >
-                {tab.label}
+                <ArrowLeft className="h-3.5 w-3.5 text-brand-300" />
+                <span>Torna ai Bonus</span>
               </button>
-            );
-          })}
-        </SlidingPillTrack>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Cerca bookmaker, codice, tag..."
-              className="w-48 rounded-lg border border-slate-700/80 bg-slate-950/80 py-1.5 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-brand-400/60 focus:outline-none"
-            />
-          </div>
-
-          <div className="w-36">
-            <CustomSelect
-              value={difficultyFilter}
-              onChange={(v) => setDifficultyFilter(v as 'all' | WelcomeBonusDifficulty)}
-              options={[
-                { value: 'all', label: 'Difficoltà: Tutte' },
-                { value: 'principiante', label: 'Principiante' },
-                { value: 'intermedio', label: 'Intermedio' },
-                { value: 'avanzato', label: 'Avanzato' },
-              ]}
-            />
-          </div>
-
-          <div className="w-40">
-            <CustomSelect
-              value={sortKey}
-              onChange={(v) => setSortKey(v as SortKey)}
-              options={[
-                { value: 'profit_desc', label: 'Ordina: Profitto' },
-                { value: 'roi_desc', label: 'Ordina: ROI %' },
-                { value: 'difficulty_asc', label: 'Ordina: Più Facili' },
-                { value: 'deposit_asc', label: 'Ordina: Deposito Min' },
-              ]}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Master-Detail Main Workspace */}
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden lg:flex-row">
-        {/* LEFT PANE — Elenco Bookmaker / Guide */}
-        <div className="glass-panel flex max-h-[260px] min-h-0 w-full shrink-0 flex-col overflow-hidden rounded-2xl lg:max-h-none lg:w-[348px]">
-          <div className="flex items-center justify-between border-b border-slate-800/80 px-3.5 py-2.5">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Siti Selezionati ({filteredGuides.length})
-            </span>
-            <span className="text-[10px] text-slate-500">Profitto atteso realistico</span>
-          </div>
-
-          <div className="flex-1 space-y-1.5 overflow-y-auto p-2.5">
-            {filteredGuides.length === 0 && (
-              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-800 px-4 py-10 text-center">
-                <Search className="h-6 w-6 text-slate-600" />
-                <div className="mt-2 text-xs font-semibold text-slate-300">
-                  Nessuna guida corrisponde ai filtri
+              {navList.length > 1 && (
+                <div className="inline-flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900/75 p-0.5">
+                  <button
+                    type="button"
+                    disabled={!prevGuide}
+                    onClick={() => prevGuide && handleOpenGuide(prevGuide.id)}
+                    title={prevGuide ? `Precedente: ${prevGuide.bookmakerName}` : 'Prima offerta'}
+                    aria-label="Offerta precedente"
+                    className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="px-1.5 font-mono text-[10px] font-semibold text-slate-400">
+                    {currentNavIndex + 1}/{navList.length}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!nextGuide}
+                    onClick={() => nextGuide && handleOpenGuide(nextGuide.id)}
+                    title={nextGuide ? `Successiva: ${nextGuide.bookmakerName}` : 'Ultima offerta'}
+                    aria-label="Offerta successiva"
+                    className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+                  >
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCategoryFilter('all');
-                    setDifficultyFilter('all');
-                    setSearchQuery('');
-                  }}
-                  className="mt-2 text-[11px] font-semibold text-brand-300 hover:text-brand-200"
-                >
-                  Ripristina filtri
-                </button>
-              </div>
-            )}
+              )}
+            </div>
 
-            {filteredGuides.map((guide) => {
-              const isSelected = guide.id === selectedGuide.id;
-              const sim = guideSimulations.get(guide.id)!;
-              const prog = progressMap[guide.id];
-              const status: WelcomeBonusProgressStatus = prog?.status ?? 'todo';
-              const cat = categoryBadge(guide.category);
-              const diff = DIFFICULTY_META[guide.difficulty];
-              const stepsDone = prog?.completedStepIds.length ?? 0;
-
-              return (
-                <button
-                  key={guide.id}
-                  type="button"
-                  data-testid={`bonus-card-${guide.sourceId}`}
-                  onClick={() => setSelectedGuideId(guide.id)}
-                  className={`group flex w-full flex-col items-stretch gap-1.5 overflow-hidden rounded-xl border p-2.5 text-left transition-all ${
-                    isSelected
-                      ? 'border-brand-400/60 bg-gradient-to-r from-brand-500/18 via-brand-500/8 to-slate-900/90 shadow-[0_0_24px_-10px_rgb(var(--brand-400)/0.65)]'
-                      : 'border-slate-800/80 bg-slate-950/60 hover:border-slate-700 hover:bg-slate-900/75'
-                  }`}
-                >
-                  <div className="flex w-full items-center justify-between gap-2">
-                    <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-                      <BookmakerIcon sourceId={guide.sourceId} size={24} className="shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate text-[13px] font-bold text-white">
-                            {guide.bookmakerName}
-                          </span>
-                          <span
-                            className={`shrink-0 rounded border px-1 py-0.2 font-mono text-[9px] font-extrabold ${TIER_BADGE[guide.tier]}`}
-                          >
-                            {guide.tier}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                          <span
-                            className={`rounded border px-1.5 py-0.2 text-[9px] font-bold ${cat.className}`}
-                          >
-                            {cat.label}
-                          </span>
-                          <span
-                            className={`rounded border px-1.5 py-0.2 text-[9px] font-semibold ${diff.badgeClass}`}
-                          >
-                            {diff.label}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="shrink-0 text-right">
-                      <div className="whitespace-nowrap font-mono text-sm font-extrabold text-emerald-400">
-                        {formatEuro(sim.realistic.netProfit, true)}
-                      </div>
-                      <div className="whitespace-nowrap font-mono text-[10px] text-slate-400">
-                        {guide.simulationModel.defaultDeposit === 0
-                          ? 'Dep. 0€'
-                          : `Dep. ${guide.simulationModel.defaultDeposit}€`}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="w-full truncate text-[11px] text-slate-400">{guide.headline}</div>
-
-                  <div className="flex w-full items-center justify-between gap-2 pt-0.5 text-[10px]">
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${STATUS_META[status].dotClass}`}
-                      />
-                      <span className="text-slate-400">
-                        {status === 'completed'
-                          ? 'Completato'
-                          : stepsDone > 0
-                          ? `${stepsDone}/${guide.steps.length} step`
-                          : STATUS_META[status].label}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1 font-mono text-slate-500">
-                      <span>
-                        {formatEuro(sim.conservative.netProfit, true)} /{' '}
-                        {formatEuro(sim.optimal.netProfit, true)}
-                      </span>
-                      <ChevronRight
-                        className={`h-3 w-3 transition-transform ${
-                          isSelected
-                            ? 'translate-x-0.5 text-brand-300'
-                            : 'text-slate-600 group-hover:text-slate-400'
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Stato Avanzamento & Profitto Reale */}
+              <div className="inline-flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1">
+                {(['todo', 'in_progress', 'completed'] as WelcomeBonusProgressStatus[]).map(
+                  (st) => {
+                    const active = activeProgress.status === st;
+                    return (
+                      <button
+                        key={st}
+                        type="button"
+                        onClick={() => handleSetStatus(st)}
+                        className={`rounded-lg px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                          active
+                            ? STATUS_META[st].pillClass + ' border'
+                            : 'text-slate-400 hover:text-slate-200'
                         }`}
-                      />
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+                      >
+                        {STATUS_META[st].label}
+                      </button>
+                    );
+                  }
+                )}
+              </div>
 
-        {/* RIGHT PANE — Dettaglio Guida + Simulatore + T&C */}
-        <div className="glass-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl">
-          {/* Sticky Hero Header della Guida Selezionata */}
-          <div className="border-b border-slate-800/80 bg-slate-950/60 px-5 py-3.5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex min-w-0 items-start gap-3">
+              {activeProgress.status === 'completed' && (
+                <div className="flex items-center gap-1.5 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1">
+                  <span className="text-[10px] font-semibold text-emerald-300">Reale (€):</span>
+                  <NumericInput
+                    value={
+                      activeProgress.actualProfit ?? selectedThreeScenarios.realistic.netProfit
+                    }
+                    onChange={handleSetActualProfit}
+                    min={0}
+                    max={10000}
+                    className="w-16 rounded border border-emerald-500/40 bg-slate-950/90 px-1.5 py-0.5 font-mono text-xs font-bold text-emerald-300 focus:border-emerald-400 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => openExternalSafe(openedGuide.url)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-brand-400/45 bg-brand-400/15 px-3 py-1.5 text-xs font-bold text-brand-200 transition-colors hover:bg-brand-400/25 hover:text-white"
+              >
+                <span>Apri Sito</span>
+                <ExternalLink className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Sticky Hero Header della Guida Aperta */}
+          <div className="relative overflow-hidden border-b border-slate-800/80 bg-slate-950/55 px-6 py-4">
+            <div
+              aria-hidden="true"
+              style={{
+                background: `radial-gradient(circle at 0% 0%, ${brandColor}24 0%, transparent 55%)`,
+              }}
+              className="pointer-events-none absolute inset-0"
+            />
+
+            <div className="relative flex flex-wrap items-start justify-between gap-4">
+              <div className="flex min-w-0 flex-1 items-start gap-3.5">
                 <BookmakerIcon
-                  sourceId={selectedGuide.sourceId}
-                  size={40}
-                  className="mt-0.5 shrink-0 rounded-lg"
+                  sourceId={openedGuide.sourceId}
+                  size={48}
+                  className="mt-0.5 shrink-0 rounded-xl"
                 />
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="truncate text-lg font-extrabold text-white">
-                      {selectedGuide.bookmakerName}
-                    </h2>
+                    <h1 className="truncate text-xl font-extrabold tracking-tight text-white">
+                      {openedGuide.bookmakerName}
+                    </h1>
                     <span
-                      className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-extrabold ${TIER_BADGE[selectedGuide.tier]}`}
+                      className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-extrabold ${TIER_BADGE[openedGuide.tier]}`}
                     >
-                      TIER {selectedGuide.tier}
+                      TIER {openedGuide.tier}
                     </span>
                     <span
-                      className={`rounded-md border px-2 py-0.5 text-[10px] font-bold ${categoryBadge(selectedGuide.category).className}`}
+                      className={`rounded-md border px-2 py-0.5 text-[10px] font-bold ${cat.className}`}
                     >
-                      {categoryBadge(selectedGuide.category).label}
+                      {cat.label}
                     </span>
                     <span
-                      className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold ${DIFFICULTY_META[selectedGuide.difficulty].badgeClass}`}
+                      className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold ${diff.badgeClass}`}
                     >
-                      {DIFFICULTY_META[selectedGuide.difficulty].label}
+                      {diff.label}
                     </span>
                   </div>
-                  <p className="mt-0.5 text-xs font-semibold text-brand-200">
-                    {selectedGuide.headline}
-                  </p>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                  <p className="mt-1 text-sm font-semibold text-brand-200">{openedGuide.headline}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2.5 text-xs text-slate-400">
                     <span className="inline-flex items-center gap-1">
-                      <Clock className="h-3 w-3 text-slate-500" />
-                      {selectedGuide.estimatedTimeLabel}
+                      <Clock className="h-3.5 w-3.5 text-slate-500" />
+                      {openedGuide.estimatedTimeLabel}
                     </span>
                     <span>•</span>
                     <span className="inline-flex items-center gap-1">
-                      <Wallet className="h-3 w-3 text-slate-500" />
-                      {selectedGuide.simulationModel.defaultDeposit === 0
+                      <Wallet className="h-3.5 w-3.5 text-slate-500" />
+                      {openedGuide.simulationModel.defaultDeposit === 0
                         ? 'Deposito 0€ (Rischio Zero)'
-                        : `Deposito consigliato: ${formatEuro(selectedGuide.simulationModel.defaultDeposit)}`}
+                        : `Deposito consigliato: ${formatEuro(openedGuide.simulationModel.defaultDeposit)}`}
                     </span>
-                    {selectedGuide.promoCode && (
+                    {openedGuide.promoCode && (
                       <>
                         <span>•</span>
                         <button
                           type="button"
-                          onClick={() => handleCopyPromoCode(selectedGuide.promoCode!)}
-                          className="inline-flex items-center gap-1 rounded-md border border-brand-400/45 bg-brand-400/15 px-2 py-0.5 font-mono text-[11px] font-bold text-brand-200 transition-colors hover:bg-brand-400/25"
+                          onClick={() => handleCopyPromoCode(openedGuide.promoCode!)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-brand-400/45 bg-brand-400/15 px-2.5 py-0.5 font-mono text-[11px] font-bold text-brand-200 transition-colors hover:bg-brand-400/25"
                         >
-                          <span>Codice: {selectedGuide.promoCode}</span>
-                          {copiedCode === selectedGuide.promoCode ? (
+                          <span>Codice: {openedGuide.promoCode}</span>
+                          {copiedCode === openedGuide.promoCode ? (
                             <Check className="h-3 w-3 text-emerald-300" />
                           ) : (
                             <Copy className="h-3 w-3" />
@@ -849,22 +688,26 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex shrink-0 flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => openExternalSafe(selectedGuide.url)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-brand-400/45 bg-brand-400/15 px-3 py-1.5 text-xs font-bold text-brand-200 transition-colors hover:bg-brand-400/25 hover:text-white"
-                >
-                  <span>Apri Sito</span>
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </button>
+              {/* Badge Profitto Atteso in Evidenza */}
+              <div className="shrink-0 rounded-xl border border-emerald-400/35 bg-emerald-500/10 px-4 py-2.5 text-right">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-300/80">
+                  Profitto Stimato
+                </div>
+                <div className="mt-0.5 whitespace-nowrap font-mono text-2xl font-extrabold leading-none text-emerald-400">
+                  {formatEuro(selectedThreeScenarios.realistic.netProfit, true)}
+                </div>
+                <div className="mt-1 whitespace-nowrap font-mono text-[10px] text-slate-400">
+                  Cons {formatEuro(selectedThreeScenarios.conservative.netProfit, true)} · Ott{' '}
+                  {formatEuro(selectedThreeScenarios.optimal.netProfit, true)}
+                </div>
               </div>
             </div>
 
-            {/* Sub-Tabs + Controllo Stato Avanzamento */}
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            {/* Sub-Tabs */}
+            <div className="relative mt-4 flex flex-wrap items-center justify-between gap-2">
               <SlidingPillTrack
                 activeKey={detailTab}
+                measureDep={completedStepsCount}
                 pillClassName="rounded-lg border border-brand-400/45 bg-brand-400/20"
                 className="inline-flex items-center gap-1 rounded-xl border border-slate-800/90 bg-slate-900/90 p-1"
               >
@@ -872,7 +715,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   type="button"
                   data-pill-key="guide"
                   onClick={() => setDetailTab('guide')}
-                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${
+                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                     detailTab === 'guide' ? 'text-white' : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -885,7 +728,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   type="button"
                   data-pill-key="simulator"
                   onClick={() => setDetailTab('simulator')}
-                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${
+                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                     detailTab === 'simulator'
                       ? 'text-white'
                       : 'text-slate-400 hover:text-slate-200'
@@ -898,7 +741,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   type="button"
                   data-pill-key="terms"
                   onClick={() => setDetailTab('terms')}
-                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${
+                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                     detailTab === 'terms' ? 'text-white' : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -907,69 +750,30 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                 </button>
               </SlidingPillTrack>
 
-              {/* Stato & Profitto Reale */}
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="inline-flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1">
-                  {(['todo', 'in_progress', 'completed'] as WelcomeBonusProgressStatus[]).map(
-                    (st) => {
-                      const active = activeProgress.status === st;
-                      return (
-                        <button
-                          key={st}
-                          type="button"
-                          onClick={() => handleSetStatus(st)}
-                          className={`rounded-lg px-2 py-0.5 text-[11px] font-semibold transition-colors ${
-                            active
-                              ? STATUS_META[st].pillClass + ' border'
-                              : 'text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          {STATUS_META[st].label}
-                        </button>
-                      );
-                    }
-                  )}
-                </div>
-
-                {activeProgress.status === 'completed' && (
-                  <div className="flex items-center gap-1.5 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1">
-                    <span className="text-[10px] font-semibold text-emerald-300">
-                      Reale (€):
-                    </span>
-                    <NumericInput
-                      value={
-                        activeProgress.actualProfit ??
-                        selectedThreeScenarios.realistic.netProfit
-                      }
-                      onChange={handleSetActualProfit}
-                      min={0}
-                      max={10000}
-                      className="w-16 rounded border border-emerald-500/40 bg-slate-950/90 px-1.5 py-0.5 font-mono text-xs font-bold text-emerald-300 focus:border-emerald-400 focus:outline-none"
-                    />
-                  </div>
-                )}
-              </div>
+              <span className="rounded-md border border-slate-800 bg-slate-900/75 px-2.5 py-1 font-mono text-[10px] text-slate-400">
+                Audit T&amp;C: {WELCOME_BONUSES_LAST_UPDATED}
+              </span>
             </div>
           </div>
 
-          {/* Body Scrollabile del Dettaglio */}
-          <div className="flex-1 overflow-y-auto p-5">
+          {/* Body Scrollabile Full-Screen */}
+          <div ref={detailScrollRef} className="flex-1 overflow-y-auto px-6 py-5">
             {/* ============================================================
                 TAB 1: GUIDA STEP-BY-STEP
                ============================================================ */}
             {detailTab === 'guide' && (
-              <div className="space-y-4 view-enter">
+              <div className="mx-auto max-w-6xl space-y-4 view-enter">
                 {/* Banner Spiegazione Fallback Casinò */}
-                {selectedGuide.category === 'casino_fallback' && selectedGuide.categoryReason && (
-                  <div className="rounded-xl border border-fuchsia-400/40 bg-fuchsia-500/10 p-3.5">
+                {openedGuide.category === 'casino_fallback' && openedGuide.categoryReason && (
+                  <div className="rounded-xl border border-fuchsia-400/40 bg-fuchsia-500/10 p-4">
                     <div className="flex items-start gap-2.5">
                       <Dices className="mt-0.5 h-4 w-4 shrink-0 text-fuchsia-300" />
                       <div>
                         <div className="text-xs font-bold text-fuchsia-200">
-                          Perché su {selectedGuide.bookmakerName} è selezionato il Bonus Casinò +EV anziché lo Sport
+                          Perché su {openedGuide.bookmakerName} è selezionato il Bonus Casinò +EV anziché lo Sport
                         </div>
                         <p className="mt-1 text-xs leading-relaxed text-slate-300">
-                          {selectedGuide.categoryReason}
+                          {openedGuide.categoryReason}
                         </p>
                       </div>
                     </div>
@@ -977,17 +781,17 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                 )}
 
                 {/* Riassunto Strategico + 3 Scenari di Profitto */}
-                <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
-                  <div className="glass-card rounded-xl p-3.5 xl:col-span-6">
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+                  <div className="glass-card rounded-xl p-4 lg:col-span-6">
                     <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-brand-300">
                       <Sparkles className="h-3.5 w-3.5" />
                       <span>Strategia Consigliata</span>
                     </div>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-300">
-                      {selectedGuide.summary}
+                    <p className="mt-2 text-xs leading-relaxed text-slate-300">
+                      {openedGuide.summary}
                     </p>
-                    <div className="mt-2.5 flex flex-wrap gap-1.5">
-                      {selectedGuide.strategyTags.map((tag) => (
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {openedGuide.strategyTags.map((tag) => (
                         <span
                           key={tag}
                           className="rounded-md border border-slate-700/80 bg-slate-900/80 px-2 py-0.5 text-[10px] font-semibold text-slate-300"
@@ -996,14 +800,14 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                         </span>
                       ))}
                     </div>
-                    <div className="mt-2.5 rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1.5 text-[11px] text-slate-400">
+                    <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-[11px] text-slate-400">
                       <span className="font-semibold text-slate-200">Registrazione: </span>
-                      {selectedGuide.registrationNote}
+                      {openedGuide.registrationNote}
                     </div>
                   </div>
 
                   {/* 3 Scenari Simulati */}
-                  <div className="glass-card flex flex-col justify-between rounded-xl p-3.5 xl:col-span-6">
+                  <div className="glass-card flex flex-col justify-between rounded-xl p-4 lg:col-span-6">
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
                         Simulazione Profitto Netto (Dep.{' '}
@@ -1019,12 +823,12 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                       </button>
                     </div>
 
-                    <div className="mt-2.5 grid grid-cols-3 gap-2">
+                    <div className="mt-3 grid grid-cols-3 gap-2.5">
                       {(
                         [
                           {
                             label: 'Conservativo',
-                            sub: selectedGuide.simulationModel.isPureCasino
+                            sub: openedGuide.simulationModel.isPureCasino
                               ? 'Prudente'
                               : '94.5% / 95%',
                             res: selectedThreeScenarios.conservative,
@@ -1036,7 +840,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                           },
                           {
                             label: 'Realistico',
-                            sub: selectedGuide.simulationModel.isPureCasino
+                            sub: openedGuide.simulationModel.isPureCasino
                               ? 'EV Monte Carlo'
                               : 'Rating 96.5%',
                             res: selectedThreeScenarios.realistic,
@@ -1045,7 +849,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                           },
                           {
                             label: 'Ottimale',
-                            sub: selectedGuide.simulationModel.isPureCasino
+                            sub: openedGuide.simulationModel.isPureCasino
                               ? 'Ottimizzato'
                               : 'Rating 98%',
                             res: selectedThreeScenarios.optimal,
@@ -1056,12 +860,12 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                       ).map((sc) => (
                         <div
                           key={sc.label}
-                          className={`rounded-xl border p-2.5 text-center ${sc.border}`}
+                          className={`rounded-xl border p-3 text-center ${sc.border}`}
                         >
                           <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
                             {sc.label}
                           </div>
-                          <div className={`mt-1 font-mono text-base font-extrabold ${sc.tone}`}>
+                          <div className={`mt-1 font-mono text-lg font-extrabold ${sc.tone}`}>
                             {formatEuro(sc.res.netProfit, true)}
                           </div>
                           <div className="mt-0.5 text-[10px] text-slate-500">{sc.sub}</div>
@@ -1069,7 +873,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                       ))}
                     </div>
 
-                    <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-2 text-[11px] text-slate-400">
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-2.5 text-xs text-slate-400">
                       <span>
                         Bankroll Exchange:{' '}
                         <strong className="font-mono text-slate-200">
@@ -1090,10 +894,10 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   </div>
                 </div>
 
-                {/* Avviso Break-Even Rating se critico (es. Betsson / NetBet) */}
+                {/* Avviso Break-Even Rating se critico */}
                 {selectedThreeScenarios.realistic.breakEvenLegRatingPct !== null &&
                   selectedThreeScenarios.realistic.breakEvenLegRatingPct >= 93.5 && (
-                    <div className="flex items-start gap-2.5 rounded-xl border border-amber-400/40 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-100">
+                    <div className="flex items-start gap-2.5 rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
                       <div>
                         <span className="font-bold">Soglia Critica Rating: </span>
@@ -1108,23 +912,23 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   )}
 
                 {/* Checklist Operativa Step-by-Step */}
-                <div className="space-y-2.5">
+                <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
                       Procedura Operativa Step-by-Step
-                    </h3>
-                    <span className="font-mono text-[11px] text-slate-400">
+                    </h2>
+                    <span className="font-mono text-xs text-slate-400">
                       {completedStepsCount} di {totalStepsCount} completati
                     </span>
                   </div>
 
-                  {selectedGuide.steps.map((step) => {
+                  {openedGuide.steps.map((step) => {
                     const checked = activeProgress.completedStepIds.includes(step.id);
                     const phase = PHASE_META[step.phase];
                     return (
                       <div
                         key={step.id}
-                        className={`rounded-xl border p-3.5 transition-all ${
+                        className={`rounded-xl border p-4 transition-all ${
                           checked
                             ? 'border-emerald-500/35 bg-emerald-500/6'
                             : 'border-slate-800/90 bg-slate-950/65 hover:border-slate-700/90'
@@ -1155,13 +959,13 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                                 >
                                   {phase.label}
                                 </span>
-                                <h4
+                                <h3
                                   className={`text-sm font-bold ${
                                     checked ? 'text-slate-400 line-through' : 'text-white'
                                   }`}
                                 >
                                   {step.title}
-                                </h4>
+                                </h3>
                               </div>
 
                               {step.toolAction && (
@@ -1169,16 +973,14 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                                   type="button"
                                   onClick={() => {
                                     if (step.toolAction!.target === 'external') {
-                                      openExternalSafe(
-                                        step.toolAction!.url ?? selectedGuide.url
-                                      );
+                                      openExternalSafe(step.toolAction!.url ?? openedGuide.url);
                                     } else {
                                       onOpenTool(step.toolAction!.target, {
                                         mode: step.toolAction!.presetMode,
                                       });
                                     }
                                   }}
-                                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-brand-400/40 bg-brand-400/15 px-2.5 py-1 text-[11px] font-semibold text-brand-200 transition-colors hover:bg-brand-400/25 hover:text-white"
+                                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-brand-400/40 bg-brand-400/15 px-3 py-1 text-[11px] font-semibold text-brand-200 transition-colors hover:bg-brand-400/25 hover:text-white"
                                 >
                                   {step.toolAction.target === 'external' ? (
                                     <ExternalLink className="h-3 w-3" />
@@ -1195,7 +997,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                             </div>
 
                             {/* Azione Esatta */}
-                            <div className="rounded-lg border border-brand-400/25 bg-brand-500/8 px-3 py-2 text-xs font-semibold text-slate-100">
+                            <div className="rounded-lg border border-brand-400/25 bg-brand-500/8 px-3.5 py-2 text-xs font-semibold text-slate-100">
                               {step.exactAction}
                             </div>
 
@@ -1204,14 +1006,14 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                             </p>
 
                             {step.mathTip && (
-                              <div className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/8 px-2.5 py-1.5 text-[11px] text-emerald-200">
+                              <div className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/8 px-3 py-2 text-[11px] text-emerald-200">
                                 <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
                                 <span>{step.mathTip}</span>
                               </div>
                             )}
 
                             {step.warning && (
-                              <div className="flex items-start gap-2 rounded-lg border border-rose-500/35 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-200">
+                              <div className="flex items-start gap-2 rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
                                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" />
                                 <span>{step.warning}</span>
                               </div>
@@ -1229,10 +1031,10 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                 TAB 2: SIMULATORE PROFITTO INTERATTIVO
                ============================================================ */}
             {detailTab === 'simulator' && (
-              <div className="space-y-4 view-enter">
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+              <div className="mx-auto max-w-6xl space-y-4 view-enter">
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
                   {/* Controlli Simulazione */}
-                  <div className="glass-card space-y-4 rounded-xl p-4 xl:col-span-5">
+                  <div className="glass-card space-y-4 rounded-xl p-5 lg:col-span-5">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold uppercase tracking-wider text-brand-300">
                         Parametri Simulazione
@@ -1240,7 +1042,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                       <button
                         type="button"
                         onClick={handleResetSimulator}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:border-brand-400/50 hover:text-white"
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:border-brand-400/50 hover:text-white"
                       >
                         <RotateCcw className="h-3 w-3" />
                         <span>Reset</span>
@@ -1250,21 +1052,19 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                     {/* Deposito Scalabile */}
                     <div>
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold text-slate-300">
-                          Deposito Iniziale (€)
-                        </span>
+                        <span className="font-semibold text-slate-300">Deposito Iniziale (€)</span>
                         <span className="font-mono text-xs font-bold text-brand-300">
-                          {selectedGuide.simulationModel.scalableDeposit
-                            ? `Min ${selectedGuide.simulationModel.minDeposit}€ – Max ${selectedGuide.simulationModel.maxDeposit}€`
+                          {openedGuide.simulationModel.scalableDeposit
+                            ? `Min ${openedGuide.simulationModel.minDeposit}€ – Max ${openedGuide.simulationModel.maxDeposit}€`
                             : 'Importo fisso promo'}
                         </span>
                       </div>
-                      {selectedGuide.simulationModel.scalableDeposit ? (
+                      {openedGuide.simulationModel.scalableDeposit ? (
                         <div className="mt-2 flex items-center gap-3">
                           <input
                             type="range"
-                            min={selectedGuide.simulationModel.minDeposit}
-                            max={selectedGuide.simulationModel.maxDeposit}
+                            min={openedGuide.simulationModel.minDeposit}
+                            max={openedGuide.simulationModel.maxDeposit}
                             step={5}
                             value={simDeposit}
                             onChange={(e) => setSimDeposit(Number(e.target.value))}
@@ -1273,36 +1073,34 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                           <NumericInput
                             value={simDeposit}
                             onChange={setSimDeposit}
-                            min={selectedGuide.simulationModel.minDeposit}
-                            max={selectedGuide.simulationModel.maxDeposit}
+                            min={openedGuide.simulationModel.minDeposit}
+                            max={openedGuide.simulationModel.maxDeposit}
                             allowDecimal={false}
                             className="w-20 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-right font-mono text-xs font-bold text-white focus:border-brand-400 focus:outline-none"
                           />
                         </div>
                       ) : (
                         <div className="mt-1.5 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-1.5 font-mono text-xs text-slate-300">
-                          {formatEuro(selectedGuide.simulationModel.defaultDeposit)}
-                          {selectedGuide.simulationModel.defaultDeposit === 0 &&
+                          {formatEuro(openedGuide.simulationModel.defaultDeposit)}
+                          {openedGuide.simulationModel.defaultDeposit === 0 &&
                             ' — Nessun deposito richiesto (rischio zero)'}
                         </div>
                       )}
                     </div>
 
-                    {/* Rollover variabile (es. SNAI 3x–6x, Betsson 6x–7x) */}
-                    {selectedGuide.simulationModel.variableRollover && (
+                    {/* Rollover variabile */}
+                    {openedGuide.simulationModel.variableRollover && (
                       <div>
                         <div className="flex items-center justify-between text-xs">
                           <span className="font-semibold text-slate-300">
-                            {selectedGuide.simulationModel.variableRollover.label}
+                            {openedGuide.simulationModel.variableRollover.label}
                           </span>
-                          <span className="font-mono font-bold text-brand-300">
-                            {simRollover}x
-                          </span>
+                          <span className="font-mono font-bold text-brand-300">{simRollover}x</span>
                         </div>
                         <input
                           type="range"
-                          min={selectedGuide.simulationModel.variableRollover.min}
-                          max={selectedGuide.simulationModel.variableRollover.max}
+                          min={openedGuide.simulationModel.variableRollover.min}
+                          max={openedGuide.simulationModel.variableRollover.max}
                           step={1}
                           value={simRollover}
                           onChange={(e) => setSimRollover(Number(e.target.value))}
@@ -1312,7 +1110,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                     )}
 
                     {/* Slider Rating Sport (se non è puro casinò) */}
-                    {!selectedGuide.simulationModel.isPureCasino ? (
+                    {!openedGuide.simulationModel.isPureCasino ? (
                       <>
                         <div>
                           <div className="flex items-center justify-between text-xs">
@@ -1406,10 +1204,10 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   </div>
 
                   {/* Risultati Simulazione Live */}
-                  <div className="glass-card flex flex-col justify-between space-y-4 rounded-xl p-4 xl:col-span-7">
+                  <div className="glass-card flex flex-col justify-between space-y-4 rounded-xl p-5 lg:col-span-7">
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                       <div
-                        className={`rounded-xl border p-3 ${
+                        className={`rounded-xl border p-3.5 ${
                           customSimulation.netProfit >= 0
                             ? 'border-emerald-400/45 bg-emerald-500/12'
                             : 'border-rose-500/50 bg-rose-500/12'
@@ -1422,9 +1220,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                           value={customSimulation.netProfit}
                           formatter={(v) => formatEuro(v, true)}
                           className={`mt-1 block whitespace-nowrap font-mono text-xl font-extrabold ${
-                            customSimulation.netProfit >= 0
-                              ? 'text-emerald-400'
-                              : 'text-rose-400'
+                            customSimulation.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
                           }`}
                         />
                         <div className="mt-0.5 text-[10px] text-slate-400">
@@ -1434,7 +1230,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3.5">
                         <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
                           {customSimulation.hasBustOutUpside
                             ? 'Worst-Case (Rollover 100%)'
@@ -1456,7 +1252,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3.5">
                         <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
                           Bankroll &amp; ROI
                         </div>
@@ -1483,7 +1279,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                         {customSimulation.breakdown.map((row, idx) => (
                           <div
                             key={`${row.label}_${idx}`}
-                            className="flex items-center justify-between gap-3 rounded-lg border border-slate-800/80 bg-slate-950/70 px-3 py-2"
+                            className="flex items-center justify-between gap-3 rounded-lg border border-slate-800/80 bg-slate-950/70 px-3.5 py-2"
                           >
                             <div className="min-w-0">
                               <div className="truncate text-xs font-semibold text-slate-100">
@@ -1573,59 +1369,59 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                 TAB 3: TERMINI & CONDIZIONI APPROFONDITI
                ============================================================ */}
             {detailTab === 'terms' && (
-              <div className="space-y-4 view-enter">
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <div className="glass-card rounded-xl p-3.5">
+              <div className="mx-auto max-w-6xl space-y-4 view-enter">
+                <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2 lg:grid-cols-3">
+                  <div className="glass-card rounded-xl p-4">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Struttura Bonus
                     </div>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-100">
-                      {selectedGuide.termsSummary.bonusStructure}
+                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                      {openedGuide.termsSummary.bonusStructure}
                     </p>
                   </div>
 
-                  <div className="glass-card rounded-xl p-3.5">
+                  <div className="glass-card rounded-xl p-4">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Requisiti di Sblocco / Rollover
                     </div>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-100">
-                      {selectedGuide.termsSummary.rolloverRule}
+                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                      {openedGuide.termsSummary.rolloverRule}
                     </p>
                   </div>
 
-                  <div className="glass-card rounded-xl p-3.5">
+                  <div className="glass-card rounded-xl p-4">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Quote Minime &amp; Tipologia Giocate
                     </div>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-100">
-                      {selectedGuide.termsSummary.minOddsRule}
+                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                      {openedGuide.termsSummary.minOddsRule}
                     </p>
                   </div>
 
-                  <div className="glass-card rounded-xl p-3.5">
+                  <div className="glass-card rounded-xl p-4">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Scadenze &amp; Finestra Temporale
                     </div>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-100">
-                      {selectedGuide.termsSummary.validityRule}
+                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                      {openedGuide.termsSummary.validityRule}
                     </p>
                   </div>
 
-                  <div className="glass-card rounded-xl p-3.5">
+                  <div className="glass-card rounded-xl p-4">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Cap di Conversione &amp; Limiti
                     </div>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-100">
-                      {selectedGuide.termsSummary.conversionCap}
+                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                      {openedGuide.termsSummary.conversionCap}
                     </p>
                   </div>
 
-                  <div className="glass-card rounded-xl p-3.5">
+                  <div className="glass-card rounded-xl p-4">
                     <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                       Metodi di Pagamento Esclusi
                     </div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      {selectedGuide.termsSummary.excludedPayments.map((pm) => (
+                      {openedGuide.termsSummary.excludedPayments.map((pm) => (
                         <span
                           key={pm}
                           className="rounded-md border border-rose-500/35 bg-rose-500/12 px-2 py-0.5 text-[11px] font-semibold text-rose-200"
@@ -1644,7 +1440,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                     <span>Trappole T&amp;C da Evitare</span>
                   </div>
                   <ul className="mt-2.5 space-y-2">
-                    {selectedGuide.termsSummary.criticalWarnings.map((w, i) => (
+                    {openedGuide.termsSummary.criticalWarnings.map((w, i) => (
                       <li
                         key={i}
                         className="flex items-start gap-2 text-xs leading-relaxed text-slate-200"
@@ -1656,12 +1452,12 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   </ul>
                 </div>
 
-                <div className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-[11px] text-slate-400">
+                <div className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 text-[11px] text-slate-400">
                   <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-brand-300" />
                   <span>
                     I termini promozionali ADM possono variare periodicamente (ultimo audit:{' '}
                     <strong className="text-slate-200">{WELCOME_BONUSES_LAST_UPDATED}</strong>).
-                    Controlla sempre la nota informativa ufficiale su {selectedGuide.bookmakerName}{' '}
+                    Controlla sempre la nota informativa ufficiale su {openedGuide.bookmakerName}{' '}
                     immediatamente prima di effettuare il primo deposito.
                   </span>
                 </div>
@@ -1669,6 +1465,362 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
             )}
           </div>
         </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // VISTA 1 — PRIMA PAGINA: SOLO BANNER DEI BONUS SUI SITI
+  // =========================================================================
+  return (
+    <div
+      key="bonuses-banner-catalog"
+      data-testid="bonuses-banner-catalog"
+      className="view-enter flex h-full min-h-0 flex-col gap-3 overflow-hidden"
+    >
+      {/* Intestazione compatta + indicatori sintetici + Siti Esclusi */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-brand-400/40 bg-brand-400/15 text-brand-300 shadow-[0_0_20px_-6px_rgb(var(--brand-400)/0.6)]">
+            <Gift className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="truncate text-lg font-extrabold tracking-tight text-white">
+                Bonus Benvenuto
+              </h1>
+              <span className="rounded-md border border-brand-400/35 bg-brand-400/15 px-2 py-0.5 font-mono text-[10px] font-bold text-brand-200">
+                {globalStats.totalCount} SITI
+              </span>
+              <span className="rounded-md border border-slate-700/80 bg-slate-900/80 px-2 py-0.5 font-mono text-[10px] text-slate-400">
+                Audit: {WELCOME_BONUSES_LAST_UPDATED}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Chip compatta Profitto Stimato */}
+          <div
+            title={`Conservativo: ${formatEuro(globalStats.totalConservative, true)} · Realistico: ${formatEuro(globalStats.totalRealistic, true)} · Ottimale: ${formatEuro(globalStats.totalOptimal, true)}`}
+            className="flex items-center gap-1.5 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-xs"
+          >
+            <TrendingUp className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+            <span className="text-[11px] font-medium text-slate-300">Potenziale:</span>
+            <AnimatedNumber
+              value={globalStats.totalRealistic}
+              formatter={(v) => formatEuro(v, true)}
+              className="font-mono text-xs font-extrabold text-emerald-400"
+            />
+          </div>
+
+          {/* Chip compatta Avanzamento */}
+          <div
+            title={
+              globalStats.realizedActualProfit > 0
+                ? `${formatEuro(globalStats.realizedActualProfit, true)} incassati`
+                : `Restano ${formatEuro(globalStats.remainingRealistic, true)} stimati`
+            }
+            className="flex items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-900/80 px-2.5 py-1.5 text-xs"
+          >
+            <Trophy className="h-3.5 w-3.5 shrink-0 text-brand-300" />
+            <span className="font-mono text-xs font-bold text-white">
+              {globalStats.completedCount}
+              <span className="text-slate-500">/{globalStats.totalCount}</span>
+            </span>
+            <div className="h-1.5 w-12 overflow-hidden rounded-full bg-slate-800">
+              <div
+                style={{ width: `${progressPct}%` }}
+                className="h-full rounded-full bg-gradient-to-r from-brand-500 to-emerald-400 transition-all duration-300"
+              />
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowExcludedModal(true)}
+            data-testid="open-excluded-sites"
+            className="flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-300 transition-colors hover:border-brand-400/45 hover:bg-slate-800/80 hover:text-white"
+          >
+            <Ban className="h-3.5 w-3.5 text-rose-400" />
+            <span>Siti Esclusi ({EXCLUDED_WELCOME_SITES.length})</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Toolbar Filtri + Ricerca */}
+      <div className="glass-panel flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2">
+        <SlidingPillTrack
+          activeKey={categoryFilter}
+          measureDep={globalStats.completedCount}
+          pillClassName="rounded-lg border border-brand-400/45 bg-brand-400/20 shadow-[0_0_16px_-6px_rgb(var(--brand-400)/0.7)]"
+          className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-slate-800/90 bg-slate-950/75 p-1"
+        >
+          {[
+            { key: 'all', label: `Tutti (${globalStats.totalCount})` },
+            { key: 'sport_exchange', label: `Sport & Exchange (${globalStats.sportCount})` },
+            { key: 'casino_fallback', label: `Casinò +EV (${globalStats.casinoCount})` },
+            {
+              key: 'pending',
+              label: `Da Completare (${globalStats.totalCount - globalStats.completedCount})`,
+            },
+          ].map((tab) => {
+            const active = categoryFilter === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                data-pill-key={tab.key}
+                onClick={() => setCategoryFilter(tab.key as CategoryFilter)}
+                className={`relative z-10 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                  active ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </SlidingPillTrack>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Cerca sito, codice, tag..."
+              className="w-48 rounded-lg border border-slate-700/80 bg-slate-950/80 py-1.5 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-brand-400/60 focus:outline-none"
+            />
+          </div>
+
+          <div className="w-36">
+            <CustomSelect
+              value={difficultyFilter}
+              onChange={(v) => setDifficultyFilter(v as 'all' | WelcomeBonusDifficulty)}
+              options={[
+                { value: 'all', label: 'Difficoltà: Tutte' },
+                { value: 'principiante', label: 'Principiante' },
+                { value: 'intermedio', label: 'Intermedio' },
+                { value: 'avanzato', label: 'Avanzato' },
+              ]}
+            />
+          </div>
+
+          <div className="w-40">
+            <CustomSelect
+              value={sortKey}
+              onChange={(v) => setSortKey(v as SortKey)}
+              options={[
+                { value: 'profit_desc', label: 'Ordina: Profitto' },
+                { value: 'roi_desc', label: 'Ordina: ROI %' },
+                { value: 'difficulty_asc', label: 'Ordina: Più Facili' },
+                { value: 'deposit_asc', label: 'Ordina: Deposito Min' },
+              ]}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Griglia Full-Width dei Banner Bonus dei Siti */}
+      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        {filteredGuides.length === 0 ? (
+          <div className="glass-panel flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 px-6 py-16 text-center">
+            <Search className="h-8 w-8 text-slate-600" />
+            <div className="mt-3 text-sm font-bold text-slate-200">
+              Nessun bonus corrisponde ai filtri selezionati
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              Modifica la ricerca o ripristina i filtri per visualizzare tutti i siti disponibili.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setCategoryFilter('all');
+                setDifficultyFilter('all');
+                setSearchQuery('');
+              }}
+              className="mt-4 rounded-xl border border-brand-400/45 bg-brand-400/15 px-4 py-1.5 text-xs font-bold text-brand-200 transition-colors hover:bg-brand-400/25 hover:text-white"
+            >
+              Ripristina filtri
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3.5 pb-2 lg:grid-cols-2 2xl:grid-cols-3">
+            {filteredGuides.map((guide) => {
+              const sim = guideSimulations.get(guide.id)!;
+              const prog = progressMap[guide.id];
+              const status: WelcomeBonusProgressStatus = prog?.status ?? 'todo';
+              const cat = categoryBadge(guide.category);
+              const diff = DIFFICULTY_META[guide.difficulty];
+              const stepsDone = prog?.completedStepIds.length ?? 0;
+              const stepPct =
+                guide.steps.length > 0 ? Math.round((stepsDone / guide.steps.length) * 100) : 0;
+              const brandColor = SOURCE_COLOR_MAP[guide.sourceId] ?? '#f59e0b';
+
+              return (
+                <article
+                  key={guide.id}
+                  data-testid={`bonus-card-${guide.sourceId}`}
+                  className={`glass-card glass-card-hover relative flex flex-col justify-between overflow-hidden rounded-2xl border ${
+                    status === 'completed'
+                      ? 'border-emerald-500/35'
+                      : status === 'in_progress'
+                      ? 'border-amber-400/35'
+                      : 'border-slate-800/90'
+                  }`}
+                >
+                  {/* Barra superiore accento brand */}
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      background: `linear-gradient(90deg, ${brandColor} 0%, ${brandColor}55 55%, transparent 100%)`,
+                    }}
+                    className="h-[3px] w-full shrink-0"
+                  />
+
+                  {/* Bagliore radiale leggero con tinta del sito */}
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      background: `radial-gradient(circle at 0% 0%, ${brandColor}1f 0%, transparent 58%)`,
+                    }}
+                    className="pointer-events-none absolute inset-0"
+                  />
+
+                  <div className="relative flex flex-1 flex-col gap-3 p-4">
+                    {/* Riga 1: Logo + Identità Sito + Profitto Atteso */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+                        <BookmakerIcon
+                          sourceId={guide.sourceId}
+                          size={42}
+                          className="shrink-0 rounded-xl"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <h2 className="truncate text-[15px] font-extrabold text-white">
+                              {guide.bookmakerName}
+                            </h2>
+                            <span
+                              className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] font-extrabold ${TIER_BADGE[guide.tier]}`}
+                            >
+                              TIER {guide.tier}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[9px] font-bold ${cat.className}`}
+                            >
+                              {cat.label}
+                            </span>
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[9px] font-semibold ${diff.badgeClass}`}
+                            >
+                              {diff.label}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="shrink-0 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-3 py-1.5 text-right">
+                        <div className="text-[9px] font-bold uppercase tracking-wider text-emerald-300/80">
+                          Profitto
+                        </div>
+                        <div className="whitespace-nowrap font-mono text-lg font-extrabold leading-tight text-emerald-400">
+                          {formatEuro(sim.realistic.netProfit, true)}
+                        </div>
+                        <div className="whitespace-nowrap font-mono text-[9px] text-slate-400">
+                          {formatEuro(sim.conservative.netProfit, true)} /{' '}
+                          {formatEuro(sim.optimal.netProfit, true)}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Riga 2: Titolo Offerta Banner */}
+                    <p className="line-clamp-2 min-h-[2.5rem] text-[13px] font-semibold leading-snug text-slate-100">
+                      {guide.headline}
+                    </p>
+
+                    {/* Riga 3: Chip Informazioni Chiave */}
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/75 px-2 py-1 font-mono text-[10px] font-semibold text-slate-300">
+                        <Wallet className="h-3 w-3 text-slate-500" />
+                        {guide.simulationModel.defaultDeposit === 0
+                          ? 'Dep. 0€ (Rischio Zero)'
+                          : `Dep. ${guide.simulationModel.defaultDeposit}€`}
+                      </span>
+
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/75 px-2 py-1 font-mono text-[10px] font-semibold text-emerald-300">
+                        <TrendingUp className="h-3 w-3 text-emerald-400/80" />
+                        {sim.realistic.roiPct === null
+                          ? 'ROI ∞'
+                          : `ROI +${sim.realistic.roiPct.toFixed(0)}%`}
+                      </span>
+
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/75 px-2 py-1 text-[10px] text-slate-400">
+                        <Clock className="h-3 w-3 text-slate-500" />
+                        {guide.estimatedTimeLabel}
+                      </span>
+
+                      {guide.promoCode && (
+                        <button
+                          type="button"
+                          onClick={() => handleCopyPromoCode(guide.promoCode!)}
+                          title="Copia codice promozionale"
+                          className="inline-flex items-center gap-1 rounded-lg border border-brand-400/40 bg-brand-400/12 px-2 py-1 font-mono text-[10px] font-bold text-brand-200 transition-colors hover:bg-brand-400/25"
+                        >
+                          <span>{guide.promoCode}</span>
+                          {copiedCode === guide.promoCode ? (
+                            <Check className="h-3 w-3 text-emerald-300" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Riga 4: Footer Stato + Button Apertura Offerta a Schermo Intero */}
+                    <div className="mt-auto flex items-center justify-between gap-3 border-t border-slate-800/80 pt-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${STATUS_META[status].dotClass}`}
+                        />
+                        <div className="min-w-0">
+                          <div className="truncate text-[11px] font-semibold text-slate-300">
+                            {status === 'completed'
+                              ? 'Completato'
+                              : stepsDone > 0
+                              ? `${stepsDone}/${guide.steps.length} step completati`
+                              : STATUS_META[status].label}
+                          </div>
+                          {stepsDone > 0 && status !== 'completed' && (
+                            <div className="mt-1 h-1 w-20 overflow-hidden rounded-full bg-slate-800">
+                              <div
+                                style={{ width: `${stepPct}%` }}
+                                className="h-full rounded-full bg-amber-400 transition-all duration-300"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleOpenGuide(guide.id)}
+                        data-testid={`open-bonus-detail-${guide.sourceId}`}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-brand-400/50 bg-gradient-to-r from-brand-500/25 to-brand-400/15 px-3.5 py-2 text-xs font-bold text-brand-100 shadow-[0_0_18px_-8px_rgb(var(--brand-400)/0.85)] transition-all hover:border-brand-300/80 hover:from-brand-500/35 hover:to-brand-400/25 hover:text-white active:scale-[0.98]"
+                      >
+                        <Maximize2 className="h-3.5 w-3.5" />
+                        <span>Dettagli Offerta</span>
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Modal Trasparenza: Siti Valutati ed Esclusi */}
