@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'framer-motion';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -187,6 +187,1039 @@ function openExternalSafe(url: string): void {
   }
 }
 
+const BONUS_PAGE_SLIDE_VARIANTS = {
+  enter: (direction: number) => ({
+    y: direction >= 0 ? '100%' : '-100%',
+    opacity: 0.72,
+  }),
+  center: {
+    y: '0%',
+    opacity: 1,
+  },
+  exit: (direction: number) => ({
+    y: direction >= 0 ? '-100%' : '100%',
+    opacity: 0.45,
+  }),
+};
+
+const BONUS_PAGE_REDUCED_VARIANTS = {
+  enter: { y: '0%', opacity: 0 },
+  center: { y: '0%', opacity: 1 },
+  exit: { y: '0%', opacity: 0 },
+};
+
+interface BonusDetailSlideProps {
+  guide: WelcomeBonusGuide;
+  progress: WelcomeBonusProgressEntry;
+  defaultExchangeCommission: number;
+  copiedCode: string | null;
+  direction: number;
+  prefersReducedMotion: boolean;
+  onCopyPromoCode: (code: string) => void;
+  onToggleStep: (
+    guide: WelcomeBonusGuide,
+    progress: WelcomeBonusProgressEntry,
+    stepId: string
+  ) => void;
+  onOpenTool: WelcomeBonusesViewProps['onOpenTool'];
+  onHeroBannerHiddenChange: (guideId: string, hidden: boolean) => void;
+  onRegisterScrollEl: (guideId: string, el: HTMLDivElement | null) => void;
+  onRealisticProfitChange: (guideId: string, netProfit: number) => void;
+}
+
+const BonusDetailSlide: React.FC<BonusDetailSlideProps> = ({
+  guide,
+  progress,
+  defaultExchangeCommission,
+  copiedCode,
+  direction,
+  prefersReducedMotion,
+  onCopyPromoCode,
+  onToggleStep,
+  onOpenTool,
+  onHeroBannerHiddenChange,
+  onRegisterScrollEl,
+  onRealisticProfitChange,
+}) => {
+  const isPresent = useIsPresent();
+  const [detailTab, setDetailTab] = useState<DetailTab>('guide');
+  const [isHeroBannerHidden, setIsHeroBannerHidden] = useState<boolean>(false);
+
+  const [simDeposit, setSimDeposit] = useState<number>(() => guide.simulationModel.defaultDeposit);
+  const [simSingleRating, setSimSingleRating] = useState<number>(
+    DEFAULT_SIMULATION_SCENARIOS.realistic.singleRatingPct
+  );
+  const [simLegRating, setSimLegRating] = useState<number>(
+    DEFAULT_SIMULATION_SCENARIOS.realistic.multiLegRatingPct
+  );
+  const [simCommission, setSimCommission] = useState<number>(
+    () => Math.round(defaultExchangeCommission * 1000) / 10
+  );
+  const [simRollover, setSimRollover] = useState<number>(
+    () => guide.simulationModel.variableRollover?.defaultValue ?? 3
+  );
+  const [simCasinoScale, setSimCasinoScale] = useState<number>(1.0);
+
+  const detailScrollRef = useRef<HTMLDivElement | null>(null);
+  const heroBannerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setSimCommission(Math.round(defaultExchangeCommission * 1000) / 10);
+  }, [defaultExchangeCommission]);
+
+  const selectedThreeScenarios = useMemo(
+    () =>
+      simulateThreeScenarios(guide.simulationModel, {
+        deposit: simDeposit,
+        rolloverMultiplier: guide.simulationModel.variableRollover ? simRollover : undefined,
+      }),
+    [guide, simDeposit, simRollover]
+  );
+
+  const customSimulation = useMemo(
+    () =>
+      simulateWelcomeBonus(guide.simulationModel, DEFAULT_SIMULATION_SCENARIOS.realistic, {
+        deposit: simDeposit,
+        singleRatingPct: simSingleRating,
+        multiLegRatingPct: simLegRating,
+        exchangeCommissionPct: simCommission,
+        rolloverMultiplier: guide.simulationModel.variableRollover ? simRollover : undefined,
+        casinoVarianceScale: simCasinoScale,
+      }),
+    [
+      guide,
+      simDeposit,
+      simSingleRating,
+      simLegRating,
+      simCommission,
+      simRollover,
+      simCasinoScale,
+    ]
+  );
+
+  useEffect(() => {
+    if (!isPresent) return;
+    onRealisticProfitChange(guide.id, selectedThreeScenarios.realistic.netProfit);
+  }, [guide.id, isPresent, onRealisticProfitChange, selectedThreeScenarios.realistic.netProfit]);
+
+  useEffect(() => {
+    if (!isPresent) return;
+    onRegisterScrollEl(guide.id, detailScrollRef.current);
+    return () => {
+      onRegisterScrollEl(guide.id, null);
+    };
+  }, [guide.id, isPresent, onRegisterScrollEl]);
+
+  useEffect(() => {
+    if (!isPresent) return;
+    setIsHeroBannerHidden(false);
+    onHeroBannerHiddenChange(guide.id, false);
+    if (detailScrollRef.current) {
+      detailScrollRef.current.scrollTop = 0;
+    }
+  }, [detailTab, guide.id, isPresent, onHeroBannerHiddenChange]);
+
+  const handleDetailScroll = () => {
+    if (!isPresent) return;
+    const scrollEl = detailScrollRef.current;
+    const heroEl = heroBannerRef.current;
+    if (!scrollEl || !heroEl) return;
+    const hidden = scrollEl.scrollTop >= Math.max(24, heroEl.offsetHeight - 4);
+    setIsHeroBannerHidden((prev) => (prev === hidden ? prev : hidden));
+    onHeroBannerHiddenChange(guide.id, hidden);
+  };
+
+  const handleResetSimulator = () => {
+    setSimDeposit(guide.simulationModel.defaultDeposit);
+    setSimSingleRating(DEFAULT_SIMULATION_SCENARIOS.realistic.singleRatingPct);
+    setSimLegRating(DEFAULT_SIMULATION_SCENARIOS.realistic.multiLegRatingPct);
+    setSimCommission(Math.round(defaultExchangeCommission * 1000) / 10);
+    setSimRollover(guide.simulationModel.variableRollover?.defaultValue ?? 3);
+    setSimCasinoScale(1.0);
+  };
+
+  const completedStepsCount = progress.completedStepIds.length;
+  const totalStepsCount = guide.steps.length;
+  const brandColor = SOURCE_COLOR_MAP[guide.sourceId] ?? '#f59e0b';
+  const cat = categoryBadge(guide.category);
+  const diff = DIFFICULTY_META[guide.difficulty];
+
+  return (
+    <motion.div
+      custom={direction}
+      variants={prefersReducedMotion ? BONUS_PAGE_REDUCED_VARIANTS : BONUS_PAGE_SLIDE_VARIANTS}
+      initial="enter"
+      animate="center"
+      exit="exit"
+      transition={
+        prefersReducedMotion
+          ? { duration: 0.14, ease: 'easeOut' }
+          : { duration: 0.36, ease: [0.22, 1, 0.36, 1] }
+      }
+      data-testid={`bonus-detail-slide-${guide.sourceId}`}
+      data-slide-state={isPresent ? 'active' : 'exiting'}
+      className={`absolute inset-0 flex min-h-0 flex-col will-change-transform ${
+        isPresent ? '' : 'pointer-events-none select-none'
+      }`}
+    >
+      {/* Area Scrollabile Full-Screen (include il Banner Completo + Sub-Tabs Sticky + Contenuto) */}
+      <div
+        ref={detailScrollRef}
+        onScroll={handleDetailScroll}
+        className="h-full flex-1 overflow-y-auto"
+      >
+        {/* Banner Completo del Bonus — scorre via verso l'alto lasciando spazio al contenuto */}
+        <div
+          ref={heroBannerRef}
+          data-testid="full-bonus-banner"
+          className="relative overflow-hidden bg-slate-950/55 px-6 pb-3 pt-4"
+        >
+          <div
+            aria-hidden="true"
+            style={{
+              background: `radial-gradient(circle at 0% 0%, ${brandColor}24 0%, transparent 55%)`,
+            }}
+            className="pointer-events-none absolute inset-0"
+          />
+
+          <div className="relative flex flex-wrap items-start justify-between gap-4">
+            <div className="flex min-w-0 flex-1 items-start gap-3.5">
+              <BookmakerIcon
+                sourceId={guide.sourceId}
+                size={48}
+                className="mt-0.5 shrink-0 rounded-xl"
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="truncate text-xl font-extrabold tracking-tight text-white">
+                    {guide.bookmakerName}
+                  </h1>
+                  <span
+                    className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-extrabold ${TIER_BADGE[guide.tier]}`}
+                  >
+                    TIER {guide.tier}
+                  </span>
+                  <span
+                    className={`rounded-md border px-2 py-0.5 text-[10px] font-bold ${cat.className}`}
+                  >
+                    {cat.label}
+                  </span>
+                  <span
+                    className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold ${diff.badgeClass}`}
+                  >
+                    {diff.label}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm font-semibold text-brand-200">{guide.headline}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2.5 text-xs text-slate-400">
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="h-3.5 w-3.5 text-slate-500" />
+                    {guide.estimatedTimeLabel}
+                  </span>
+                  <span>•</span>
+                  <span className="inline-flex items-center gap-1">
+                    <Wallet className="h-3.5 w-3.5 text-slate-500" />
+                    {guide.simulationModel.defaultDeposit === 0
+                      ? 'Deposito 0€ (Rischio Zero)'
+                      : `Deposito consigliato: ${formatEuro(guide.simulationModel.defaultDeposit)}`}
+                  </span>
+                  {guide.promoCode && (
+                    <>
+                      <span>•</span>
+                      <button
+                        type="button"
+                        onClick={() => onCopyPromoCode(guide.promoCode!)}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-brand-400/45 bg-brand-400/15 px-2.5 py-0.5 font-mono text-[11px] font-bold text-brand-200 transition-colors hover:bg-brand-400/25"
+                      >
+                        <span>Codice: {guide.promoCode}</span>
+                        {copiedCode === guide.promoCode ? (
+                          <Check className="h-3 w-3 text-emerald-300" />
+                        ) : (
+                          <Copy className="h-3 w-3" />
+                        )}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Badge Profitto Atteso in Evidenza */}
+            <div className="shrink-0 rounded-xl border border-emerald-400/35 bg-emerald-500/10 px-4 py-2.5 text-right">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-300/80">
+                Profitto Stimato
+              </div>
+              <div className="mt-0.5 whitespace-nowrap font-mono text-2xl font-extrabold leading-none text-emerald-400">
+                {formatEuro(selectedThreeScenarios.realistic.netProfit, true)}
+              </div>
+              <div className="mt-1 whitespace-nowrap font-mono text-[10px] text-slate-400">
+                Cons {formatEuro(selectedThreeScenarios.conservative.netProfit, true)} · Ott{' '}
+                {formatEuro(selectedThreeScenarios.optimal.netProfit, true)}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Sub-Tabs Sticky — restano sempre accessibili durante lo scorrimento */}
+        <div
+          className={`sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 px-6 py-2.5 transition-shadow ${
+            isHeroBannerHidden
+              ? 'bg-[var(--bg-modal-solid)]/95 shadow-[0_8px_20px_-10px_rgba(0,0,0,0.85)] backdrop-blur-md'
+              : 'bg-slate-950/55'
+          }`}
+        >
+          <SlidingPillTrack
+            activeKey={detailTab}
+            measureDep={completedStepsCount}
+            pillClassName="rounded-lg border border-brand-400/45 bg-brand-400/20"
+            className="inline-flex items-center gap-1 rounded-xl border border-slate-800/90 bg-slate-900/90 p-1"
+          >
+            <button
+              type="button"
+              data-pill-key="guide"
+              onClick={() => setDetailTab('guide')}
+              className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                detailTab === 'guide' ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <BookOpen className="h-3.5 w-3.5" />
+              <span>
+                Guida Step-by-Step ({completedStepsCount}/{totalStepsCount})
+              </span>
+            </button>
+            <button
+              type="button"
+              data-pill-key="simulator"
+              onClick={() => setDetailTab('simulator')}
+              className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                detailTab === 'simulator' ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Calculator className="h-3.5 w-3.5" />
+              <span>Simulatore Profitto</span>
+            </button>
+            <button
+              type="button"
+              data-pill-key="terms"
+              onClick={() => setDetailTab('terms')}
+              className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                detailTab === 'terms' ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <FileWarning className="h-3.5 w-3.5" />
+              <span>Termini &amp; Condizioni</span>
+            </button>
+          </SlidingPillTrack>
+
+          <span className="rounded-md border border-slate-800 bg-slate-900/75 px-2.5 py-1 font-mono text-[10px] text-slate-400">
+            Audit T&amp;C: {WELCOME_BONUSES_LAST_UPDATED}
+          </span>
+        </div>
+
+        {/* Contenuto Tab */}
+        <div className="px-6 py-5">
+          {/* ============================================================
+              TAB 1: GUIDA STEP-BY-STEP
+             ============================================================ */}
+          {detailTab === 'guide' && (
+            <div className="mx-auto max-w-6xl space-y-4 view-enter">
+              {/* Banner Spiegazione Fallback Casinò */}
+              {guide.category === 'casino_fallback' && guide.categoryReason && (
+                <div className="rounded-xl border border-fuchsia-400/40 bg-fuchsia-500/10 p-4">
+                  <div className="flex items-start gap-2.5">
+                    <Dices className="mt-0.5 h-4 w-4 shrink-0 text-fuchsia-300" />
+                    <div>
+                      <div className="text-xs font-bold text-fuchsia-200">
+                        Perché su {guide.bookmakerName} è selezionato il Bonus Casinò +EV anziché lo
+                        Sport
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-300">
+                        {guide.categoryReason}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Riassunto Strategico + 3 Scenari di Profitto */}
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+                <div className="glass-card rounded-xl p-4 lg:col-span-6">
+                  <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-brand-300">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>Strategia Consigliata</span>
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-slate-300">{guide.summary}</p>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {guide.strategyTags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="rounded-md border border-slate-700/80 bg-slate-900/80 px-2 py-0.5 text-[10px] font-semibold text-slate-300"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-[11px] text-slate-400">
+                    <span className="font-semibold text-slate-200">Registrazione: </span>
+                    {guide.registrationNote}
+                  </div>
+                </div>
+
+                {/* 3 Scenari Simulati */}
+                <div className="glass-card flex flex-col justify-between rounded-xl p-4 lg:col-span-6">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      Simulazione Profitto Netto (Dep.{' '}
+                      {formatEuro(selectedThreeScenarios.realistic.depositUsed)})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDetailTab('simulator')}
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-brand-300 hover:text-brand-200"
+                    >
+                      <span>Personalizza</span>
+                      <ArrowRight className="h-3 w-3" />
+                    </button>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-3 gap-2.5">
+                    {(
+                      [
+                        {
+                          label: 'Conservativo',
+                          sub: guide.simulationModel.isPureCasino ? 'Prudente' : '94.5% / 95%',
+                          res: selectedThreeScenarios.conservative,
+                          tone:
+                            selectedThreeScenarios.conservative.netProfit >= 0
+                              ? 'text-slate-200'
+                              : 'text-rose-400',
+                          border: 'border-slate-800 bg-slate-950/70',
+                        },
+                        {
+                          label: 'Realistico',
+                          sub: guide.simulationModel.isPureCasino
+                            ? 'EV Monte Carlo'
+                            : 'Rating 96.5%',
+                          res: selectedThreeScenarios.realistic,
+                          tone: 'text-emerald-400',
+                          border: 'border-emerald-400/45 bg-emerald-500/10',
+                        },
+                        {
+                          label: 'Ottimale',
+                          sub: guide.simulationModel.isPureCasino ? 'Ottimizzato' : 'Rating 98%',
+                          res: selectedThreeScenarios.optimal,
+                          tone: 'text-brand-300',
+                          border: 'border-brand-400/35 bg-brand-400/10',
+                        },
+                      ] as const
+                    ).map((sc) => (
+                      <div
+                        key={sc.label}
+                        className={`rounded-xl border p-3 text-center ${sc.border}`}
+                      >
+                        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                          {sc.label}
+                        </div>
+                        <div className={`mt-1 font-mono text-lg font-extrabold ${sc.tone}`}>
+                          {formatEuro(sc.res.netProfit, true)}
+                        </div>
+                        <div className="mt-0.5 text-[10px] text-slate-500">{sc.sub}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-2.5 text-xs text-slate-400">
+                    <span>
+                      Bankroll Exchange:{' '}
+                      <strong className="font-mono text-slate-200">
+                        {selectedThreeScenarios.realistic.estimatedBankroll === 0
+                          ? '0,00 € (Rischio Zero)'
+                          : formatEuro(selectedThreeScenarios.realistic.estimatedBankroll)}
+                      </strong>
+                    </span>
+                    <span>
+                      ROI:{' '}
+                      <strong className="font-mono text-emerald-300">
+                        {selectedThreeScenarios.realistic.roiPct === null
+                          ? '∞ (No Deposito)'
+                          : `+${selectedThreeScenarios.realistic.roiPct.toFixed(1)}%`}
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Avviso Break-Even Rating se critico */}
+              {selectedThreeScenarios.realistic.breakEvenLegRatingPct !== null &&
+                selectedThreeScenarios.realistic.breakEvenLegRatingPct >= 93.5 && (
+                  <div className="flex items-start gap-2.5 rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                    <div>
+                      <span className="font-bold">Soglia Critica Rating: </span>
+                      il punto di pareggio di questo bonus è{' '}
+                      <span className="font-mono font-bold text-amber-200">
+                        {selectedThreeScenarios.realistic.breakEvenLegRatingPct.toFixed(2)}%
+                      </span>{' '}
+                      per singola gamba. Piazza scommesse SOLO con rating superiore (ideale ≥
+                      96.5%/gamba) utilizzando Multiodds / Oddsmatcher.
+                    </div>
+                  </div>
+                )}
+
+              {/* Checklist Operativa Step-by-Step */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    Procedura Operativa Step-by-Step
+                  </h2>
+                  <span className="font-mono text-xs text-slate-400">
+                    {completedStepsCount} di {totalStepsCount} completati
+                  </span>
+                </div>
+
+                {guide.steps.map((step) => {
+                  const checked = progress.completedStepIds.includes(step.id);
+                  const phase = PHASE_META[step.phase];
+                  return (
+                    <div
+                      key={step.id}
+                      className={`rounded-xl border p-4 transition-all ${
+                        checked
+                          ? 'border-emerald-500/35 bg-emerald-500/6'
+                          : 'border-slate-800/90 bg-slate-950/65 hover:border-slate-700/90'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <button
+                          type="button"
+                          onClick={() => onToggleStep(guide, progress, step.id)}
+                          aria-label={`Segna step ${step.stepNumber} come ${checked ? 'da fare' : 'completato'}`}
+                          className="mt-0.5 shrink-0 text-slate-400 transition-transform hover:scale-110 hover:text-emerald-300"
+                        >
+                          {checked ? (
+                            <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+                          ) : (
+                            <Circle className="h-5 w-5 text-slate-600" />
+                          )}
+                        </button>
+
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-[11px] font-bold text-brand-300">
+                                STEP {step.stepNumber}
+                              </span>
+                              <span
+                                className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase ${phase.className}`}
+                              >
+                                {phase.label}
+                              </span>
+                              <h3
+                                className={`text-sm font-bold ${
+                                  checked ? 'text-slate-400 line-through' : 'text-white'
+                                }`}
+                              >
+                                {step.title}
+                              </h3>
+                            </div>
+
+                            {step.toolAction && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (step.toolAction!.target === 'external') {
+                                    openExternalSafe(step.toolAction!.url ?? guide.url);
+                                  } else {
+                                    onOpenTool(step.toolAction!.target, {
+                                      mode: step.toolAction!.presetMode,
+                                    });
+                                  }
+                                }}
+                                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-brand-400/40 bg-brand-400/15 px-3 py-1 text-[11px] font-semibold text-brand-200 transition-colors hover:bg-brand-400/25 hover:text-white"
+                              >
+                                {step.toolAction.target === 'external' ? (
+                                  <ExternalLink className="h-3 w-3" />
+                                ) : step.toolAction.target === 'multiodds' ? (
+                                  <Layers className="h-3 w-3" />
+                                ) : step.toolAction.target === 'calculator' ? (
+                                  <Calculator className="h-3 w-3" />
+                                ) : (
+                                  <SlidersHorizontal className="h-3 w-3" />
+                                )}
+                                <span>{step.toolAction.label}</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Azione Esatta */}
+                          <div className="rounded-lg border border-brand-400/25 bg-brand-500/8 px-3.5 py-2 text-xs font-semibold text-slate-100">
+                            {step.exactAction}
+                          </div>
+
+                          <p className="text-xs leading-relaxed text-slate-300">
+                            {step.description}
+                          </p>
+
+                          {step.mathTip && (
+                            <div className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/8 px-3 py-2 text-[11px] text-emerald-200">
+                              <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                              <span>{step.mathTip}</span>
+                            </div>
+                          )}
+
+                          {step.warning && (
+                            <div className="flex items-start gap-2 rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+                              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" />
+                              <span>{step.warning}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================
+              TAB 2: SIMULATORE PROFITTO INTERATTIVO
+             ============================================================ */}
+          {detailTab === 'simulator' && (
+            <div className="mx-auto max-w-6xl space-y-4 view-enter">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+                {/* Controlli Simulazione */}
+                <div className="glass-card space-y-4 rounded-xl p-5 lg:col-span-5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold uppercase tracking-wider text-brand-300">
+                      Parametri Simulazione
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleResetSimulator}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:border-brand-400/50 hover:text-white"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      <span>Reset</span>
+                    </button>
+                  </div>
+
+                  {/* Deposito Scalabile */}
+                  <div>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-slate-300">Deposito Iniziale (€)</span>
+                      <span className="font-mono text-xs font-bold text-brand-300">
+                        {guide.simulationModel.scalableDeposit
+                          ? `Min ${guide.simulationModel.minDeposit}€ – Max ${guide.simulationModel.maxDeposit}€`
+                          : 'Importo fisso promo'}
+                      </span>
+                    </div>
+                    {guide.simulationModel.scalableDeposit ? (
+                      <div className="mt-2 flex items-center gap-3">
+                        <input
+                          type="range"
+                          min={guide.simulationModel.minDeposit}
+                          max={guide.simulationModel.maxDeposit}
+                          step={5}
+                          value={simDeposit}
+                          onChange={(e) => setSimDeposit(Number(e.target.value))}
+                          className="pulse-slider flex-1"
+                        />
+                        <NumericInput
+                          value={simDeposit}
+                          onChange={setSimDeposit}
+                          min={guide.simulationModel.minDeposit}
+                          max={guide.simulationModel.maxDeposit}
+                          allowDecimal={false}
+                          className="w-20 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-right font-mono text-xs font-bold text-white focus:border-brand-400 focus:outline-none"
+                        />
+                      </div>
+                    ) : (
+                      <div className="mt-1.5 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-1.5 font-mono text-xs text-slate-300">
+                        {formatEuro(guide.simulationModel.defaultDeposit)}
+                        {guide.simulationModel.defaultDeposit === 0 &&
+                          ' — Nessun deposito richiesto (rischio zero)'}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Rollover variabile */}
+                  {guide.simulationModel.variableRollover && (
+                    <div>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-slate-300">
+                          {guide.simulationModel.variableRollover.label}
+                        </span>
+                        <span className="font-mono font-bold text-brand-300">{simRollover}x</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={guide.simulationModel.variableRollover.min}
+                        max={guide.simulationModel.variableRollover.max}
+                        step={1}
+                        value={simRollover}
+                        onChange={(e) => setSimRollover(Number(e.target.value))}
+                        className="pulse-slider mt-2 w-full"
+                      />
+                    </div>
+                  )}
+
+                  {/* Slider Rating Sport (se non è puro casinò) */}
+                  {!guide.simulationModel.isPureCasino ? (
+                    <>
+                      <div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-slate-300">Rating Medio Singole</span>
+                          <span className="font-mono font-bold text-emerald-300">
+                            {simSingleRating.toFixed(1)}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={90}
+                          max={100}
+                          step={0.5}
+                          value={simSingleRating}
+                          onChange={(e) => setSimSingleRating(Number(e.target.value))}
+                          className="pulse-slider mt-2 w-full"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-slate-300">
+                            Rating Medio per Gamba (Multiple)
+                          </span>
+                          <span className="font-mono font-bold text-emerald-300">
+                            {simLegRating.toFixed(1)}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={90}
+                          max={100}
+                          step={0.5}
+                          value={simLegRating}
+                          onChange={(e) => setSimLegRating(Number(e.target.value))}
+                          className="pulse-slider mt-2 w-full"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-slate-300">
+                            Commissione Exchange di Riferimento
+                          </span>
+                          <span className="font-mono font-bold text-slate-200">
+                            {simCommission.toFixed(1)}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={6}
+                          step={0.5}
+                          value={simCommission}
+                          onChange={(e) => setSimCommission(Number(e.target.value))}
+                          className="pulse-slider mt-2 w-full"
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-slate-300">
+                          Profilo Esecuzione Strategia Casinò 2-Fasi
+                        </span>
+                        <span className="font-mono font-bold text-fuchsia-300">
+                          {simCasinoScale <= 0.85
+                            ? 'Prudente'
+                            : simCasinoScale >= 1.12
+                            ? 'Ottimale'
+                            : 'Standard'}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.7}
+                        max={1.25}
+                        step={0.05}
+                        value={simCasinoScale}
+                        onChange={(e) => setSimCasinoScale(Number(e.target.value))}
+                        className="pulse-slider mt-2 w-full"
+                      />
+                      <p className="mt-1.5 text-[11px] text-slate-400">
+                        Modella l’efficienza nel passaggio Fase 1 (alta volatilità) → Fase 2 (slot
+                        alto RTP) su simulazione Monte Carlo deterministica (2.500 prove).
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Risultati Simulazione Live */}
+                <div className="glass-card flex flex-col justify-between space-y-4 rounded-xl p-5 lg:col-span-7">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <div
+                      className={`rounded-xl border p-3.5 ${
+                        customSimulation.netProfit >= 0
+                          ? 'border-emerald-400/45 bg-emerald-500/12'
+                          : 'border-rose-500/50 bg-rose-500/12'
+                      }`}
+                    >
+                      <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                        Profitto Netto Atteso
+                      </div>
+                      <AnimatedNumber
+                        value={customSimulation.netProfit}
+                        formatter={(v) => formatEuro(v, true)}
+                        className={`mt-1 block whitespace-nowrap font-mono text-xl font-extrabold ${
+                          customSimulation.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                        }`}
+                      />
+                      <div className="mt-0.5 text-[10px] text-slate-400">
+                        {customSimulation.isProfitable
+                          ? 'Operazione profittevole (+EV)'
+                          : 'ATTENZIONE: in perdita con questi parametri!'}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                        {customSimulation.hasBustOutUpside
+                          ? 'Worst-Case (Rollover 100%)'
+                          : 'Valore Estratto Lordo'}
+                      </div>
+                      <AnimatedNumber
+                        value={
+                          customSimulation.hasBustOutUpside
+                            ? customSimulation.worstCaseProfit
+                            : customSimulation.grossExtraction
+                        }
+                        formatter={(v) => formatEuro(v, true)}
+                        className="mt-1 block whitespace-nowrap font-mono text-xl font-extrabold text-brand-300"
+                      />
+                      <div className="mt-0.5 text-[10px] text-slate-500">
+                        {customSimulation.hasBustOutUpside
+                          ? 'Senza svuotamento Bust-Out'
+                          : `Costo qual.: -${formatEuro(customSimulation.qualifyingCost)}`}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3.5">
+                      <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                        Bankroll &amp; ROI
+                      </div>
+                      <div className="mt-1 whitespace-nowrap font-mono text-xl font-extrabold text-white">
+                        {customSimulation.estimatedBankroll === 0
+                          ? '0,00 €'
+                          : formatEuro(customSimulation.estimatedBankroll)}
+                      </div>
+                      <div className="mt-0.5 font-mono text-[10px] text-emerald-300">
+                        ROI:{' '}
+                        {customSimulation.roiPct === null
+                          ? '∞ (Rischio 0€)'
+                          : `${customSimulation.roiPct >= 0 ? '+' : ''}${customSimulation.roiPct.toFixed(1)}%`}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Tabella Breakdown Euro per Euro */}
+                  <div>
+                    <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      Dettaglio Calcolo Voce per Voce
+                    </div>
+                    <div className="space-y-1.5">
+                      {customSimulation.breakdown.map((row, idx) => (
+                        <div
+                          key={`${row.label}_${idx}`}
+                          className="flex items-center justify-between gap-3 rounded-lg border border-slate-800/80 bg-slate-950/70 px-3.5 py-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate text-xs font-semibold text-slate-100">
+                              {row.label}
+                            </div>
+                            <div className="truncate text-[11px] text-slate-400">{row.detail}</div>
+                          </div>
+                          <span
+                            className={`shrink-0 font-mono text-xs font-bold ${
+                              row.delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {formatEuro(row.delta, true)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Confronto Barre 4 Scenari */}
+                  <div>
+                    <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      Confronto Scenari (Deposito {formatEuro(simDeposit)})
+                    </div>
+                    {(() => {
+                      const bars = [
+                        {
+                          label: 'Conservativo',
+                          val: selectedThreeScenarios.conservative.netProfit,
+                          color: 'from-slate-500 to-slate-400',
+                        },
+                        {
+                          label: 'Realistico',
+                          val: selectedThreeScenarios.realistic.netProfit,
+                          color: 'from-emerald-600 to-emerald-400',
+                        },
+                        {
+                          label: 'Personalizzato',
+                          val: customSimulation.netProfit,
+                          color: 'from-brand-500 to-brand-300',
+                        },
+                        {
+                          label: 'Ottimale',
+                          val: selectedThreeScenarios.optimal.netProfit,
+                          color: 'from-sky-500 to-cyan-300',
+                        },
+                      ];
+                      const maxAbs = Math.max(10, ...bars.map((b) => Math.abs(b.val)));
+                      return (
+                        <div className="space-y-2">
+                          {bars.map((bar) => (
+                            <div key={bar.label} className="flex items-center gap-3 text-xs">
+                              <span className="w-24 shrink-0 text-[11px] font-semibold text-slate-400">
+                                {bar.label}
+                              </span>
+                              <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-slate-900">
+                                <div
+                                  style={{
+                                    width: `${Math.max(3, Math.min(100, (Math.abs(bar.val) / maxAbs) * 100))}%`,
+                                  }}
+                                  className={`h-full rounded-full bg-gradient-to-r transition-all duration-300 ${
+                                    bar.val < 0 ? 'from-rose-600 to-rose-400' : bar.color
+                                  }`}
+                                />
+                              </div>
+                              <span
+                                className={`w-20 shrink-0 text-right font-mono text-xs font-bold ${
+                                  bar.val >= 0 ? 'text-slate-100' : 'text-rose-400'
+                                }`}
+                              >
+                                {formatEuro(bar.val, true)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================
+              TAB 3: TERMINI & CONDIZIONI APPROFONDITI
+             ============================================================ */}
+          {detailTab === 'terms' && (
+            <div className="mx-auto max-w-6xl space-y-4 view-enter">
+              <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2 lg:grid-cols-3">
+                <div className="glass-card rounded-xl p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Struttura Bonus
+                  </div>
+                  <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                    {guide.termsSummary.bonusStructure}
+                  </p>
+                </div>
+
+                <div className="glass-card rounded-xl p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Requisiti di Sblocco / Rollover
+                  </div>
+                  <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                    {guide.termsSummary.rolloverRule}
+                  </p>
+                </div>
+
+                <div className="glass-card rounded-xl p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Quote Minime &amp; Tipologia Giocate
+                  </div>
+                  <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                    {guide.termsSummary.minOddsRule}
+                  </p>
+                </div>
+
+                <div className="glass-card rounded-xl p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Scadenze &amp; Finestra Temporale
+                  </div>
+                  <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                    {guide.termsSummary.validityRule}
+                  </p>
+                </div>
+
+                <div className="glass-card rounded-xl p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Cap di Conversione &amp; Limiti
+                  </div>
+                  <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
+                    {guide.termsSummary.conversionCap}
+                  </p>
+                </div>
+
+                <div className="glass-card rounded-xl p-4">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Metodi di Pagamento Esclusi
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {guide.termsSummary.excludedPayments.map((pm) => (
+                      <span
+                        key={pm}
+                        className="rounded-md border border-rose-500/35 bg-rose-500/12 px-2 py-0.5 text-[11px] font-semibold text-rose-200"
+                      >
+                        {pm}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Trappole T&C Critiche */}
+              <div className="rounded-xl border border-amber-400/35 bg-amber-500/8 p-4">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-200">
+                  <AlertTriangle className="h-4 w-4 text-amber-300" />
+                  <span>Trappole T&amp;C da Evitare</span>
+                </div>
+                <ul className="mt-2.5 space-y-2">
+                  {guide.termsSummary.criticalWarnings.map((w, i) => (
+                    <li
+                      key={i}
+                      className="flex items-start gap-2 text-xs leading-relaxed text-slate-200"
+                    >
+                      <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
+                      <span>{w}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 text-[11px] text-slate-400">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-brand-300" />
+                <span>
+                  I termini promozionali ADM possono variare periodicamente (ultimo audit:{' '}
+                  <strong className="text-slate-200">{WELCOME_BONUSES_LAST_UPDATED}</strong>).
+                  Controlla sempre la nota informativa ufficiale su {guide.bookmakerName}{' '}
+                  immediatamente prima di effettuare il primo deposito.
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+};
+
 export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   progressMap,
   soundEnabled,
@@ -200,21 +1233,19 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   const [sortKey, setSortKey] = useState<SortKey>('profit_desc');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [openedGuideId, setOpenedGuideId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>('guide');
+  const [navDirection, setNavDirection] = useState<number>(1);
   const [showExcludedModal, setShowExcludedModal] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [isHeroBannerHidden, setIsHeroBannerHidden] = useState<boolean>(false);
+  const [liveRealisticProfit, setLiveRealisticProfit] = useState<{
+    guideId: string;
+    netProfit: number;
+  } | null>(null);
 
-  const detailScrollRef = useRef<HTMLDivElement | null>(null);
-
-  // Stato del simulatore interattivo (si resetta quando si apre una nuova offerta)
-  const [simDeposit, setSimDeposit] = useState<number>(500);
-  const [simSingleRating, setSimSingleRating] = useState<number>(96.5);
-  const [simLegRating, setSimLegRating] = useState<number>(96.5);
-  const [simCommission, setSimCommission] = useState<number>(
-    Math.round(defaultExchangeCommission * 1000) / 10
-  );
-  const [simRollover, setSimRollover] = useState<number>(3);
-  const [simCasinoScale, setSimCasinoScale] = useState<number>(1.0);
+  const prefersReducedMotion = useReducedMotion();
+  const activeScrollRef = useRef<{ guideId: string; el: HTMLDivElement } | null>(null);
+  const openedGuideIdRef = useRef<string | null>(openedGuideId);
+  openedGuideIdRef.current = openedGuideId;
 
   // Precalcola i 3 scenari standard per tutte le guide (veloce + deterministico)
   const guideSimulations = useMemo(() => {
@@ -230,23 +1261,30 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
     return WELCOME_BONUS_GUIDES.find((g) => g.id === openedGuideId) ?? null;
   }, [openedGuideId]);
 
-  // Sincronizza i parametri del simulatore quando si apre una guida in dettaglio
-  useEffect(() => {
-    if (!openedGuide) return;
-    setSimDeposit(openedGuide.simulationModel.defaultDeposit);
-    setSimSingleRating(DEFAULT_SIMULATION_SCENARIOS.realistic.singleRatingPct);
-    setSimLegRating(DEFAULT_SIMULATION_SCENARIOS.realistic.multiLegRatingPct);
-    setSimCommission(Math.round(defaultExchangeCommission * 1000) / 10);
-    setSimRollover(openedGuide.simulationModel.variableRollover?.defaultValue ?? 3);
-    setSimCasinoScale(1.0);
-  }, [openedGuide, defaultExchangeCommission]);
-
-  // Riporta lo scroll in alto al cambio offerta o tab nel dettaglio a schermo intero
-  useEffect(() => {
-    if (openedGuideId && detailScrollRef.current) {
-      detailScrollRef.current.scrollTop = 0;
+  const handleRegisterScrollEl = useCallback((guideId: string, el: HTMLDivElement | null) => {
+    if (el) {
+      activeScrollRef.current = { guideId, el };
+    } else if (activeScrollRef.current?.guideId === guideId) {
+      activeScrollRef.current = null;
     }
-  }, [openedGuideId, detailTab]);
+  }, []);
+
+  const handleHeroBannerHiddenChange = useCallback((guideId: string, hidden: boolean) => {
+    if (openedGuideIdRef.current !== guideId) return;
+    setIsHeroBannerHidden((prev) => (prev === hidden ? prev : hidden));
+  }, []);
+
+  const handleRealisticProfitChange = useCallback((guideId: string, netProfit: number) => {
+    setLiveRealisticProfit((prev) =>
+      prev && prev.guideId === guideId && prev.netProfit === netProfit
+        ? prev
+        : { guideId, netProfit }
+    );
+  }, []);
+
+  const handleScrollToTop = () => {
+    activeScrollRef.current?.el.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   // Tasto ESC per chiudere la modale esclusi o tornare dalla scheda dettaglio ai banner
   useEffect(() => {
@@ -353,39 +1391,6 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
     });
   }, [categoryFilter, difficultyFilter, searchQuery, sortKey, progressMap, guideSimulations]);
 
-  // Simulazioni del pannello dettaglio per la guida aperta
-  const selectedThreeScenarios = useMemo(() => {
-    if (!openedGuide) return null;
-    return simulateThreeScenarios(openedGuide.simulationModel, {
-      deposit: simDeposit,
-      rolloverMultiplier: openedGuide.simulationModel.variableRollover ? simRollover : undefined,
-    });
-  }, [openedGuide, simDeposit, simRollover]);
-
-  const customSimulation = useMemo(() => {
-    if (!openedGuide) return null;
-    return simulateWelcomeBonus(
-      openedGuide.simulationModel,
-      DEFAULT_SIMULATION_SCENARIOS.realistic,
-      {
-        deposit: simDeposit,
-        singleRatingPct: simSingleRating,
-        multiLegRatingPct: simLegRating,
-        exchangeCommissionPct: simCommission,
-        rolloverMultiplier: openedGuide.simulationModel.variableRollover ? simRollover : undefined,
-        casinoVarianceScale: simCasinoScale,
-      }
-    );
-  }, [
-    openedGuide,
-    simDeposit,
-    simSingleRating,
-    simLegRating,
-    simCommission,
-    simRollover,
-    simCasinoScale,
-  ]);
-
   const activeProgress: WelcomeBonusProgressEntry | null = useMemo(() => {
     if (!openedGuide) return null;
     const existing = progressMap[openedGuide.id];
@@ -400,38 +1405,48 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   }, [progressMap, openedGuide]);
 
   const handleOpenGuide = (guideId: string) => {
-    setDetailTab('guide');
+    setNavDirection(1);
+    setIsHeroBannerHidden(false);
+    setOpenedGuideId(guideId);
+  };
+
+  const handleNavigateGuide = (guideId: string, direction: 1 | -1) => {
+    setNavDirection(direction);
+    setIsHeroBannerHidden(false);
     setOpenedGuideId(guideId);
   };
 
   const handleCloseGuide = () => {
+    setIsHeroBannerHidden(false);
     setOpenedGuideId(null);
   };
 
-  const handleToggleStep = (stepId: string) => {
-    if (!openedGuide || !activeProgress) return;
-    const exists = activeProgress.completedStepIds.includes(stepId);
-    const nextSteps = exists
-      ? activeProgress.completedStepIds.filter((id) => id !== stepId)
-      : [...activeProgress.completedStepIds, stepId];
+  const handleToggleStep = useCallback(
+    (guide: WelcomeBonusGuide, progress: WelcomeBonusProgressEntry, stepId: string) => {
+      const exists = progress.completedStepIds.includes(stepId);
+      const nextSteps = exists
+        ? progress.completedStepIds.filter((id) => id !== stepId)
+        : [...progress.completedStepIds, stepId];
 
-    let nextStatus: WelcomeBonusProgressStatus = activeProgress.status;
-    if (nextSteps.length === openedGuide.steps.length) {
-      nextStatus = 'completed';
-    } else if (nextSteps.length > 0 && nextStatus === 'todo') {
-      nextStatus = 'in_progress';
-    } else if (nextSteps.length === 0 && nextStatus === 'in_progress') {
-      nextStatus = 'todo';
-    }
+      let nextStatus: WelcomeBonusProgressStatus = progress.status;
+      if (nextSteps.length === guide.steps.length) {
+        nextStatus = 'completed';
+      } else if (nextSteps.length > 0 && nextStatus === 'todo') {
+        nextStatus = 'in_progress';
+      } else if (nextSteps.length === 0 && nextStatus === 'in_progress') {
+        nextStatus = 'todo';
+      }
 
-    onSaveProgress({
-      ...activeProgress,
-      guideId: openedGuide.id,
-      status: nextStatus,
-      completedStepIds: nextSteps,
-      updatedAt: Date.now(),
-    });
-  };
+      onSaveProgress({
+        ...progress,
+        guideId: guide.id,
+        status: nextStatus,
+        completedStepIds: nextSteps,
+        updatedAt: Date.now(),
+      });
+    },
+    [onSaveProgress]
+  );
 
   const handleSetStatus = (status: WelcomeBonusProgressStatus) => {
     if (!openedGuide || !activeProgress) return;
@@ -460,23 +1475,16 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
     });
   };
 
-  const handleCopyPromoCode = (code: string) => {
-    void navigator.clipboard?.writeText(code).catch(() => {});
-    if (soundEnabled) playCopyTick();
-    setCopiedCode(code);
-    onNotify?.('Codice Promo Copiato', `Codice "${code}" copiato negli appunti.`);
-    setTimeout(() => setCopiedCode((prev) => (prev === code ? null : prev)), 2000);
-  };
-
-  const handleResetSimulator = () => {
-    if (!openedGuide) return;
-    setSimDeposit(openedGuide.simulationModel.defaultDeposit);
-    setSimSingleRating(DEFAULT_SIMULATION_SCENARIOS.realistic.singleRatingPct);
-    setSimLegRating(DEFAULT_SIMULATION_SCENARIOS.realistic.multiLegRatingPct);
-    setSimCommission(Math.round(defaultExchangeCommission * 1000) / 10);
-    setSimRollover(openedGuide.simulationModel.variableRollover?.defaultValue ?? 3);
-    setSimCasinoScale(1.0);
-  };
+  const handleCopyPromoCode = useCallback(
+    (code: string) => {
+      void navigator.clipboard?.writeText(code).catch(() => {});
+      if (soundEnabled) playCopyTick();
+      setCopiedCode(code);
+      onNotify?.('Codice Promo Copiato', `Codice "${code}" copiato negli appunti.`);
+      setTimeout(() => setCopiedCode((prev) => (prev === code ? null : prev)), 2000);
+    },
+    [onNotify, soundEnabled]
+  );
 
   const progressPct =
     globalStats.totalCount > 0
@@ -501,16 +1509,18 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
   // =========================================================================
   // VISTA 2 — DETTAGLIO OFFERTA A SCHERMO INTERO NELLA PAGINA
   // =========================================================================
-  if (openedGuide && selectedThreeScenarios && customSimulation && activeProgress) {
-    const completedStepsCount = activeProgress.completedStepIds.length;
-    const totalStepsCount = openedGuide.steps.length;
+  if (openedGuide && activeProgress) {
     const brandColor = SOURCE_COLOR_MAP[openedGuide.sourceId] ?? '#f59e0b';
     const cat = categoryBadge(openedGuide.category);
-    const diff = DIFFICULTY_META[openedGuide.difficulty];
+    const defaultRealisticProfit = guideSimulations.get(openedGuide.id)!.realistic.netProfit;
+    const headerRealisticProfit =
+      liveRealisticProfit?.guideId === openedGuide.id
+        ? liveRealisticProfit.netProfit
+        : defaultRealisticProfit;
 
     return (
       <div
-        key={`detail-${openedGuide.id}`}
+        key="bonus-fullscreen-detail-shell"
         data-testid="bonus-fullscreen-detail"
         className="view-enter flex h-full min-h-0 flex-col overflow-hidden"
       >
@@ -521,12 +1531,12 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
             style={{
               background: `linear-gradient(90deg, ${brandColor} 0%, ${brandColor}55 45%, transparent 100%)`,
             }}
-            className="h-[2px] w-full shrink-0"
+            className="h-[2px] w-full shrink-0 transition-all duration-300"
           />
 
-          {/* Barra Navigazione + Azioni Rapide */}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-950/75 px-5 py-2.5">
-            <div className="flex items-center gap-2.5">
+          {/* Barra Navigazione + Banner Ridotto allo Scroll + Azioni Rapide */}
+          <div className="relative z-30 flex flex-wrap items-center justify-between gap-2.5 border-b border-slate-800/80 bg-slate-950/85 px-5 py-2.5">
+            <div className="flex shrink-0 items-center gap-2.5">
               <button
                 type="button"
                 onClick={handleCloseGuide}
@@ -542,22 +1552,27 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                   <button
                     type="button"
                     disabled={!prevGuide}
-                    onClick={() => prevGuide && handleOpenGuide(prevGuide.id)}
+                    onClick={() => prevGuide && handleNavigateGuide(prevGuide.id, -1)}
                     title={prevGuide ? `Precedente: ${prevGuide.bookmakerName}` : 'Prima offerta'}
                     aria-label="Offerta precedente"
+                    data-testid="bonus-nav-prev"
                     className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
                   >
                     <ChevronLeft className="h-3.5 w-3.5" />
                   </button>
-                  <span className="px-1.5 font-mono text-[10px] font-semibold text-slate-400">
+                  <span
+                    data-testid="bonus-nav-counter"
+                    className="px-1.5 font-mono text-[10px] font-semibold text-slate-400"
+                  >
                     {currentNavIndex + 1}/{navList.length}
                   </span>
                   <button
                     type="button"
                     disabled={!nextGuide}
-                    onClick={() => nextGuide && handleOpenGuide(nextGuide.id)}
+                    onClick={() => nextGuide && handleNavigateGuide(nextGuide.id, 1)}
                     title={nextGuide ? `Successiva: ${nextGuide.bookmakerName}` : 'Ultima offerta'}
                     aria-label="Offerta successiva"
+                    data-testid="bonus-nav-next"
                     className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
                   >
                     <ChevronRight className="h-3.5 w-3.5" />
@@ -566,7 +1581,86 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            {/* Banner Ridotto — appare solo quando il banner completo non è più visibile allo scroll */}
+            <div className="flex min-w-0 flex-1 items-center justify-center overflow-hidden px-1">
+              <AnimatePresence>
+                {isHeroBannerHidden && (
+                  <motion.div
+                    key={`compact-banner-${openedGuide.id}`}
+                    data-testid="compact-bonus-banner"
+                    initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -6, scale: 0.98 }}
+                    transition={{ duration: 0.16, ease: 'easeOut' }}
+                    onClick={handleScrollToTop}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleScrollToTop();
+                      }
+                    }}
+                    title="Torna in cima al banner completo"
+                    style={{
+                      background: `linear-gradient(90deg, ${brandColor}1c 0%, rgba(15, 23, 42, 0.9) 45%, rgba(16, 185, 129, 0.1) 100%)`,
+                    }}
+                    className="flex max-w-full cursor-pointer items-center gap-2.5 overflow-hidden rounded-xl border border-slate-700/80 px-2.5 py-1 shadow-[0_4px_18px_-8px_rgba(0,0,0,0.8)] transition-colors hover:border-brand-400/50"
+                  >
+                    <BookmakerIcon
+                      sourceId={openedGuide.sourceId}
+                      size={22}
+                      className="shrink-0 rounded-md"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-xs font-extrabold text-white">
+                          {openedGuide.bookmakerName}
+                        </span>
+                        <span
+                          className={`hidden shrink-0 rounded border px-1 py-0.2 font-mono text-[9px] font-extrabold xl:inline-flex ${TIER_BADGE[openedGuide.tier]}`}
+                        >
+                          TIER {openedGuide.tier}
+                        </span>
+                        <span
+                          className={`hidden shrink-0 rounded border px-1.5 py-0.2 text-[9px] font-bold xl:inline-flex ${cat.className}`}
+                        >
+                          {cat.label}
+                        </span>
+                      </div>
+                      <div className="hidden truncate text-[10px] font-medium text-brand-200/90 2xl:block">
+                        {openedGuide.headline}
+                      </div>
+                    </div>
+
+                    {openedGuide.promoCode && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCopyPromoCode(openedGuide.promoCode!);
+                        }}
+                        title={`Copia codice promo ${openedGuide.promoCode}`}
+                        className="hidden shrink-0 items-center gap-1 rounded-md border border-brand-400/40 bg-brand-400/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-brand-200 transition-colors hover:bg-brand-400/25 xl:inline-flex"
+                      >
+                        <span>{openedGuide.promoCode}</span>
+                        {copiedCode === openedGuide.promoCode ? (
+                          <Check className="h-2.5 w-2.5 text-emerald-300" />
+                        ) : (
+                          <Copy className="h-2.5 w-2.5" />
+                        )}
+                      </button>
+                    )}
+
+                    <div className="shrink-0 rounded-lg border border-emerald-400/35 bg-emerald-500/12 px-2 py-0.5 font-mono text-xs font-extrabold text-emerald-400">
+                      {formatEuro(headerRealisticProfit, true)}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
               {/* Stato Avanzamento & Profitto Reale */}
               <div className="inline-flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900/80 p-1">
                 {(['todo', 'in_progress', 'completed'] as WelcomeBonusProgressStatus[]).map(
@@ -594,9 +1688,7 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
                 <div className="flex items-center gap-1.5 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1">
                   <span className="text-[10px] font-semibold text-emerald-300">Reale (€):</span>
                   <NumericInput
-                    value={
-                      activeProgress.actualProfit ?? selectedThreeScenarios.realistic.netProfit
-                    }
+                    value={activeProgress.actualProfit ?? headerRealisticProfit}
                     onChange={handleSetActualProfit}
                     min={0}
                     max={10000}
@@ -616,853 +1708,28 @@ export const WelcomeBonusesView: React.FC<WelcomeBonusesViewProps> = ({
             </div>
           </div>
 
-          {/* Sticky Hero Header della Guida Aperta */}
-          <div className="relative overflow-hidden border-b border-slate-800/80 bg-slate-950/55 px-6 py-4">
-            <div
-              aria-hidden="true"
-              style={{
-                background: `radial-gradient(circle at 0% 0%, ${brandColor}24 0%, transparent 55%)`,
-              }}
-              className="pointer-events-none absolute inset-0"
-            />
-
-            <div className="relative flex flex-wrap items-start justify-between gap-4">
-              <div className="flex min-w-0 flex-1 items-start gap-3.5">
-                <BookmakerIcon
-                  sourceId={openedGuide.sourceId}
-                  size={48}
-                  className="mt-0.5 shrink-0 rounded-xl"
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h1 className="truncate text-xl font-extrabold tracking-tight text-white">
-                      {openedGuide.bookmakerName}
-                    </h1>
-                    <span
-                      className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-extrabold ${TIER_BADGE[openedGuide.tier]}`}
-                    >
-                      TIER {openedGuide.tier}
-                    </span>
-                    <span
-                      className={`rounded-md border px-2 py-0.5 text-[10px] font-bold ${cat.className}`}
-                    >
-                      {cat.label}
-                    </span>
-                    <span
-                      className={`rounded-md border px-2 py-0.5 text-[10px] font-semibold ${diff.badgeClass}`}
-                    >
-                      {diff.label}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-sm font-semibold text-brand-200">{openedGuide.headline}</p>
-                  <div className="mt-2 flex flex-wrap items-center gap-2.5 text-xs text-slate-400">
-                    <span className="inline-flex items-center gap-1">
-                      <Clock className="h-3.5 w-3.5 text-slate-500" />
-                      {openedGuide.estimatedTimeLabel}
-                    </span>
-                    <span>•</span>
-                    <span className="inline-flex items-center gap-1">
-                      <Wallet className="h-3.5 w-3.5 text-slate-500" />
-                      {openedGuide.simulationModel.defaultDeposit === 0
-                        ? 'Deposito 0€ (Rischio Zero)'
-                        : `Deposito consigliato: ${formatEuro(openedGuide.simulationModel.defaultDeposit)}`}
-                    </span>
-                    {openedGuide.promoCode && (
-                      <>
-                        <span>•</span>
-                        <button
-                          type="button"
-                          onClick={() => handleCopyPromoCode(openedGuide.promoCode!)}
-                          className="inline-flex items-center gap-1.5 rounded-md border border-brand-400/45 bg-brand-400/15 px-2.5 py-0.5 font-mono text-[11px] font-bold text-brand-200 transition-colors hover:bg-brand-400/25"
-                        >
-                          <span>Codice: {openedGuide.promoCode}</span>
-                          {copiedCode === openedGuide.promoCode ? (
-                            <Check className="h-3 w-3 text-emerald-300" />
-                          ) : (
-                            <Copy className="h-3 w-3" />
-                          )}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Badge Profitto Atteso in Evidenza */}
-              <div className="shrink-0 rounded-xl border border-emerald-400/35 bg-emerald-500/10 px-4 py-2.5 text-right">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-300/80">
-                  Profitto Stimato
-                </div>
-                <div className="mt-0.5 whitespace-nowrap font-mono text-2xl font-extrabold leading-none text-emerald-400">
-                  {formatEuro(selectedThreeScenarios.realistic.netProfit, true)}
-                </div>
-                <div className="mt-1 whitespace-nowrap font-mono text-[10px] text-slate-400">
-                  Cons {formatEuro(selectedThreeScenarios.conservative.netProfit, true)} · Ott{' '}
-                  {formatEuro(selectedThreeScenarios.optimal.netProfit, true)}
-                </div>
-              </div>
-            </div>
-
-            {/* Sub-Tabs */}
-            <div className="relative mt-4 flex flex-wrap items-center justify-between gap-2">
-              <SlidingPillTrack
-                activeKey={detailTab}
-                measureDep={completedStepsCount}
-                pillClassName="rounded-lg border border-brand-400/45 bg-brand-400/20"
-                className="inline-flex items-center gap-1 rounded-xl border border-slate-800/90 bg-slate-900/90 p-1"
-              >
-                <button
-                  type="button"
-                  data-pill-key="guide"
-                  onClick={() => setDetailTab('guide')}
-                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
-                    detailTab === 'guide' ? 'text-white' : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <BookOpen className="h-3.5 w-3.5" />
-                  <span>
-                    Guida Step-by-Step ({completedStepsCount}/{totalStepsCount})
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  data-pill-key="simulator"
-                  onClick={() => setDetailTab('simulator')}
-                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
-                    detailTab === 'simulator'
-                      ? 'text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <Calculator className="h-3.5 w-3.5" />
-                  <span>Simulatore Profitto</span>
-                </button>
-                <button
-                  type="button"
-                  data-pill-key="terms"
-                  onClick={() => setDetailTab('terms')}
-                  className={`relative z-10 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
-                    detailTab === 'terms' ? 'text-white' : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <FileWarning className="h-3.5 w-3.5" />
-                  <span>Termini &amp; Condizioni</span>
-                </button>
-              </SlidingPillTrack>
-
-              <span className="rounded-md border border-slate-800 bg-slate-900/75 px-2.5 py-1 font-mono text-[10px] text-slate-400">
-                Audit T&amp;C: {WELCOME_BONUSES_LAST_UPDATED}
-              </span>
-            </div>
-          </div>
-
-          {/* Body Scrollabile Full-Screen */}
-          <div ref={detailScrollRef} className="flex-1 overflow-y-auto px-6 py-5">
-            {/* ============================================================
-                TAB 1: GUIDA STEP-BY-STEP
-               ============================================================ */}
-            {detailTab === 'guide' && (
-              <div className="mx-auto max-w-6xl space-y-4 view-enter">
-                {/* Banner Spiegazione Fallback Casinò */}
-                {openedGuide.category === 'casino_fallback' && openedGuide.categoryReason && (
-                  <div className="rounded-xl border border-fuchsia-400/40 bg-fuchsia-500/10 p-4">
-                    <div className="flex items-start gap-2.5">
-                      <Dices className="mt-0.5 h-4 w-4 shrink-0 text-fuchsia-300" />
-                      <div>
-                        <div className="text-xs font-bold text-fuchsia-200">
-                          Perché su {openedGuide.bookmakerName} è selezionato il Bonus Casinò +EV anziché lo Sport
-                        </div>
-                        <p className="mt-1 text-xs leading-relaxed text-slate-300">
-                          {openedGuide.categoryReason}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Riassunto Strategico + 3 Scenari di Profitto */}
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-                  <div className="glass-card rounded-xl p-4 lg:col-span-6">
-                    <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-brand-300">
-                      <Sparkles className="h-3.5 w-3.5" />
-                      <span>Strategia Consigliata</span>
-                    </div>
-                    <p className="mt-2 text-xs leading-relaxed text-slate-300">
-                      {openedGuide.summary}
-                    </p>
-                    <div className="mt-3 flex flex-wrap gap-1.5">
-                      {openedGuide.strategyTags.map((tag) => (
-                        <span
-                          key={tag}
-                          className="rounded-md border border-slate-700/80 bg-slate-900/80 px-2 py-0.5 text-[10px] font-semibold text-slate-300"
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                    <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-[11px] text-slate-400">
-                      <span className="font-semibold text-slate-200">Registrazione: </span>
-                      {openedGuide.registrationNote}
-                    </div>
-                  </div>
-
-                  {/* 3 Scenari Simulati */}
-                  <div className="glass-card flex flex-col justify-between rounded-xl p-4 lg:col-span-6">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                        Simulazione Profitto Netto (Dep.{' '}
-                        {formatEuro(selectedThreeScenarios.realistic.depositUsed)})
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setDetailTab('simulator')}
-                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-brand-300 hover:text-brand-200"
-                      >
-                        <span>Personalizza</span>
-                        <ArrowRight className="h-3 w-3" />
-                      </button>
-                    </div>
-
-                    <div className="mt-3 grid grid-cols-3 gap-2.5">
-                      {(
-                        [
-                          {
-                            label: 'Conservativo',
-                            sub: openedGuide.simulationModel.isPureCasino
-                              ? 'Prudente'
-                              : '94.5% / 95%',
-                            res: selectedThreeScenarios.conservative,
-                            tone:
-                              selectedThreeScenarios.conservative.netProfit >= 0
-                                ? 'text-slate-200'
-                                : 'text-rose-400',
-                            border: 'border-slate-800 bg-slate-950/70',
-                          },
-                          {
-                            label: 'Realistico',
-                            sub: openedGuide.simulationModel.isPureCasino
-                              ? 'EV Monte Carlo'
-                              : 'Rating 96.5%',
-                            res: selectedThreeScenarios.realistic,
-                            tone: 'text-emerald-400',
-                            border: 'border-emerald-400/45 bg-emerald-500/10',
-                          },
-                          {
-                            label: 'Ottimale',
-                            sub: openedGuide.simulationModel.isPureCasino
-                              ? 'Ottimizzato'
-                              : 'Rating 98%',
-                            res: selectedThreeScenarios.optimal,
-                            tone: 'text-brand-300',
-                            border: 'border-brand-400/35 bg-brand-400/10',
-                          },
-                        ] as const
-                      ).map((sc) => (
-                        <div
-                          key={sc.label}
-                          className={`rounded-xl border p-3 text-center ${sc.border}`}
-                        >
-                          <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                            {sc.label}
-                          </div>
-                          <div className={`mt-1 font-mono text-lg font-extrabold ${sc.tone}`}>
-                            {formatEuro(sc.res.netProfit, true)}
-                          </div>
-                          <div className="mt-0.5 text-[10px] text-slate-500">{sc.sub}</div>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-2.5 text-xs text-slate-400">
-                      <span>
-                        Bankroll Exchange:{' '}
-                        <strong className="font-mono text-slate-200">
-                          {selectedThreeScenarios.realistic.estimatedBankroll === 0
-                            ? '0,00 € (Rischio Zero)'
-                            : formatEuro(selectedThreeScenarios.realistic.estimatedBankroll)}
-                        </strong>
-                      </span>
-                      <span>
-                        ROI:{' '}
-                        <strong className="font-mono text-emerald-300">
-                          {selectedThreeScenarios.realistic.roiPct === null
-                            ? '∞ (No Deposito)'
-                            : `+${selectedThreeScenarios.realistic.roiPct.toFixed(1)}%`}
-                        </strong>
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Avviso Break-Even Rating se critico */}
-                {selectedThreeScenarios.realistic.breakEvenLegRatingPct !== null &&
-                  selectedThreeScenarios.realistic.breakEvenLegRatingPct >= 93.5 && (
-                    <div className="flex items-start gap-2.5 rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
-                      <div>
-                        <span className="font-bold">Soglia Critica Rating: </span>
-                        il punto di pareggio di questo bonus è{' '}
-                        <span className="font-mono font-bold text-amber-200">
-                          {selectedThreeScenarios.realistic.breakEvenLegRatingPct.toFixed(2)}%
-                        </span>{' '}
-                        per singola gamba. Piazza scommesse SOLO con rating superiore (ideale ≥
-                        96.5%/gamba) utilizzando Multiodds / Oddsmatcher.
-                      </div>
-                    </div>
-                  )}
-
-                {/* Checklist Operativa Step-by-Step */}
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                      Procedura Operativa Step-by-Step
-                    </h2>
-                    <span className="font-mono text-xs text-slate-400">
-                      {completedStepsCount} di {totalStepsCount} completati
-                    </span>
-                  </div>
-
-                  {openedGuide.steps.map((step) => {
-                    const checked = activeProgress.completedStepIds.includes(step.id);
-                    const phase = PHASE_META[step.phase];
-                    return (
-                      <div
-                        key={step.id}
-                        className={`rounded-xl border p-4 transition-all ${
-                          checked
-                            ? 'border-emerald-500/35 bg-emerald-500/6'
-                            : 'border-slate-800/90 bg-slate-950/65 hover:border-slate-700/90'
-                        }`}
-                      >
-                        <div className="flex items-start gap-3">
-                          <button
-                            type="button"
-                            onClick={() => handleToggleStep(step.id)}
-                            aria-label={`Segna step ${step.stepNumber} come ${checked ? 'da fare' : 'completato'}`}
-                            className="mt-0.5 shrink-0 text-slate-400 transition-transform hover:scale-110 hover:text-emerald-300"
-                          >
-                            {checked ? (
-                              <CheckCircle2 className="h-5 w-5 text-emerald-400" />
-                            ) : (
-                              <Circle className="h-5 w-5 text-slate-600" />
-                            )}
-                          </button>
-
-                          <div className="min-w-0 flex-1 space-y-2">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="font-mono text-[11px] font-bold text-brand-300">
-                                  STEP {step.stepNumber}
-                                </span>
-                                <span
-                                  className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase ${phase.className}`}
-                                >
-                                  {phase.label}
-                                </span>
-                                <h3
-                                  className={`text-sm font-bold ${
-                                    checked ? 'text-slate-400 line-through' : 'text-white'
-                                  }`}
-                                >
-                                  {step.title}
-                                </h3>
-                              </div>
-
-                              {step.toolAction && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (step.toolAction!.target === 'external') {
-                                      openExternalSafe(step.toolAction!.url ?? openedGuide.url);
-                                    } else {
-                                      onOpenTool(step.toolAction!.target, {
-                                        mode: step.toolAction!.presetMode,
-                                      });
-                                    }
-                                  }}
-                                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-brand-400/40 bg-brand-400/15 px-3 py-1 text-[11px] font-semibold text-brand-200 transition-colors hover:bg-brand-400/25 hover:text-white"
-                                >
-                                  {step.toolAction.target === 'external' ? (
-                                    <ExternalLink className="h-3 w-3" />
-                                  ) : step.toolAction.target === 'multiodds' ? (
-                                    <Layers className="h-3 w-3" />
-                                  ) : step.toolAction.target === 'calculator' ? (
-                                    <Calculator className="h-3 w-3" />
-                                  ) : (
-                                    <SlidersHorizontal className="h-3 w-3" />
-                                  )}
-                                  <span>{step.toolAction.label}</span>
-                                </button>
-                              )}
-                            </div>
-
-                            {/* Azione Esatta */}
-                            <div className="rounded-lg border border-brand-400/25 bg-brand-500/8 px-3.5 py-2 text-xs font-semibold text-slate-100">
-                              {step.exactAction}
-                            </div>
-
-                            <p className="text-xs leading-relaxed text-slate-300">
-                              {step.description}
-                            </p>
-
-                            {step.mathTip && (
-                              <div className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/8 px-3 py-2 text-[11px] text-emerald-200">
-                                <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                                <span>{step.mathTip}</span>
-                              </div>
-                            )}
-
-                            {step.warning && (
-                              <div className="flex items-start gap-2 rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
-                                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" />
-                                <span>{step.warning}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* ============================================================
-                TAB 2: SIMULATORE PROFITTO INTERATTIVO
-               ============================================================ */}
-            {detailTab === 'simulator' && (
-              <div className="mx-auto max-w-6xl space-y-4 view-enter">
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-                  {/* Controlli Simulazione */}
-                  <div className="glass-card space-y-4 rounded-xl p-5 lg:col-span-5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wider text-brand-300">
-                        Parametri Simulazione
-                      </span>
-                      <button
-                        type="button"
-                        onClick={handleResetSimulator}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:border-brand-400/50 hover:text-white"
-                      >
-                        <RotateCcw className="h-3 w-3" />
-                        <span>Reset</span>
-                      </button>
-                    </div>
-
-                    {/* Deposito Scalabile */}
-                    <div>
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold text-slate-300">Deposito Iniziale (€)</span>
-                        <span className="font-mono text-xs font-bold text-brand-300">
-                          {openedGuide.simulationModel.scalableDeposit
-                            ? `Min ${openedGuide.simulationModel.minDeposit}€ – Max ${openedGuide.simulationModel.maxDeposit}€`
-                            : 'Importo fisso promo'}
-                        </span>
-                      </div>
-                      {openedGuide.simulationModel.scalableDeposit ? (
-                        <div className="mt-2 flex items-center gap-3">
-                          <input
-                            type="range"
-                            min={openedGuide.simulationModel.minDeposit}
-                            max={openedGuide.simulationModel.maxDeposit}
-                            step={5}
-                            value={simDeposit}
-                            onChange={(e) => setSimDeposit(Number(e.target.value))}
-                            className="pulse-slider flex-1"
-                          />
-                          <NumericInput
-                            value={simDeposit}
-                            onChange={setSimDeposit}
-                            min={openedGuide.simulationModel.minDeposit}
-                            max={openedGuide.simulationModel.maxDeposit}
-                            allowDecimal={false}
-                            className="w-20 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-right font-mono text-xs font-bold text-white focus:border-brand-400 focus:outline-none"
-                          />
-                        </div>
-                      ) : (
-                        <div className="mt-1.5 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-1.5 font-mono text-xs text-slate-300">
-                          {formatEuro(openedGuide.simulationModel.defaultDeposit)}
-                          {openedGuide.simulationModel.defaultDeposit === 0 &&
-                            ' — Nessun deposito richiesto (rischio zero)'}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Rollover variabile */}
-                    {openedGuide.simulationModel.variableRollover && (
-                      <div>
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-slate-300">
-                            {openedGuide.simulationModel.variableRollover.label}
-                          </span>
-                          <span className="font-mono font-bold text-brand-300">{simRollover}x</span>
-                        </div>
-                        <input
-                          type="range"
-                          min={openedGuide.simulationModel.variableRollover.min}
-                          max={openedGuide.simulationModel.variableRollover.max}
-                          step={1}
-                          value={simRollover}
-                          onChange={(e) => setSimRollover(Number(e.target.value))}
-                          className="pulse-slider mt-2 w-full"
-                        />
-                      </div>
-                    )}
-
-                    {/* Slider Rating Sport (se non è puro casinò) */}
-                    {!openedGuide.simulationModel.isPureCasino ? (
-                      <>
-                        <div>
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-semibold text-slate-300">
-                              Rating Medio Singole
-                            </span>
-                            <span className="font-mono font-bold text-emerald-300">
-                              {simSingleRating.toFixed(1)}%
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min={90}
-                            max={100}
-                            step={0.5}
-                            value={simSingleRating}
-                            onChange={(e) => setSimSingleRating(Number(e.target.value))}
-                            className="pulse-slider mt-2 w-full"
-                          />
-                        </div>
-
-                        <div>
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-semibold text-slate-300">
-                              Rating Medio per Gamba (Multiple)
-                            </span>
-                            <span className="font-mono font-bold text-emerald-300">
-                              {simLegRating.toFixed(1)}%
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min={90}
-                            max={100}
-                            step={0.5}
-                            value={simLegRating}
-                            onChange={(e) => setSimLegRating(Number(e.target.value))}
-                            className="pulse-slider mt-2 w-full"
-                          />
-                        </div>
-
-                        <div>
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-semibold text-slate-300">
-                              Commissione Exchange di Riferimento
-                            </span>
-                            <span className="font-mono font-bold text-slate-200">
-                              {simCommission.toFixed(1)}%
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min={0}
-                            max={6}
-                            step={0.5}
-                            value={simCommission}
-                            onChange={(e) => setSimCommission(Number(e.target.value))}
-                            className="pulse-slider mt-2 w-full"
-                          />
-                        </div>
-                      </>
-                    ) : (
-                      <div>
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-slate-300">
-                            Profilo Esecuzione Strategia Casinò 2-Fasi
-                          </span>
-                          <span className="font-mono font-bold text-fuchsia-300">
-                            {simCasinoScale <= 0.85
-                              ? 'Prudente'
-                              : simCasinoScale >= 1.12
-                              ? 'Ottimale'
-                              : 'Standard'}
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0.7}
-                          max={1.25}
-                          step={0.05}
-                          value={simCasinoScale}
-                          onChange={(e) => setSimCasinoScale(Number(e.target.value))}
-                          className="pulse-slider mt-2 w-full"
-                        />
-                        <p className="mt-1.5 text-[11px] text-slate-400">
-                          Modella l’efficienza nel passaggio Fase 1 (alta volatilità) → Fase 2
-                          (slot alto RTP) su simulazione Monte Carlo deterministica (2.500 prove).
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Risultati Simulazione Live */}
-                  <div className="glass-card flex flex-col justify-between space-y-4 rounded-xl p-5 lg:col-span-7">
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                      <div
-                        className={`rounded-xl border p-3.5 ${
-                          customSimulation.netProfit >= 0
-                            ? 'border-emerald-400/45 bg-emerald-500/12'
-                            : 'border-rose-500/50 bg-rose-500/12'
-                        }`}
-                      >
-                        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                          Profitto Netto Atteso
-                        </div>
-                        <AnimatedNumber
-                          value={customSimulation.netProfit}
-                          formatter={(v) => formatEuro(v, true)}
-                          className={`mt-1 block whitespace-nowrap font-mono text-xl font-extrabold ${
-                            customSimulation.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                          }`}
-                        />
-                        <div className="mt-0.5 text-[10px] text-slate-400">
-                          {customSimulation.isProfitable
-                            ? 'Operazione profittevole (+EV)'
-                            : 'ATTENZIONE: in perdita con questi parametri!'}
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3.5">
-                        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                          {customSimulation.hasBustOutUpside
-                            ? 'Worst-Case (Rollover 100%)'
-                            : 'Valore Estratto Lordo'}
-                        </div>
-                        <AnimatedNumber
-                          value={
-                            customSimulation.hasBustOutUpside
-                              ? customSimulation.worstCaseProfit
-                              : customSimulation.grossExtraction
-                          }
-                          formatter={(v) => formatEuro(v, true)}
-                          className="mt-1 block whitespace-nowrap font-mono text-xl font-extrabold text-brand-300"
-                        />
-                        <div className="mt-0.5 text-[10px] text-slate-500">
-                          {customSimulation.hasBustOutUpside
-                            ? 'Senza svuotamento Bust-Out'
-                            : `Costo qual.: -${formatEuro(customSimulation.qualifyingCost)}`}
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3.5">
-                        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                          Bankroll &amp; ROI
-                        </div>
-                        <div className="mt-1 whitespace-nowrap font-mono text-xl font-extrabold text-white">
-                          {customSimulation.estimatedBankroll === 0
-                            ? '0,00 €'
-                            : formatEuro(customSimulation.estimatedBankroll)}
-                        </div>
-                        <div className="mt-0.5 font-mono text-[10px] text-emerald-300">
-                          ROI:{' '}
-                          {customSimulation.roiPct === null
-                            ? '∞ (Rischio 0€)'
-                            : `${customSimulation.roiPct >= 0 ? '+' : ''}${customSimulation.roiPct.toFixed(1)}%`}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Tabella Breakdown Euro per Euro */}
-                    <div>
-                      <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                        Dettaglio Calcolo Voce per Voce
-                      </div>
-                      <div className="space-y-1.5">
-                        {customSimulation.breakdown.map((row, idx) => (
-                          <div
-                            key={`${row.label}_${idx}`}
-                            className="flex items-center justify-between gap-3 rounded-lg border border-slate-800/80 bg-slate-950/70 px-3.5 py-2"
-                          >
-                            <div className="min-w-0">
-                              <div className="truncate text-xs font-semibold text-slate-100">
-                                {row.label}
-                              </div>
-                              <div className="truncate text-[11px] text-slate-400">
-                                {row.detail}
-                              </div>
-                            </div>
-                            <span
-                              className={`shrink-0 font-mono text-xs font-bold ${
-                                row.delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                              }`}
-                            >
-                              {formatEuro(row.delta, true)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Confronto Barre 4 Scenari */}
-                    <div>
-                      <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                        Confronto Scenari (Deposito {formatEuro(simDeposit)})
-                      </div>
-                      {(() => {
-                        const bars = [
-                          {
-                            label: 'Conservativo',
-                            val: selectedThreeScenarios.conservative.netProfit,
-                            color: 'from-slate-500 to-slate-400',
-                          },
-                          {
-                            label: 'Realistico',
-                            val: selectedThreeScenarios.realistic.netProfit,
-                            color: 'from-emerald-600 to-emerald-400',
-                          },
-                          {
-                            label: 'Personalizzato',
-                            val: customSimulation.netProfit,
-                            color: 'from-brand-500 to-brand-300',
-                          },
-                          {
-                            label: 'Ottimale',
-                            val: selectedThreeScenarios.optimal.netProfit,
-                            color: 'from-sky-500 to-cyan-300',
-                          },
-                        ];
-                        const maxAbs = Math.max(10, ...bars.map((b) => Math.abs(b.val)));
-                        return (
-                          <div className="space-y-2">
-                            {bars.map((bar) => (
-                              <div key={bar.label} className="flex items-center gap-3 text-xs">
-                                <span className="w-24 shrink-0 text-[11px] font-semibold text-slate-400">
-                                  {bar.label}
-                                </span>
-                                <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-slate-900">
-                                  <div
-                                    style={{
-                                      width: `${Math.max(3, Math.min(100, (Math.abs(bar.val) / maxAbs) * 100))}%`,
-                                    }}
-                                    className={`h-full rounded-full bg-gradient-to-r transition-all duration-300 ${
-                                      bar.val < 0 ? 'from-rose-600 to-rose-400' : bar.color
-                                    }`}
-                                  />
-                                </div>
-                                <span
-                                  className={`w-20 shrink-0 text-right font-mono text-xs font-bold ${
-                                    bar.val >= 0 ? 'text-slate-100' : 'text-rose-400'
-                                  }`}
-                                >
-                                  {formatEuro(bar.val, true)}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ============================================================
-                TAB 3: TERMINI & CONDIZIONI APPROFONDITI
-               ============================================================ */}
-            {detailTab === 'terms' && (
-              <div className="mx-auto max-w-6xl space-y-4 view-enter">
-                <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2 lg:grid-cols-3">
-                  <div className="glass-card rounded-xl p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Struttura Bonus
-                    </div>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
-                      {openedGuide.termsSummary.bonusStructure}
-                    </p>
-                  </div>
-
-                  <div className="glass-card rounded-xl p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Requisiti di Sblocco / Rollover
-                    </div>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
-                      {openedGuide.termsSummary.rolloverRule}
-                    </p>
-                  </div>
-
-                  <div className="glass-card rounded-xl p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Quote Minime &amp; Tipologia Giocate
-                    </div>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
-                      {openedGuide.termsSummary.minOddsRule}
-                    </p>
-                  </div>
-
-                  <div className="glass-card rounded-xl p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Scadenze &amp; Finestra Temporale
-                    </div>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
-                      {openedGuide.termsSummary.validityRule}
-                    </p>
-                  </div>
-
-                  <div className="glass-card rounded-xl p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Cap di Conversione &amp; Limiti
-                    </div>
-                    <p className="mt-1.5 text-xs leading-relaxed text-slate-100">
-                      {openedGuide.termsSummary.conversionCap}
-                    </p>
-                  </div>
-
-                  <div className="glass-card rounded-xl p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Metodi di Pagamento Esclusi
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {openedGuide.termsSummary.excludedPayments.map((pm) => (
-                        <span
-                          key={pm}
-                          className="rounded-md border border-rose-500/35 bg-rose-500/12 px-2 py-0.5 text-[11px] font-semibold text-rose-200"
-                        >
-                          {pm}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Trappole T&C Critiche */}
-                <div className="rounded-xl border border-amber-400/35 bg-amber-500/8 p-4">
-                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-200">
-                    <AlertTriangle className="h-4 w-4 text-amber-300" />
-                    <span>Trappole T&amp;C da Evitare</span>
-                  </div>
-                  <ul className="mt-2.5 space-y-2">
-                    {openedGuide.termsSummary.criticalWarnings.map((w, i) => (
-                      <li
-                        key={i}
-                        className="flex items-start gap-2 text-xs leading-relaxed text-slate-200"
-                      >
-                        <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
-                        <span>{w}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="flex items-start gap-2.5 rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 text-[11px] text-slate-400">
-                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-brand-300" />
-                  <span>
-                    I termini promozionali ADM possono variare periodicamente (ultimo audit:{' '}
-                    <strong className="text-slate-200">{WELCOME_BONUSES_LAST_UPDATED}</strong>).
-                    Controlla sempre la nota informativa ufficiale su {openedGuide.bookmakerName}{' '}
-                    immediatamente prima di effettuare il primo deposito.
-                  </span>
-                </div>
-              </div>
-            )}
+          {/* Viewport con scorrimento verticale tra una pagina bonus e la successiva */}
+          <div
+            data-testid="bonus-detail-viewport"
+            className="relative min-h-0 flex-1 overflow-hidden"
+          >
+            <AnimatePresence initial={false} custom={navDirection}>
+              <BonusDetailSlide
+                key={openedGuide.id}
+                guide={openedGuide}
+                progress={activeProgress}
+                defaultExchangeCommission={defaultExchangeCommission}
+                copiedCode={copiedCode}
+                direction={navDirection}
+                prefersReducedMotion={Boolean(prefersReducedMotion)}
+                onCopyPromoCode={handleCopyPromoCode}
+                onToggleStep={handleToggleStep}
+                onOpenTool={onOpenTool}
+                onHeroBannerHiddenChange={handleHeroBannerHiddenChange}
+                onRegisterScrollEl={handleRegisterScrollEl}
+                onRealisticProfitChange={handleRealisticProfitChange}
+              />
+            </AnimatePresence>
           </div>
         </div>
       </div>

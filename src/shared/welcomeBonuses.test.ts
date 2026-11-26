@@ -106,4 +106,16 @@ describe('Bonus Benvenuto — Copertura catalogo e simulatore', () => {
     expect(simGood.breakEvenLegRatingPct!).toBeGreaterThan(94.5);
     expect(simGood.breakEvenLegRatingPct!).toBeLessThan(96.0);
   });
+
+  it('mantiene coerente il profitto SNAI tra catalogo e dettaglio con rollover variabile', () => {
+    const snai = WELCOME_BONUS_GUIDES.find((g) => g.sourceId === 'snai_it')!;
+    const catalogSim = simulateThreeScenarios(snai.simulationModel);
+    const detailSimDefault = simulateThreeScenarios(snai.simulationModel, {
+      deposit: snai.simulationModel.defaultDeposit,
+      rolloverMultiplier: snai.simulationModel.variableRollover?.defaultValue,
+    });
+    expect(detailSimDefault.realistic.netProfit).toBe(catalogSim.realistic.netProfit);
+    expect(detailSimDefault.conservative.netProfit).toBe(catalogSim.conservative.netProfit);
+    expect(detailSimDefault.optimal.netProfit).toBe(catalogSim.optimal.netProfit);
+  });
 });

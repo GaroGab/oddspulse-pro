@@ -361,13 +361,18 @@ export function simulateWelcomeBonus(
   let worstCaseDeltaAdjust = 0;
   let hasBustOutUpside = false;
   const breakdown: SimulationBreakdownItem[] = [];
+  const hasBustOutVariableRollover = model.components.some(
+    (c) => c.kind === 'rollover_bustout' && c.rolloverRange !== undefined
+  );
 
   for (const comp of model.components) {
     if (comp.kind === 'qualifying_bet') {
       const count = comp.count ?? 1;
       const mult =
         comp.scalesWithDeposit && comp.depositMultiplier !== undefined
-          ? overrides.rolloverMultiplier ?? comp.depositMultiplier
+          ? !hasBustOutVariableRollover && overrides.rolloverMultiplier !== undefined
+            ? overrides.rolloverMultiplier
+            : comp.depositMultiplier
           : comp.depositMultiplier ?? 1;
       const totalStake = comp.scalesWithDeposit
         ? deposit * mult * count
@@ -561,7 +566,9 @@ export function simulateWelcomeBonus(
           const count = comp.count ?? 1;
           const mult =
             comp.scalesWithDeposit && comp.depositMultiplier !== undefined
-              ? overrides.rolloverMultiplier ?? comp.depositMultiplier
+              ? !hasBustOutVariableRollover && overrides.rolloverMultiplier !== undefined
+                ? overrides.rolloverMultiplier
+                : comp.depositMultiplier
               : comp.depositMultiplier ?? 1;
           const st = comp.scalesWithDeposit ? deposit * mult * count : (comp.stake ?? deposit) * count;
           const cr = computeCombinedRating(comp.legs, r, r, comp.multiBoostPct ?? 0);
